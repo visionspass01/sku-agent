@@ -8,11 +8,9 @@
 
 from __future__ import annotations
 
-import hashlib
-import struct
 import time
-import zlib
 
+from app.agents_image.png import placeholder_png
 from app.agents_image.providers.image_provider import (
     ImageRequest,
     ImageResult,
@@ -21,43 +19,10 @@ from app.agents_image.providers.image_provider import (
 )
 
 
-def _png(width: int, height: int, rgb_rows: bytes) -> bytes:
-    """把 RGB 行数据（每行前加 filter=0）编码成 PNG。"""
-    def chunk(kind: bytes, data: bytes) -> bytes:
-        return (struct.pack(">I", len(data)) + kind + data
-                + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF))
-
-    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
-    stride = width * 3
-    raw = b"".join(b"\x00" + rgb_rows[y * stride:(y + 1) * stride] for y in range(height))
-    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
-            + chunk(b"IDAT", zlib.compress(raw, 6)) + chunk(b"IEND", b""))
-
-
 def _make_image(req: ImageRequest) -> bytes:
     seed_src = (req.init_images[0].sha256 if req.init_images else "") + req.prompt + \
                str(req.seed if req.seed is not None else 0)
-    digest = hashlib.sha256(seed_src.encode("utf-8")).digest()
-    base = (digest[0] % 96 + 80, digest[1] % 96 + 80, digest[2] % 96 + 80)
-    accent = (255 - base[0] // 2, 255 - base[1] // 2, 255 - base[2] // 2)
-
-    width, height = int(req.width), int(req.height)
-    rows = bytearray()
-    for y in range(height):
-        for x in range(width):
-            # 斜向条纹渐变：确定性、肉眼可辨
-            v = (x + y + digest[3]) % 64
-            r = min(255, base[0] + v)
-            g = min(255, base[1] + (v // 2))
-            b = min(255, base[2] + (v // 3))
-            # 左上角标记块（"FAKE" 的替身）：16x16 棋盘
-            mark = x < 96 and y < 96 and ((x // 12 + y // 12) % 2 == 0)
-            # 右下角边框
-            border = x > width - 24 or y > height - 24
-            if mark or border:
-                r, g, b = accent
-            rows += bytes((r, g, b))
-    return _png(width, height, bytes(rows))
+    return placeholder_png(seed_src, int(req.width), int(req.height))
 
 
 class FakeProvider:

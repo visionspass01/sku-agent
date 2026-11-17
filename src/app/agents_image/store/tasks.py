@@ -15,12 +15,16 @@ def create_task(session, *, task_id: str, username: str, department: str | None,
                 ref_asset_ids: list[str], compositions: list[str] | None = None,
                 scene_styles: list[str] | None = None, slots: list[dict] | None = None,
                 prompt_pack: list[dict] | None = None, request_id: str = "",
-                trace_id: str = "") -> ImageTask:
+                trace_id: str = "", batch_id: str = "", product_id: str | None = None,
+                ref_source: str = "mcp", attrs: dict | None = None) -> ImageTask:
     task = ImageTask(
-        task_id=task_id, request_id=request_id, username=username, department=department,
+        task_id=task_id, request_id=request_id, batch_id=batch_id,
+        username=username, department=department, product_id=product_id,
+        ref_source=ref_source,
         prompt=prompt, platform=platform, aspect=aspect, n=n,
         ref_asset_ids=list(ref_asset_ids or []),
         compositions=list(compositions or []), scene_styles=list(scene_styles or []),
+        attrs_json=dict(attrs or {}),
         slots_json=list(slots or []), prompt_pack_json=list(prompt_pack or []),
         status="queued", trace_id=trace_id,
     )
@@ -63,13 +67,15 @@ def mark_failed(session, task_id: str, *, code: str, detail: str = "") -> None:
 
 
 def list_tasks(session, *, username: str | None = None, limit: int = 50,
-               status: str | None = None) -> list[ImageTask]:
-    """按创建时间倒序列任务；`username=None` 表示不限（管理员视角）。"""
+               status: str | None = None, batch_id: str | None = None) -> list[ImageTask]:
+    """按创建时间倒序列任务；`username=None` 表示不限（管理员视角），`batch_id` 可选过滤。"""
     statement = select(ImageTask)
     if username:
         statement = statement.where(ImageTask.username == username)
     if status:
         statement = statement.where(ImageTask.status == status)
+    if batch_id:
+        statement = statement.where(ImageTask.batch_id == batch_id)
     statement = statement.order_by(ImageTask.created_at.desc()).limit(max(1, int(limit)))
     return list(session.execute(statement).scalars().all())
 

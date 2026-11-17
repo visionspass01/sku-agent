@@ -112,15 +112,20 @@ def auth_env(tmp_path, monkeypatch, _db, app_client):
     monkeypatch.setenv("IMAGE_IMAGES_ROOT", str(tmp_path / "images"))
     monkeypatch.setenv("IMAGE_CLEANUP_INTERVAL_MINUTES", "0")
     from app.agents_image.config import reset_image_settings
+    from app.agents_image.sources import product_source as ps
 
     reset_image_settings()
     reset_throttle()
+    ps.reset_catalogs()
+    ps._ensure_builtin()
     ensure_image_schema()
     with session_scope() as session:
         ensure_seed_users(session)
     yield app_client
     reset_image_settings()
     reset_throttle()
+    ps.reset_catalogs()
+    ps._ensure_builtin()
 
 
 def _login(client, username: str, password: str):
@@ -177,25 +182,26 @@ def test_bad_authorization_header_shapes(auth_env):
 
 
 def test_user_cannot_read_others_task(auth_env):
-    from tests.test_image_storage import make_png
-
     worker1 = {"Authorization": f"Bearer {_login(auth_env, 'worker1', 'hhw111').json()['token']}"}
     worker2 = {"Authorization": f"Bearer {_login(auth_env, 'worker2', 'hhw222').json()['token']}"}
     admin = {"Authorization": f"Bearer {_login(auth_env, 'admin', 'hhw123').json()['token']}"}
 
-    upload = auth_env.post("/api/image/upload", content=make_png(),
-                           headers={**worker1, "Content-Type": "image/png"})
-    assert upload.status_code == 201, upload.text
     created = auth_env.post("/api/image/tasks", headers=worker1, json={
-        "ref_asset_ids": [upload.json()["asset_id"]], "prompt": "白底主图", "n": 1,
+        "product_ids": ["P-1002"], "prompt": "白底主图", "n": 1,
     })
     assert created.status_code == 201, created.text
-    task_id = created.json()["task_id"]
+    task_id = created.json()["tasks"][0]["task_id"]
 
     assert auth_env.get(f"/api/image/tasks/{task_id}", headers=worker1).status_code == 200
     other = auth_env.get(f"/api/image/tasks/{task_id}", headers=worker2)
     assert other.status_code == 403 and other.json()["error_code"] == "IMG_FORBIDDEN"
     assert auth_env.get(f"/api/image/tasks/{task_id}", headers=admin).status_code == 200
+
+    # 参考图（中台商品图落地）同样按账号隔离
+    detail = auth_env.get(f"/api/image/tasks/{task_id}", headers=worker1).json()
+    ref_url = detail["refs"][0]["url"]
+    assert auth_env.get(ref_url, headers=worker1).status_code == 200
+    assert auth_env.get(ref_url, headers=worker2).status_code == 403
 
     # 任务列表按账号隔离
     mine = auth_env.get("/api/image/tasks", headers=worker2).json()["tasks"]

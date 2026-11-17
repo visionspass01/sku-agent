@@ -33,7 +33,8 @@ def validate(state: ImageTaskState, *, settings=None,
     max_total = (settings.max_total_images if settings else 9)
     refs = len(state.refs or [])
     if refs == 0:
-        raise_image("IMG_REFERENCE_REQUIRED", "图生图必须上传参考图（1–6 张）")
+        raise_image("IMG_REFERENCE_REQUIRED",
+                    "所选商品没有可用参考图（参考图只能来自中台商品图，1–6 张）")
     if refs > max_refs:
         raise_image("IMG_TOO_MANY_REFS", f"参考图最多 {max_refs} 张，收到 {refs} 张")
     if state.aspect not in ALLOWED_ASPECTS:

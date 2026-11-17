@@ -32,18 +32,18 @@ class ImageSettings(BaseSettings):
     vision_provider: str = "fake"     # fake | volcengine
     storage: str = "local"            # local | cos
     dispatcher: str = "local"         # local | scf
+    product_source: str = "fake"      # fake（开发/测试替身）| mcp（经 MCP 取中台数据）
 
-    # ---- 参考图与产出 ----
-    max_refs: int = Field(default=6, ge=1, le=6)
+    # ---- 商品与参考图（v6：用户只选商品，参考图来自中台）----
+    max_refs: int = Field(default=6, ge=1, le=6)          # 每任务合计参考图上限
+    max_batch_products: int = Field(default=5, ge=1, le=10)   # 一次批量最多选几个商品
     max_total_images: int = Field(default=9, ge=1, le=9)
-    upload_max_mb: int = Field(default=8, ge=1, le=50)
     concurrency: int = Field(default=8, ge=1, le=32)
     timeout_seconds: int = Field(default=60, ge=5, le=600)
 
     # ---- 本地存储与清理（测试环境图片保留 24h）----
     images_root: str = ""             # 空 = data/images；测试/多实例时显式覆盖
     retention_hours: int = Field(default=24, ge=1, le=24 * 30)
-    upload_retention_hours: int = Field(default=24, ge=1, le=24 * 30)
     cleanup_interval_minutes: int = Field(default=60, ge=0, le=24 * 60)  # 0 = 不启动后台清理
 
     # ---- 质量与成本 ----
@@ -73,8 +73,9 @@ class ImageSettings(BaseSettings):
         return pathlib.Path(self.images_root) if self.images_root else pathlib.Path(DATA_DIR) / "images"
 
     @property
-    def uploads_dir(self) -> pathlib.Path:
-        return self.images_dir / "uploads"
+    def refs_dir(self) -> pathlib.Path:
+        """中台商品图落地的参考图目录（与产出一同 24h 清理）。"""
+        return self.images_dir / "refs"
 
     @property
     def outputs_dir(self) -> pathlib.Path:
@@ -87,6 +88,10 @@ class ImageSettings(BaseSettings):
     @property
     def is_fake_provider(self) -> bool:
         return self.provider.strip().lower() in {"", "fake"}
+
+    @property
+    def is_fake_catalog(self) -> bool:
+        return self.product_source.strip().lower() in {"", "fake"}
 
     @property
     def secret_is_default(self) -> bool:

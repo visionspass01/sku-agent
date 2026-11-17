@@ -36,17 +36,20 @@ def image_db(tmp_path, monkeypatch, _db):
 
 def _seed_task(ref_count: int = 1, *, n: int = 1, status: str = "queued",
                created_at: dt.datetime | None = None) -> tuple[str, list[str]]:
+    from app.agents_image.sources.fake_catalog import _PRODUCTS
     from app.db.engine import session_scope
 
     with session_scope() as session:
         ref_ids = []
-        for _ in range(ref_count):
-            asset = asset_store.save_bytes(session, make_png(32, 32), kind="upload")
+        for index in range(ref_count):
+            asset = asset_store.save_bytes(session, make_png(64, 64), kind="ref",
+                                           product_id="P-1001")
             ref_ids.append(asset.asset_id)
         task = task_store.create_task(
             session, task_id=new_task_id(), username="anonymous", department=None,
             prompt="白底主图，正面全身像上装突出", platform="淘系", aspect="1:1", n=n,
-            ref_asset_ids=ref_ids,
+            ref_asset_ids=ref_ids, product_id="P-1001",
+            attrs=dict(_PRODUCTS["P-1001"]["attrs"]),
         )
         task.status = status
         task.created_at = created_at or dt.datetime.now()

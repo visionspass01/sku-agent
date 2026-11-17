@@ -15,7 +15,7 @@ from app.core.errors import ImageError
 
 
 def make_png(width: int = 32, height: int = 32) -> bytes:
-    """造一张合法 PNG（纯标准库），用于上传/存储测试。"""
+    """造一张合法 PNG（纯标准库），用于参考图/存储测试。"""
     def chunk(kind: bytes, data: bytes) -> bytes:
         return (struct.pack(">I", len(data)) + kind + data
                 + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF))
@@ -42,7 +42,7 @@ def test_registered_and_named():
 
 def test_put_get_roundtrip(store):
     png = make_png(40, 24)
-    ref = store.put(png, kind="upload", mime="image/png")
+    ref = store.put(png, kind="ref", mime="image/png")
     assert ref.mime == "image/png"
     assert (ref.width, ref.height) == (40, 24)
     assert ref.bytes == len(png)
@@ -52,15 +52,15 @@ def test_put_get_roundtrip(store):
 
 def test_same_content_dedupes_to_same_key(store):
     png = make_png()
-    first = store.put(png, kind="upload", mime="image/png")
-    second = store.put(png, kind="upload", mime="image/png")
+    first = store.put(png, kind="ref", mime="image/png")
+    second = store.put(png, kind="ref", mime="image/png")
     assert first.key == second.key
     assert first.sha256 == second.sha256
 
 
 def test_rejects_non_image(store):
     with pytest.raises(ImageError) as exc:
-        store.put(b"not an image", kind="upload", mime="text/plain")
+        store.put(b"not an image", kind="ref", mime="text/plain")
     assert exc.value.code == "IMG_REFERENCE_INVALID"
 
 

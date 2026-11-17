@@ -1,4 +1,7 @@
-"""资产表读写：落盘（storage 插件）+ 元数据入库 + 去重 + 读取。"""
+"""资产表读写：落盘（storage 插件）+ 元数据入库 + 去重 + 读取。
+
+v6 起资产只有三类：`ref`（中台商品图落地）、`output`（出图）、`thumb`（缩略图）。
+"""
 
 from __future__ import annotations
 
@@ -13,26 +16,27 @@ from app.core.errors import raise_image
 
 def save_bytes(session, data: bytes, *, kind: str, mime: str = "",
                task_id: str | None = None, slot: int = 0,
-               username: str = "anonymous", department: str | None = None) -> ImageAsset:
-    """落盘并入库；同一账号重复上传同一张图 → 复用已有资产行（不重复占盘）。"""
+               username: str = "anonymous", department: str | None = None,
+               product_id: str | None = None, source: str = "mcp") -> ImageAsset:
+    """落盘并入库；参考图按 `(sha256, 账号, 商品)` 去重，产出按 task 独立成行。"""
     storage = get_storage()
     ref = storage.put(data, kind=kind, mime=mime)
-    # 上传件按 (sha256, 账号) 去重：同一张图反复上传不重复占盘，但**不同账号各留各的行**
-    # ——否则 A 上传的图会被 B "命中"成 A 的资产，越权校验和 24h 清理都会串号。
-    # 产出必须按 task 独立成行，否则两次任务产出同样字节（同 prompt 同 seed）会被并成一条，
-    # 任务就查不到自己的图。
+    # ref 去重：同账号重复解析同一商品的同一张图，复用已有行（不重复占盘，也不跨账号串号）；
+    # output 必须按 task 独立成行，否则两次任务产出同样字节会被并成一条、任务查不到自己的图。
     existing = None
-    if kind == "upload":
+    if kind == "ref":
         existing = session.execute(
             select(ImageAsset).where(ImageAsset.sha256 == ref.sha256,
                                      ImageAsset.kind == kind,
-                                     ImageAsset.username == username)
+                                     ImageAsset.username == username,
+                                     ImageAsset.product_id == product_id)
         ).scalars().first()
     if existing is not None:
         return existing
     asset = ImageAsset(
         asset_id=uuid.uuid4().hex, task_id=task_id, slot=slot,
-        username=username, department=department, kind=kind, sha256=ref.sha256,
+        username=username, department=department, product_id=product_id,
+        kind=kind, source=source, sha256=ref.sha256,
         storage=ref.storage, key=ref.key, mime=ref.mime,
         width=ref.width, height=ref.height, bytes=ref.bytes,
     )
@@ -51,6 +55,30 @@ def list_outputs(session, task_id: str) -> list[ImageAsset]:
                                  ImageAsset.kind == "output").order_by(ImageAsset.slot)
     ).scalars().all()
     return list(rows)
+
+
+def list_refs(session, task_id: str) -> list[ImageAsset]:
+    """任务的参考图（v6 由中台商品图落下，`task_id` 在建任务时回填）。"""
+    rows = session.execute(
+        select(ImageAsset).where(ImageAsset.task_id == task_id,
+                                 ImageAsset.kind == "ref")
+    ).scalars().all()
+    return list(rows)
+
+
+def bind_refs_to_task(session, asset_ids: list[str], task_id: str) -> int:
+    """把解析出来的 ref 资产（建任务前落库、`task_id` 为空）挂到具体任务上。"""
+    bound = 0
+    for asset_id in asset_ids:
+        asset = session.get(ImageAsset, asset_id)
+        if asset is None or asset.kind != "ref":
+            continue
+        if asset.task_id in (None, ""):
+            asset.task_id = task_id
+            bound += 1
+    if bound:
+        session.flush()
+    return bound
 
 
 def read_asset_bytes(asset: ImageAsset) -> bytes:

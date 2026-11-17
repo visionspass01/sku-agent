@@ -25,3 +25,11 @@ def new_task_id(now: dt.datetime | None = None, *, max_tries: int = 8) -> str:
 
 def is_valid_task_id(value: str) -> bool:
     return bool(TASK_ID_RE.match(value or ""))
+
+
+def new_batch_id(now: dt.datetime | None = None) -> str:
+    """批量请求 id（一次请求选了多个商品）：与任务 ID 同规则同格式，只是不复用任务 id 命名空间。"""
+    return new_task_id(now)
+
+
+__all__ = ["TASK_ID_RE", "new_task_id", "new_batch_id", "is_valid_task_id"]

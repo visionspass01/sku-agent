@@ -13,7 +13,7 @@ from app.agents_image import registry as reg_mod
 from app.agents_image.config import get_image_settings
 from app.agents_image.generator import handler as generator_handler
 from app.agents_image.nodes import plan_slots, understand, validate
-from app.agents_image.state import ImageTaskState, RefImage
+from app.agents_image.state import ImageTaskState, RefImage, SlotPlan
 from app.agents_image.storage.image_storage import get_storage
 from app.agents_image.store import assets as asset_store
 from app.agents_image.store import tasks as task_store
@@ -58,13 +58,20 @@ async def execute_task(task_id: str) -> ImageTaskState:
             compositions=list(task.compositions or []),
             scene_styles=list(task.scene_styles or []),
             refs=[RefImage(asset_id=item["asset_id"], sha256=item["sha256"],
-                           mime=item["mime"]) for item in refs],
-            attrs={}, slots=plan_slots.build_slots(
-                ImageTaskState(count=task.n, aspect=task.aspect)),
+                           mime=item["mime"],
+                           product_id=str(task.product_id or ""),
+                           source=task.ref_source or "mcp") for item in refs],
+            attrs=dict(task.attrs_json or {}),
+            # 图位模板与 label 在建任务时已按中台 plan_policy 解析并落库：执行期不再回调中台
+            slots=[SlotPlan(**item) for item in (task.slots_json or [])]
+            or plan_slots.build_slots(ImageTaskState(count=task.n, aspect=task.aspect)),
         )
 
     state.touch("understand")
-    state.attrs = understand.understand(state)
+    if not state.attrs:
+        # 中台数据缺失只在"历史任务/异常任务"出现：退回启发式，但记一条 warning（可观测）
+        state.attrs = understand.understand(state)
+        state.warnings.append("IMG_SCHEMA_INVALID: 任务缺少中台商品属性，已退回启发式抽取")
     state.touch("compose_prompt")
     state.prompt_pack = plan_slots.compose(state, registry)
     state.touch("validate")

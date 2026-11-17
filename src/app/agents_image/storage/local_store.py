@@ -1,5 +1,6 @@
-"""本地存储：`data/images/{uploads,outputs,thumbnails}/<sha256>.<ext>`，**保留 24h** 后清理。
+"""本地存储：`data/images/{refs,outputs,thumbnails}/<sha256>.<ext>`，**保留 24h** 后清理。
 
+- `refs` = 中台商品图落地（v6 起用户不再上传，参考图一律来自中台）；
 - 文件名用内容 sha256：同内容天然去重，不会重复占盘；
 - 读取走鉴权接口（`/api/image/assets/{id}`），不把目录暴露出去；
 - `sweep_expired` 只删本地存储且过期的文件（COS 走桶生命周期，不在代码里扫桶）。
@@ -16,8 +17,8 @@ from app.core.artifacts import sha256_bytes
 from app.core.errors import raise_image
 
 _EXT = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}
-# kind → 子目录名（与 settings.*_dir 保持一致：uploads / outputs / thumbnails）
-_KIND_DIR = {"upload": "uploads", "output": "outputs", "thumb": "thumbnails"}
+# kind → 子目录名（与 settings.*_dir 保持一致：refs / outputs / thumbnails）
+_KIND_DIR = {"ref": "refs", "output": "outputs", "thumb": "thumbnails"}
 
 
 class LocalStore:
@@ -28,7 +29,7 @@ class LocalStore:
 
     # ------------------------------------------------------------ 路径
     def _dir(self, kind: str) -> pathlib.Path:
-        mapping = {"upload": self.settings.uploads_dir,
+        mapping = {"ref": self.settings.refs_dir,
                    "output": self.settings.outputs_dir,
                    "thumb": self.settings.thumbs_dir}
         directory = mapping.get(kind)
@@ -86,7 +87,7 @@ class LocalStore:
     def sweep_expired(self, hours: float) -> int:
         cutoff = dt.datetime.now() - dt.timedelta(hours=hours)
         removed = 0
-        for kind_dir in (self.settings.uploads_dir, self.settings.outputs_dir,
+        for kind_dir in (self.settings.refs_dir, self.settings.outputs_dir,
                          self.settings.thumbs_dir):
             if not kind_dir.exists():
                 continue

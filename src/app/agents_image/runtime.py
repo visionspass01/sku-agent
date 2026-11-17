@@ -22,6 +22,7 @@ def health_block() -> dict:
     return {
         "enabled": bool(settings.enabled),
         "provider": settings.provider,
+        "product_source": settings.product_source,
         "vision_provider": settings.vision_provider,
         "storage": settings.storage,
         "dispatcher": settings.dispatcher,
@@ -42,12 +43,10 @@ def sweep_local_files(now: dt.datetime | None = None) -> dict:
         return {"removed": 0, "skipped": "storage!=local"}
     reference = now or dt.datetime.now()
     removed = 0
-    for directory, hours in ((settings.uploads_dir, settings.upload_retention_hours),
-                             (settings.outputs_dir, settings.retention_hours),
-                             (settings.thumbs_dir, settings.retention_hours)):
+    for directory in (settings.refs_dir, settings.outputs_dir, settings.thumbs_dir):
         if not directory.exists():
             continue
-        cutoff = reference - dt.timedelta(hours=hours)
+        cutoff = reference - dt.timedelta(hours=settings.retention_hours)
         for path in directory.glob("*"):
             if not path.is_file():
                 continue
@@ -100,7 +99,7 @@ async def startup() -> None:
         logger.warning("IMAGE_AUTH_SECRET 仍是默认值，上线前务必改掉（当前令牌可被伪造）")
     health_registry.register("image", health_block)
     if settings.storage.strip().lower() == "local":
-        for directory in (settings.uploads_dir, settings.outputs_dir, settings.thumbs_dir):
+        for directory in (settings.refs_dir, settings.outputs_dir, settings.thumbs_dir):
             directory.mkdir(parents=True, exist_ok=True)
     global _cleanup_task
     if settings.cleanup_interval_minutes > 0:

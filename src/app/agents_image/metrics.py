@@ -17,9 +17,10 @@ _COUNTERS = {
 _IN_FLIGHT = 0
 
 
-def record_task_created() -> None:
+def record_task_created(count: int = 1) -> None:
+    """一次批量请求可能建多个任务（每个选中商品一个），按实际数量累加。"""
     with _LOCK:
-        _COUNTERS["tasks_created"] += 1
+        _COUNTERS["tasks_created"] += max(1, int(count or 1))
 
 
 def record_task_done(*, delivered: int, attempted: int) -> None:

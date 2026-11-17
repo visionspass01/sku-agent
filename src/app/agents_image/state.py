@@ -11,21 +11,28 @@ from pydantic import BaseModel, Field
 
 
 class RefImage(BaseModel):
+    """参考图（v6：一律来自中台商品图，用户不可上传）。"""
+
     asset_id: str
     sha256: str = ""
     mime: str = ""
     width: int = 0
     height: int = 0
     bytes: int = 0
+    source: str = "mcp"          # 只可能是 mcp
+    product_id: str = ""
+    image_id: str = ""
 
 
 class SlotPlan(BaseModel):
-    """一个图位的规划（D2 先只填 slot/role，D8 再补 composition/scene_style）。"""
+    """一个图位的规划：模板来自中台 `plan_policy`，label 在建任务时已解析好（执行期不回调中台）。"""
 
     slot: int = Field(ge=1, le=9)
     role: str = ""
     composition_id: str = ""
+    composition_label: str = ""
     scene_style_id: str = ""
+    scene_style_label: str = ""
     type: str = "generate"     # generate | layout | photo_required
 
 

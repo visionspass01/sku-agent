@@ -21,10 +21,12 @@ class ImageTask(Base):
 
     task_id: Mapped[str] = mapped_column(String(32), primary_key=True)
     request_id: Mapped[str] = mapped_column(String(64), default="")
+    batch_id: Mapped[str] = mapped_column(String(32), default="", index=True)
     username: Mapped[str] = mapped_column(String(32), default="anonymous", index=True)
     department: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
-    product_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    product_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    ref_source: Mapped[str] = mapped_column(String(16), default="mcp")   # mcp（唯一来源）
     ref_asset_ids: Mapped[list] = mapped_column(JSON, default=list)
     prompt: Mapped[str] = mapped_column(Text, default="")
     prompt_final: Mapped[str] = mapped_column(Text, default="")
@@ -33,6 +35,7 @@ class ImageTask(Base):
     n: Mapped[int] = mapped_column(Integer, default=1)
     compositions: Mapped[list] = mapped_column(JSON, default=list)
     scene_styles: Mapped[list] = mapped_column(JSON, default=list)
+    attrs_json: Mapped[dict] = mapped_column(JSON, default=dict)   # 中台商品身份锁定字段快照
     slots_json: Mapped[list] = mapped_column(JSON, default=list)
     prompt_pack_json: Mapped[list] = mapped_column(JSON, default=list)
 
@@ -43,7 +46,7 @@ class ImageTask(Base):
     cost_cny: Mapped[float] = mapped_column(default=0.0)
     error_code: Mapped[str] = mapped_column(String(48), default="")
     error_detail: Mapped[str] = mapped_column(Text, default="")
-    mcp_degraded: Mapped[bool] = mapped_column(default=False)
+    mcp_degraded: Mapped[bool] = mapped_column(default=False)   # 仅历史兼容，v6 起恒为 False
 
     trace_id: Mapped[str] = mapped_column(String(32), default="")
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=dt.datetime.now)
@@ -68,7 +71,9 @@ class ImageAsset(Base):
     slot: Mapped[int] = mapped_column(Integer, default=0)
     username: Mapped[str] = mapped_column(String(32), default="anonymous", index=True)
     department: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    kind: Mapped[str] = mapped_column(String(16), default="upload")   # upload | output | thumb
+    product_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    kind: Mapped[str] = mapped_column(String(16), default="ref")   # ref | output | thumb
+    source: Mapped[str] = mapped_column(String(16), default="mcp")  # mcp（v6：参考图只来自中台）
     sha256: Mapped[str] = mapped_column(String(64), index=True)
     storage: Mapped[str] = mapped_column(String(16), default="local")
     key: Mapped[str] = mapped_column(String(256), default="")
