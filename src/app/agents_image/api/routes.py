@@ -312,6 +312,7 @@ def get_task(task_id: str, request: Request) -> JSONResponse:
                 "product_id": task.product_id, "ref_source": task.ref_source,
                 "status": task.status, "username": task.username, "prompt": task.prompt,
                 "prompt_final": task.prompt_final, "aspect": task.aspect, "n": task.n,
+                "attempts": task.attempts,
                 "attempted_images": task.attempted_images,
                 "delivered_images": task.delivered_images,
                 "cost_cny": task.cost_cny, "error_code": task.error_code,
