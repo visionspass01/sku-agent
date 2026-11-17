@@ -515,6 +515,78 @@ class PlatformAgent(Base):
     rotated_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
 
 
+# ---------------------------------------------------------------- image 模块（生图 Agent）
+class ImageCatalog(Base):
+    """构图 / 场景风格 / 图位 / 平台规则的可热更新目录（Agent 不再硬编码）。"""
+
+    __tablename__ = "image_catalog"
+    __table_args__ = (Index("idx_image_catalog_kind", "kind", "enabled"),)
+
+    preset_id: Mapped[str] = mapped_column(String(48), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(24), default="composition")
+    code: Mapped[str] = mapped_column(String(48), default="")
+    label: Mapped[str] = mapped_column(String(64), default="")
+    desc: Mapped[str] = mapped_column(Text, default="")
+    attrs_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    enabled: Mapped[bool] = mapped_column(default=True)
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime)
+
+
+class ImageRequest(Base):
+    """一次批量生图请求的需求快照（`request_id` 幂等）。"""
+
+    __tablename__ = "image_request"
+
+    request_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    batch_id: Mapped[str] = mapped_column(String(32), default="", index=True)
+    product_ids: Mapped[list] = mapped_column(JSON, default=list)
+    compositions: Mapped[list] = mapped_column(JSON, default=list)
+    scene_styles: Mapped[list] = mapped_column(JSON, default=list)
+    count: Mapped[int] = mapped_column(Integer, default=1)
+    aspect: Mapped[str] = mapped_column(String(8), default="1:1")
+    platform: Mapped[str] = mapped_column(String(16), default="淘系")
+    requester: Mapped[str] = mapped_column(String(32), default="")
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime)
+
+
+class ImageResult(Base):
+    """结果元数据（**不含图片二进制**）；`(task_id, slot)` 唯一 → 回写天然幂等。"""
+
+    __tablename__ = "image_result"
+    __table_args__ = (
+        UniqueConstraint("task_id", "slot", name="uq_image_result_task_slot"),
+        Index("idx_image_result_product", "product_id", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    request_id: Mapped[str] = mapped_column(String(64), default="", index=True)
+    batch_id: Mapped[str] = mapped_column(String(32), default="")
+    product_id: Mapped[str] = mapped_column(String(64), default="", index=True)
+    task_id: Mapped[str] = mapped_column(String(32), default="", index=True)
+    slot: Mapped[int] = mapped_column(Integer, default=0)
+    role: Mapped[str] = mapped_column(String(32), default="")
+    prompt: Mapped[str] = mapped_column(Text, default="")
+    negative_prompt: Mapped[str] = mapped_column(Text, default="")
+    model: Mapped[str] = mapped_column(String(64), default="")
+    params_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    prompt_pack_json: Mapped[list] = mapped_column(JSON, default=list)
+    sha256: Mapped[str] = mapped_column(String(64), default="")
+    mime: Mapped[str] = mapped_column(String(32), default="image/png")
+    width: Mapped[int] = mapped_column(Integer, default=0)
+    height: Mapped[int] = mapped_column(Integer, default=0)
+    bytes: Mapped[int] = mapped_column(Integer, default=0)
+    storage: Mapped[str] = mapped_column(String(16), default="local")
+    storage_key: Mapped[str] = mapped_column(String(256), default="")
+    storage_url_expire_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    critic_score: Mapped[int] = mapped_column(Integer, default=0)
+    critic_issues: Mapped[list] = mapped_column(JSON, default=list)
+    cost_cny: Mapped[float] = mapped_column(Float, default=0.0)
+    elapsed_ms: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(16), default="done")
+    trace_id: Mapped[str] = mapped_column(String(32), default="")
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=dt.datetime.now)
+
+
 
 def make_engine(url: str | None = None):
     from sqlalchemy import event
@@ -641,7 +713,6 @@ def get_engine():
 def set_engine(engine) -> None:
     global _engine
     _engine = engine
-
 
 def session_scope(engine=None):
     from contextlib import contextmanager

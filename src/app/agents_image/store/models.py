@@ -47,6 +47,7 @@ class ImageTask(Base):
     error_code: Mapped[str] = mapped_column(String(48), default="")
     error_detail: Mapped[str] = mapped_column(Text, default="")
     mcp_degraded: Mapped[bool] = mapped_column(default=False)   # 仅历史兼容，v6 起恒为 False
+    backfill_status: Mapped[str] = mapped_column(String(16), default="pending")  # pending/sent/failed
 
     trace_id: Mapped[str] = mapped_column(String(32), default="")
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=dt.datetime.now)

@@ -54,11 +54,20 @@ def mark_running(session, task_id: str) -> None:
 
 def mark_done(session, task_id: str, *, attempted: int, delivered: int, cost: float,
               prompt_final: str = "", prompt_pack: list[dict] | None = None,
-              slots: list[dict] | None = None) -> None:
-    update_task(session, task_id, status="done", finished_at=dt.datetime.now(),
-                attempted_images=attempted, delivered_images=delivered, cost_cny=cost,
-                prompt_final=prompt_final,
-                prompt_pack_json=list(prompt_pack or []), slots_json=list(slots or []))
+              slots: list[dict] | None = None, backfill_status: str | None = None) -> None:
+    fields: dict = dict(status="done", finished_at=dt.datetime.now(),
+                        attempted_images=attempted, delivered_images=delivered, cost_cny=cost,
+                        prompt_final=prompt_final,
+                        prompt_pack_json=list(prompt_pack or []),
+                        slots_json=list(slots or []))
+    if backfill_status:
+        fields["backfill_status"] = backfill_status
+    update_task(session, task_id, **fields)
+
+
+def mark_backfill(session, task_id: str, status: str) -> None:
+    """回写中台的状态（pending/sent/failed）单独更新：图片交付与回写解耦。"""
+    update_task(session, task_id, backfill_status=status)
 
 
 def mark_failed(session, task_id: str, *, code: str, detail: str = "") -> None:

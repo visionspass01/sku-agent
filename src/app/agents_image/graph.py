@@ -53,6 +53,7 @@ async def execute_task(task_id: str) -> ImageTaskState:
         refs = _load_refs(session, list(task.ref_asset_ids or []))
         state = ImageTaskState(
             task_id=task.task_id, request_id=task.request_id, trace_id=task.trace_id,
+            batch_id=task.batch_id or "", product_id=task.product_id,
             username=task.username, department=task.department, prompt=task.prompt,
             platform=task.platform, aspect=task.aspect, count=task.n,
             compositions=list(task.compositions or []),
@@ -96,6 +97,7 @@ async def execute_task(task_id: str) -> ImageTaskState:
     attempted = 0
     delivered = 0
     cost = 0.0
+    outputs: list[dict] = []
     with session_scope() as session:
         task = task_store.get_task(session, task_id)
         if task is None or task.status == "canceled":
@@ -109,6 +111,15 @@ async def execute_task(task_id: str) -> ImageTaskState:
                     username=task.username, department=task.department,
                 )
                 delivered += 1 if asset is not None else 0
+                if asset is not None:
+                    # 只留纯数据：session 关闭后 ORM 对象不能再取属性（DetachedInstanceError）
+                    outputs.append({
+                        "slot": int(slot.get("slot") or 1),
+                        "mime": asset.mime or slot.get("mime") or "image/png",
+                        "sha256": asset.sha256, "width": asset.width,
+                        "height": asset.height, "bytes": asset.bytes,
+                        "storage": asset.storage, "key": asset.key,
+                    })
             cost += float(slot.get("cost_cny") or 0.0)
         task_store.mark_done(session, task_id, attempted=attempted, delivered=delivered,
                              cost=cost, prompt_final=state.prompt_final,
@@ -120,7 +131,72 @@ async def execute_task(task_id: str) -> ImageTaskState:
     state.delivered_images = delivered
     state.cost_cny = cost
     state.touch("aggregate", delivered=delivered)
+    await _backfill(state, outputs_by_slot=outputs)
     return state
+
+
+async def _backfill(state: ImageTaskState, *, outputs_by_slot: list[dict]) -> str:
+    """结果元数据回写中台（**不含图片二进制**）；失败只改 `backfill_status`，不影响已交付的图。"""
+    from app.agents_image.sources.product_source import get_catalog
+
+    payload = {
+        "request_id": state.request_id or state.task_id,
+        "batch_id": state.batch_id,
+        "product_id": state.product_id or "",
+        "task_id": state.task_id,
+        "platform": state.platform,
+        "aspect": state.aspect,
+        "count": state.count,
+        "compositions": list(state.compositions or []),
+        "scene_styles": list(state.scene_styles or []),
+        "prompt_final": state.prompt_final,
+        "prompt_pack": [draft.model_dump() for draft in state.prompt_pack],
+        "params": {"provider": get_image_settings().provider,
+                   "attempted": state.attempted_images, "delivered": state.delivered_images},
+        "requester": state.username,
+        "trace_id": state.trace_id,
+        "results": [{
+            "slot": item["slot"], "role": _role_of(state, item["slot"]),
+            "prompt": _prompt_of(state, item["slot"]),
+            "mime": item.get("mime") or "image/png",
+            "sha256": item.get("sha256", ""),
+            "width": item.get("width", 0),
+            "height": item.get("height", 0),
+            "bytes": item.get("bytes", 0),
+            "storage": item.get("storage", "local"),
+            "storage_key": item.get("key", ""),
+            "cost_cny": 0.0, "status": "done",
+        } for item in outputs_by_slot if item],
+    }
+    status = "failed"
+    try:
+        await get_catalog().save_result(payload)
+        status = "sent"
+    except Exception as exc:  # noqa: BLE001 —— 回写失败不能把已交付的图判死
+        logger.warning("回写中台失败：task=%s %s", state.task_id, exc)
+        state.warnings.append(f"IMG_BACKFILL_FAILED: 回写中台失败（{type(exc).__name__}），"
+                              "图片已生成，等待重放")
+    state.touch("backfill", status=status)
+    try:
+        with session_scope() as session:
+            task_store.mark_backfill(session, state.task_id, status)
+    except Exception:  # noqa: BLE001 —— 状态写失败不阻塞
+        logger.warning("回写状态落库失败：task=%s", state.task_id)
+    return status
+
+
+def _role_of(state: ImageTaskState, slot: int) -> str:
+    for item in state.slots or []:
+        if int(getattr(item, "slot", 0) or 0) == slot:
+            return getattr(item, "role", "") or ""
+    return ""
+
+
+def _prompt_of(state: ImageTaskState, slot: int) -> str:
+    for draft in state.prompt_pack or []:
+        if int(draft.slot or 0) == slot:
+            return draft.prompt
+    return ""
 
 
 __all__ = ["execute_task"]

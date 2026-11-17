@@ -64,7 +64,9 @@ class ImageSettings(BaseSettings):
     ark_image_model: str = ""
     ark_vision_model: str = ""
 
-    # ---- MCP（D6 起使用；先留默认值）----
+    # ---- 中台 / MCP（D6 起使用）----
+    platform_url: str = "http://127.0.0.1:8001"   # 数据中台（本仓库 data_platform，端口 8001）
+    platform_token: str = ""                      # 空 = 回落到 PLATFORM_INTERNAL_TOKEN
     mcp_timeout_seconds: float = Field(default=5.0, ge=0.5, le=60)
     mcp_retries: int = Field(default=2, ge=0, le=5)
 
@@ -92,6 +94,14 @@ class ImageSettings(BaseSettings):
     @property
     def is_fake_catalog(self) -> bool:
         return self.product_source.strip().lower() in {"", "fake"}
+
+    @property
+    def platform_auth_token(self) -> str:
+        """中台调用令牌：优先 `IMAGE_PLATFORM_TOKEN`，否则沿用中台的 `PLATFORM_INTERNAL_TOKEN`。"""
+        import os
+
+        return (self.platform_token or os.environ.get("PLATFORM_INTERNAL_TOKEN")
+                or "demo-internal-token")
 
     @property
     def secret_is_default(self) -> bool:

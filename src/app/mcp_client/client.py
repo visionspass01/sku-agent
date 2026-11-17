@@ -47,6 +47,8 @@ SERVER_MODULES = {
     "erp": "app.mcp_servers.erp_server",
     "pailitao": "app.mcp_servers.pailitao_server",
     "order": "app.mcp_servers.order_server",
+    # 生图 Agent 的图片中台（工具实现在 agents_image 内，MCP 客户端只按名字懒加载）
+    "image": "app.agents_image.mcp.product_image_server",
 }
 
 SERVER_TOOLS = {
@@ -60,10 +62,25 @@ SERVER_TOOLS = {
         "get_order_status", "list_orders", "get_logistics",
         "get_return_risk", "create_after_sales_proposal",
     ],
+    "image": [
+        "image_list_products", "image_get_product", "image_list_compositions",
+        "image_list_scene_styles", "image_get_plan_policy",
+        "image_get_platform_rules", "image_save_result",
+    ],
 }
 
-# direct 传输（测试）时按模块取工具表：ERP_TOOLS / PAILITAO_TOOLS / ORDER_TOOLS
-_TOOLS_ATTR = {"erp": "ERP_TOOLS", "pailitao": "PAILITAO_TOOLS", "order": "ORDER_TOOLS"}
+# direct 传输（测试）时按模块取工具表：ERP_TOOLS / PAILITAO_TOOLS / ORDER_TOOLS / IMAGE_TOOLS
+_TOOLS_ATTR = {"erp": "ERP_TOOLS", "pailitao": "PAILITAO_TOOLS", "order": "ORDER_TOOLS",
+               "image": "IMAGE_TOOLS"}
+
+
+def _server_enabled(server: str) -> bool:
+    """按模块开关裁剪 MCP server：image 只在 `IMAGE_ENABLED=true` 时才起会话（否则纯浪费）。"""
+    if server != "image":
+        return True
+    import os
+
+    return os.environ.get("IMAGE_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 class McpCallError(RuntimeError):
@@ -326,6 +343,8 @@ class MCPHub:
                 return
             pool = max(1, int(getattr(self._settings, "mcp_pool_size", 1) or 1))
             for server in SERVER_MODULES:
+                if not _server_enabled(server):
+                    continue
                 if self._settings.mcp_transport == "direct":
                     client = DirectMCPClient(server)
                 elif self._settings.mcp_transport == "stdio":

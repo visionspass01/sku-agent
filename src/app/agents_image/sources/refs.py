@@ -47,7 +47,11 @@ def _budget_per_product(total: int, count: int, max_refs: int) -> int:
     return max(1, max_refs // count)
 
 
-async def _fetch(image, *, timeout: float) -> bytes:
+async def _fetch(image, *, timeout: float, catalog=None) -> bytes:
+    """取商品图字节：优先用 catalog 自己的取图实现（mcp 实现会带中台令牌）。"""
+    fetcher = getattr(catalog, "fetch_image_bytes", None)
+    if fetcher is not None:
+        return await fetcher(image)
     if image.bytes_b64:
         try:
             return base64.b64decode(image.bytes_b64, validate=True)
@@ -93,7 +97,7 @@ async def resolve_refs(
                 break
             if not image.has_payload:
                 continue
-            raw = await _fetch(image, timeout=timeout_seconds)
+            raw = await _fetch(image, timeout=timeout_seconds, catalog=catalog)
             asset = asset_store.save_bytes(
                 session, raw, kind="ref", mime=image.mime or "image/png",
                 username=username, department=department,

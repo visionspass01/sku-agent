@@ -296,6 +296,7 @@ def get_task(task_id: str, request: Request) -> JSONResponse:
                 "delivered_images": task.delivered_images,
                 "cost_cny": task.cost_cny, "error_code": task.error_code,
                 "error_detail": task.error_detail, "trace_id": task.trace_id,
+                "backfill_status": task.backfill_status,
                 "slots": list(task.slots_json or []),
                 "refs": [asset_payload(asset) for asset in refs],
                 "assets": [asset_payload(asset) for asset in outputs],

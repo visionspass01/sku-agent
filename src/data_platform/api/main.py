@@ -22,6 +22,7 @@ from fastapi.responses import JSONResponse
 from data_platform.api import audit, quota
 from data_platform.api.agents import router as agents_router
 from data_platform.api.authz import resolve_principal
+from data_platform.api.image_routes import router as image_router
 from data_platform.api.routes import router
 from data_platform.config import ensure_dirs
 from data_platform.contract import CONTRACT_HEADER, CONTRACT_VERSION, DATA_VERSION_HEADER, compatible
@@ -55,7 +56,24 @@ def _audit_agent_id(request: Request, principal) -> str:  # noqa: ANN001
 async def lifespan(app: FastAPI):
     ensure_dirs()
     init_schema()
+    _seed_image_catalog()
     yield
+
+
+def _seed_image_catalog() -> None:
+    """启动时把 image 预设播种进 `image_catalog`（幂等），失败不影响中台启动。"""
+    try:
+        from data_platform import image_mock
+        from data_platform.db import session_scope
+
+        with session_scope() as session:
+            created = image_mock.seed_catalog_rows(session)
+        if created:
+            import logging
+
+            logging.getLogger("data_platform.image").info("image_catalog 播种 %d 条", created)
+    except Exception:  # noqa: BLE001 —— 播种失败只影响预设，不阻塞中台
+        pass
 
 
 app = FastAPI(title="轻量电商数据中台", version="0.1.0", lifespan=lifespan)
@@ -161,3 +179,11 @@ def _finish(request: Request, response, started: float, request_id: str, *, agen
 
 app.include_router(router)
 app.include_router(agents_router)
+app.include_router(image_router)
+# 商品图二进制走 Starlette 原生路由：不进 OpenAPI 契约模型（响应体是 PNG 而不是 JSON）
+from starlette.routing import Route as _StarletteRoute  # noqa: E402
+
+from data_platform.api.image_routes import binary_asset_endpoint as _binary_asset  # noqa: E402
+
+app.router.routes.append(_StarletteRoute(
+    "/api/v1/image/assets/{image_id}.png", _binary_asset, methods=["GET"]))

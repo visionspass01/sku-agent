@@ -61,7 +61,7 @@ def test_execute_task_runs_nodes_in_order(image_db):
     state = asyncio.run(execute_task(task_id))
     stages = [item["stage"] for item in state.timeline]
     assert stages[:4] == ["understand", "compose_prompt", "validate", "generate"]
-    assert stages[-1] == "aggregate"
+    assert stages[-2:] == ["aggregate", "backfill"]      # 回写中台在交付之后
     assert state.delivered_images == 2
     assert len(state.prompt_pack) == 2
     assert "must_not_change" in state.prompt_pack[0].preserve or state.prompt_pack[0].preserve
@@ -72,6 +72,7 @@ def test_execute_task_runs_nodes_in_order(image_db):
         task = task_store.get_task(session, task_id)
         assert task.status == "done"
         assert task.delivered_images == 2
+        assert task.backfill_status in {"sent", "failed"}   # fake catalog 回写成功 → sent
         outputs = asset_store.list_outputs(session, task_id)
         assert len(outputs) == 2
 

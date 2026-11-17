@@ -73,6 +73,8 @@ class CriticResult(BaseModel):
 class ImageTaskState(BaseModel):
     request_id: str = ""
     task_id: str = ""
+    batch_id: str = ""
+    product_id: str | None = None
     trace_id: str = ""
     username: str = "anonymous"
     department: str | None = None
