@@ -22,7 +22,7 @@ dev:  ## 启动 Agent（:8000，API + 看板）
 platform:  ## 启动数据中台（:8001）
 	PYTHONPATH=$(PYTHONPATH_SRC) $(PY) -m uvicorn data_platform.api.main:app --host 127.0.0.1 --port 8001 --reload
 
-test:  ## 跑全部离线测试（1061 passed / 1062 收集）
+test:  ## 跑全部离线测试（1075 passed / 1076 收集）
 	PYTHONPATH=$(PYTHONPATH_SRC) $(PY) -m pytest
 
 smoke:  ## 前端 DOM 冒烟（无需浏览器）

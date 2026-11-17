@@ -155,7 +155,7 @@ sku-agent-demo/
 │   ├── run_screening.py / run_patrol.py
 │   └── eval_accuracy.py / update_kb.py
 │
-├── tests/                               # 1061 条离线测试（111 个测试文件；FakeLLM / MockTransport / fakeredis）
+├── tests/                               # 1075 条离线测试（117 个测试文件；FakeLLM / MockTransport / fakeredis）
 ├── AGENTS.md                            # L2 工作区基线（角色/口径/取数纪律/记忆使用顺序）
 ├── data/kb/                             # 14 篇知识库（通用 10：9 篇 SOP + 1 篇历史案例；男装 2；女装 2）
 ├── data/artifacts/<会话>/               # L0 超限明细落地（jsonl，按 result_id 命名）
