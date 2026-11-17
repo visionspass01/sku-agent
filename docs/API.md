@@ -252,3 +252,50 @@ MCP server 现在**不碰任何数据库**：它们是「工具名 → `/api/v1/
 | 档案去重（同内容重复沉淀） | 内容指纹去重；有唯一索引后并发也不产生重复行 | `/api/health.analysis_dedupe`（`unique_index` / `duplicates` / `pending_merges`） |
 | 并发巡检筛查 | 抢 `lock:screen:<小时>`，抢不到就复用库里现成结果 | 巡检 summary 的 `screened_by_us` |
 | 多副本部署 | 进程内计数（限流/闸门）会按副本放大；SQLite checkpoint 单写者 | `/api/health.runtime.in_process_state`、`checkpoint.warning` |
+
+
+---
+
+## 生图 Agent（`/api/image/*`）
+
+约定：除 `/health` 外全部需要 `Authorization: Bearer <token>`（独立账号体系，与 SKU 的 `/api/auth` 无关）。
+错误统一返回 `{detail, error_code, trace_id, retryable}`，并在响应头带 `X-Error-Code` / `X-Trace-Id`（成功响应也带 `X-Trace-Id`）。
+
+### 用户侧
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/api/image/auth/login` | `{username,password}` → `{token,expires_in,user}`；失败限流 429 + `Retry-After` |
+| GET | `/api/image/auth/me` | 当前账号 |
+| POST | `/api/image/auth/logout` | 令牌立即失效（jti 黑名单） |
+| GET | `/api/image/products?keyword=&limit=` | 商品清单（转发 MCP `image_list_products`） |
+| GET | `/api/image/catalog?platform=&category=` | 构图 / 场景风格 / 图位策略 / 平台规则 |
+| POST | `/api/image/tasks` | `{request_id?, product_ids[1..5], prompt, compositions?, scene_styles?, n?, aspect?, platform?}` → `{batch_id, tasks[], slots, limits}` |
+| GET | `/api/image/tasks?batch_id=` | 我的任务列表（管理员 `?all=true`） |
+| GET | `/api/image/tasks/{id}` | 任务快照（含 `slots / prompt_pack / refs / assets / backfill_status`） |
+| GET | `/api/image/tasks/{id}/stream` | SSE：`snapshot → stage → asset → backfill → done` |
+| POST | `/api/image/tasks/{id}/cancel` | 取消（已结束 409 `IMG_TASK_CONFLICT`） |
+| GET | `/api/image/assets/{id}` | 取图（本人或管理员；本地存储走鉴权接口） |
+| GET | `/api/image/quota` | 我的配额（管理员返回 `unlimited`） |
+| GET | `/api/image/health` | 健康（provider / product_source / 并发 / 计数） |
+
+### 管理员侧
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/image/admin/metrics?granularity=day&count=30&username=` | 折线桶（含按账户细分）+ 5 张卡 + outbox 状态 |
+| GET | `/api/image/admin/tasks?username=&status=&limit=` | 全量任务 |
+| GET | `/api/image/admin/tasks/{id}` | 任务详情（Prompt 包、图位、回写状态） |
+| GET/POST/PUT | `/api/image/admin/users` · `/users/{username}` | 账号列表 / 新建 / 改密码或启停 |
+| GET/PUT | `/api/image/admin/quota` · `/quota/{username}` | 配额列表 / 授权（day/week/month/unlimited） |
+| POST | `/api/image/admin/replay-outbox` | 重放回写失败的 outbox |
+| POST | `/api/image/admin/reload` | 热加载 manifest / prompt |
+| POST | `/api/image/admin/reindex` | 重建 `data/kb_image` 索引 |
+
+### 错误码
+
+`IMG_UNAUTHORIZED`(401) · `IMG_FORBIDDEN`(403) · `IMG_LOGIN_THROTTLED`(429) · `IMG_INPUT_INVALID`(422) ·
+`IMG_BATCH_TOO_LARGE`(422) · `IMG_PRODUCT_NOT_FOUND`(404) · `IMG_REFERENCE_REQUIRED`(422，所选商品无可用图) ·
+`IMG_TOO_MANY_REFS`(422) · `IMG_QUOTA_EXCEEDED`(429) · `IMG_UPSTREAM_MCP_UNAVAILABLE`(503，中台不可用直接失败) ·
+`IMG_UPSTREAM_INVALID`(502) · `IMG_CONTENT_BLOCKED`(422) · `IMG_SCHEMA_INVALID`(422) · `IMG_CRITIC_FAILED`(422) ·
+`IMG_BACKFILL_FAILED`(502) · `IMG_TASK_NOT_FOUND`(404) · `IMG_TASK_CONFLICT`(409) · `IMG_TIMEOUT`(504)

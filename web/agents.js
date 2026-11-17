@@ -28,6 +28,14 @@ const AGENT_PAGES = [
     "tagline": "服装电商 SKU 库存监管与处置：自然语言问数 · 单 SKU 研判 · 补货草稿（超额人工确认）· 批量巡检 · SOP 引用溯源",
     "caps": ["工具面 + 证据链 result_id", "部门权限隔离", "人工确认闸门", "RAG 引用溯源", "多轮记忆"],
     "accounts": "admin / worker1（男装） / worker2（女装）"
+  },
+  {
+    "id": "image",
+    "name": "电商生图 Agent",
+    "page": "/image.html",
+    "tagline": "图生图批量出图：批量选中商品 · 中台给构图/场景/规则 · 9 图位规划 · Critic+Reflexion · 结果回写中台",
+    "caps": ["参数全部来自中台（MCP）", "9 图位 + 五槽位 Prompt", "Critic 评审与反思重写", "配额与使用量看板", "图片本地 24h · 结果回写"],
+    "accounts": "admin / hhw123 · worker1 / hhw111 · worker2 / hhw222"
   }
 ];
 

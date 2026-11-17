@@ -1,0 +1,222 @@
+/* 生图 Agent 页面级样式（复用 /style.css 的变量与通用组件） */
+
+.image-quota-row {
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.image-table-wrap {
+  max-height: 320px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin: 10px 0 14px;
+}
+
+.image-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.image-table th,
+.image-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid rgba(34, 48, 66, 0.6);
+  text-align: left;
+  vertical-align: middle;
+}
+
+.image-table thead th {
+  position: sticky;
+  top: 0;
+  background: var(--panel);
+  color: var(--muted);
+  font-weight: 600;
+  z-index: 1;
+}
+
+.image-table tbody tr:hover {
+  background: rgba(56, 189, 248, 0.06);
+}
+
+.image-table tbody tr.selected {
+  background: rgba(56, 189, 248, 0.12);
+}
+
+.image-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px 14px;
+  margin: 6px 0 12px;
+}
+
+.image-form-grid label,
+.image-prompt-label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.image-prompt-label {
+  margin-bottom: 12px;
+}
+
+.image-progress {
+  margin-top: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.progress-item {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.progress-item .pi-task {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: #dbeafe;
+}
+
+.progress-item .pi-status {
+  font-weight: 600;
+}
+
+.progress-item.done .pi-status { color: var(--ok); }
+.progress-item.failed .pi-status { color: var(--bad); }
+.progress-item.running .pi-status { color: var(--accent); }
+
+.image-gallery {
+  margin-top: 18px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 14px;
+}
+
+.gallery-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--panel);
+  display: flex;
+  flex-direction: column;
+}
+
+.gallery-card .gc-head {
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--muted);
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.gallery-card img {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  object-fit: contain;
+  background: #0f1720;
+  display: block;
+}
+
+.gallery-card .gc-foot {
+  padding: 8px 10px;
+  font-size: 11.5px;
+  color: var(--muted);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.gallery-card .gc-foot code {
+  word-break: break-all;
+  font-size: 11px;
+}
+
+.gallery-refs {
+  display: flex;
+  gap: 6px;
+  padding: 6px 10px;
+  border-top: 1px solid rgba(34, 48, 66, 0.6);
+}
+
+.gallery-refs img {
+  width: 40px;
+  height: 40px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  object-fit: cover;
+}
+
+.image-admin-controls {
+  margin-bottom: 12px;
+}
+
+.image-admin-grid {
+  display: grid;
+  grid-template-columns: 1.2fr 1fr;
+  gap: 16px;
+  margin-top: 16px;
+}
+
+.image-admin-grid h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+@media (max-width: 900px) {
+  .image-admin-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* SVG 折线图（手绘，无外部库，CSP 兼容） */
+.image-chart-box {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px 4px;
+  background: var(--panel);
+  position: relative;
+}
+
+.image-chart-box svg {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.image-chart-tip {
+  position: absolute;
+  pointer-events: none;
+  background: rgba(10, 16, 24, 0.96);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text);
+  white-space: pre;
+  transform: translate(-50%, -115%);
+  z-index: 5;
+}
+
+.image-chart-tip[hidden] {
+  display: none;
+}
+
+.image-chart-empty {
+  color: var(--muted);
+  font-size: 12.5px;
+  padding: 18px 4px;
+}

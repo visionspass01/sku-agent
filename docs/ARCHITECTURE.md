@@ -691,3 +691,36 @@ DeepSeek 的上下文缓存是**前缀命中**：请求前若干 token 与上次
 **成本量级（按假设价，需用真实账单校准）**：视觉反思单图约 2.8k input tokens（2K/4K 图都会被压到 2048 再切块），
 按 $2.5/M 计约 **$0.007/张**，相对生成成本（2K 约 $0.06、4K 约 $0.19）占 3%~4%；
 因此**省钱的关键是分辨率阶梯**（1K 草稿跑反思，通过后再出 2K/4K 终稿），而不是砍反思。
+
+
+---
+
+## 生图 Agent 架构（第二个 Agent，插件化）
+
+```
+/image.html ──(Bearer)──> 网关（api/routes.py：鉴权 + 配额预检 + 按中台取图 + 错误契约）
+   │  POST /tasks {product_ids[], prompt, ...}
+   ▼
+  取数接缝 sources/PlatformCatalog（fake 替身 ｜ mcp 经 MCP 工具调中台）
+   │  商品 / 参考图 / 构图 / 场景风格 / 9 图位策略 / 平台规则 / 结果回写
+   ▼
+  编排 graph.execute_task（无状态，状态全在 DB）
+   │  understand → compose_prompt → retrieve(RAG) → validate
+   │  → generate → critic →（reflexion → generate → critic)*
+   │  → aggregate → backfill（回写中台，失败进 outbox）
+   ▼
+  插件三件套
+   ├─ ImageProvider：fake（占位图，零成本）｜volcengine_seedream（后置）
+   ├─ ImageStorage：local（24h 清理）｜cos（后置）
+   └─ TaskDispatcher：local（进程内 asyncio）｜scf（后置，同一份 generator 代码）
+```
+
+要点：
+
+- **参数只有中台一份真相**：构图/场景/图位/平台规则/商品数据全部来自 `PlatformCatalog`，Agent 不留默认预设；中台不可用直接 503（`IMG_UPSTREAM_MCP_UNAVAILABLE`），不静默降级。
+- **任务无状态**：任务/资产/配额/使用量/记忆/outbox 全在 DB，任意实例可接手；重启按 `list_recoverable` 续跑。
+- **9 图位只出必要图**：`type=generate` 才进出图通道，尺码对照/包装清单/售后排版只登记规划。
+- **Critic-Reflexion**：规则层四检查（身份锁定/禁用词/比例规格/图内文字），失败只重写对应图位 Prompt，最多 `IMAGE_REFLEXION_MAX_ROUNDS` 轮，超限归档失败签名进 `image_memory`。
+- **回写解耦**：图片交付与结果回写分开，回写失败只改 `backfill_status` 并进 outbox，
+  由 `/api/image/admin/replay-outbox` 或定时任务重放，已交付的图不受影响。
+- **前端可观测**：手绘 SVG 折线图（月/周/日/小时 × 近 30 桶 + 按账户细分），零外部依赖、CSP 兼容。

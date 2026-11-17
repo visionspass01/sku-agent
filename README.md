@@ -433,3 +433,49 @@ Redis、Qdrant、Embedding、数据中台、模型五类依赖均有降级阶梯
 - 未接入任何第三方生产系统；DeepSeek 与腾讯云 TokenHub 仅在配置自有 Key 时调用，仓库不含任何密钥。
 
 本项目基于 [MIT](./LICENSE) 许可协议开源。
+
+
+---
+
+## 第二个 Agent：电商生图 Agent（`/image.html`）
+
+同一仓库里的第二个演示 Agent（与 SKU 监管 Agent 并行、互不影响）：**服装电商图生图**。
+
+- 入口：`/agents.html` → 「电商生图 Agent」卡片 → `/image.html`（独立登录态）
+- 输入：用户在**中台商品清单里批量选中商品（1–5 个）** + 自然语言需求；参考图由 Agent 经 MCP 从所选商品取，**用户不能上传图片**
+- 参数：构图 / 场景风格 / 9 图位策略 / 张数默认 / 平台规则 / 商品数据 **全部来自数据中台（经 MCP）**，中台不可用直接 503 让人重试（不静默降级）
+- 执行：9 图位规划 → 五槽位 Prompt（七条铁律）→ RAG 写法片段 → 本地生图插件（`IMAGE_PROVIDER=fake` 出占位图；真实 Seedream 后置）→ Critic 评审 → Reflexion 重写问题图位
+- 产出：图片存本地 24h（或 COS，后置）；**结果元数据（不含图片）回写中台**，失败进 outbox 可重放
+- 台账：独立账号（`admin / hhw123`、`worker1 / hhw111`、`worker2 / hhw222`）、配额（按交付张数）、使用量、管理员面板（SVG 折线图 + 5 张卡）
+
+### 快速体验（全部离线，无需 Key）
+
+```bash
+# 1) 数据中台（image 模块：商品/预设/结果表）
+PYTHONPATH=src uvicorn data_platform.api.main:app --port 8001
+
+# 2) Agent（同时挂 SKU 与生图两个 Agent）
+PYTHONPATH=src uvicorn app.main:app --port 8000
+# 浏览器打开 http://127.0.0.1:8000/image.html ，用 admin / hhw123 登录
+```
+
+`.env` 里把 `IMAGE_PRODUCT_SOURCE=fake`（默认，本地替身）改成 `mcp` 即走真实中台接口。
+
+### 接口一览
+
+| 分类 | 接口 |
+|---|---|
+| 账号 | `POST /api/image/auth/login` · `GET /me` · `POST /logout` · `POST /verify` |
+| 参数 | `GET /api/image/products` · `GET /api/image/catalog`（均转发中台） |
+| 任务 | `POST /api/image/tasks`（批量选商品）· `GET /tasks` · `GET /tasks/{id}` · `GET /tasks/{id}/stream`(SSE) · `POST /tasks/{id}/cancel` |
+| 我的 | `GET /api/image/assets/{id}` · `GET /api/image/quota` · `GET /api/image/health` |
+| 管理员 | `/api/image/admin/{metrics,tasks,tasks/{id},users,quota,reload,reindex,replay-outbox}` |
+
+### 离线评测与合规校验
+
+```bash
+PYTHONPATH=src python scripts/eval_image.py        # 召回 / Prompt 合规 / 首轮通过 / 时延
+PYTHONPATH=src python scripts/bench_image.py       # 并发压测（零成本）
+PYTHONPATH=src python scripts/check_image.py 主图.png --platform 淘系 [--fix out.png]
+```
+`check_image.py` 的像素级校验对 PNG **零依赖**（自带解码），JPEG/WebP 才需要可选的 Pillow。

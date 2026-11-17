@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<!--
+  电商生图 Agent 演示页（/image.html）
+  结构约定：一页一 Agent —— 本页只加载 /image.js（+ 管理员加载 /image_admin.js），
+  不依赖 app.js；登录态与 SKU 页互不影响（独立 token key：image_agent_token）。
+  参数来源：商品清单 / 构图 / 场景风格 / 张数 / 平台规则 全部来自后端 → MCP → 数据中台。
+  用户只能「批量选中商品 + 写需求」，没有上传参考图的入口。
+-->
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>电商生图 Agent · 图生图</title>
+  <link rel="stylesheet" href="/style.css" />
+  <link rel="stylesheet" href="/image.css" />
+</head>
+<body data-page="image" data-ui-build="image-v1">
+  <header>
+    <div class="brand">
+      <h1>电商生图 Agent</h1>
+      <p>批量选中商品 · 自然语言需求 · 中台给参数 · 图生图 · 结果回写中台</p>
+    </div>
+    <div class="header-right">
+      <a class="doc-link" href="/agents.html">← Agent 目录</a>
+      <div class="badges" id="image-badges">
+        <span class="badge" id="badge-service">服务 <b id="badge-service-value">检测中…</b></span>
+        <span class="badge" id="badge-products">数据源 <b id="badge-products-value">-</b></span>
+        <span class="badge">产线 <b id="badge-provider">-</b></span>
+        <span class="badge" id="badge-user">账号 <b id="badge-user-value">未登录</b></span>
+      </div>
+      <button class="mini-btn secondary" id="btn-logout" hidden>退出</button>
+    </div>
+  </header>
+
+  <main>
+    <div class="scope-hint" id="image-hint">
+      登录后在下方商品清单里勾选商品（最多 5 个），选择构图与场景风格（可选，走中台默认），
+      填写需求即可批量出图。参考图由中台商品图提供，本页不提供上传。
+    </div>
+
+    <section class="panel" id="login-panel">
+      <h2><span class="dot"></span>登录</h2>
+      <div class="row">
+        <input id="login-username" placeholder="账号（admin / worker1 / worker2）" autocomplete="username" />
+        <input id="login-password" type="password" placeholder="密码" autocomplete="current-password" />
+        <button id="btn-login">登录</button>
+      </div>
+      <p class="muted" id="login-hint">
+        演示账号：admin / hhw123（管理员）、worker1 / hhw111（男装）、worker2 / hhw222（女装）
+      </p>
+    </section>
+
+    <section class="panel" id="workbench" hidden>
+      <h2><span class="dot"></span>工作台</h2>
+
+      <div class="row image-quota-row">
+        <span class="tag gray" id="quota-badge">配额加载中…</span>
+        <span class="tag gray" id="batch-badge">batch: -</span>
+      </div>
+
+      <div class="row">
+        <input id="product-keyword" placeholder="搜索商品（标题 / 商品号）" />
+        <button class="mini-btn secondary" id="btn-products">刷新商品</button>
+      </div>
+      <div class="image-table-wrap">
+        <table class="image-table" id="product-table">
+          <thead>
+            <tr><th style="width:34px"></th><th>商品</th><th>类目</th><th>商品号</th><th>参考图</th></tr>
+          </thead>
+          <tbody id="product-rows">
+            <tr><td colspan="5" class="muted">加载中…</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="image-form-grid">
+        <label>构图（中台）
+          <select id="composition-select"></select>
+        </label>
+        <label>场景风格（中台）
+          <select id="scene-style-select"></select>
+        </label>
+        <label>张数
+          <input id="count-input" type="number" min="1" max="9" value="6" />
+        </label>
+        <label>比例
+          <select id="aspect-select"></select>
+        </label>
+      </div>
+
+      <label class="image-prompt-label">需求描述
+        <textarea id="prompt-input" rows="3" placeholder="例如：白底主图，正面全身像上装突出，影棚正式风"></textarea>
+      </label>
+
+      <div class="row">
+        <button id="btn-create">开始生成</button>
+        <button class="mini-btn secondary" id="btn-clear">清空选择</button>
+        <span class="muted" id="create-hint"></span>
+      </div>
+
+      <div class="image-progress" id="progress"></div>
+      <div class="image-gallery" id="gallery"></div>
+    </section>
+
+    <section class="panel" id="admin-panel" hidden>
+      <h2><span class="dot"></span>管理面板</h2>
+      <p class="muted">折线图：全员 / 单账户 × 月 / 周 / 日 / 小时 × 近 30 个周期，鼠标悬停看账户细分。</p>
+      <div class="row image-admin-controls">
+        <select id="metric-granularity">
+          <option value="day">按日</option>
+          <option value="hour">按小时</option>
+          <option value="week">按周</option>
+          <option value="month">按月</option>
+        </select>
+        <input id="metric-username" placeholder="账户（留空 = 全员）" />
+        <button class="mini-btn secondary" id="btn-metrics">刷新指标</button>
+        <button class="mini-btn secondary" id="btn-replay-outbox">重放回写</button>
+      </div>
+      <div class="grid-cards" id="metric-cards"></div>
+      <div id="image-chart"></div>
+      <div class="image-admin-grid">
+        <div>
+          <h3>任务</h3>
+          <div class="image-table-wrap">
+            <table class="image-table">
+              <thead><tr><th>任务</th><th>账号</th><th>状态</th><th>尝试</th><th>交付</th><th>回写</th></tr></thead>
+              <tbody id="admin-task-rows"><tr><td colspan="6" class="muted">—</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+        <div>
+          <h3>账号与配额</h3>
+          <div class="image-table-wrap">
+            <table class="image-table">
+              <thead><tr><th>账号</th><th>角色</th><th>周期</th><th>上限</th><th>已用</th></tr></thead>
+              <tbody id="admin-quota-rows"><tr><td colspan="5" class="muted">—</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/image.js"></script>
+  <script src="/image_admin.js"></script>
+</body>
+</html>

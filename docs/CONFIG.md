@@ -173,3 +173,38 @@
 | `LOG_LEVEL` | `INFO` | 日志级别 |
 | `TIMEZONE` | `Asia/Shanghai` | 定时任务与「今天」口径所用时区 |
 | `PLATFORM_CACHE_TTL` / `PLATFORM_CACHE_JITTER` / `PLATFORM_API_PORT` | `300` / `0.2` / `8001` | **中台侧**的参数（`src/data_platform/config.py`）：读接口缓存 TTL、TTL 抖动比例、监听端口 |
+
+
+---
+
+## 生图 Agent 配置（`IMAGE_*`）
+
+生图 Agent 有独立 settings（`app.agents_image.config.ImageSettings`），env 前缀 `IMAGE_`，与 SKU 配置同读仓库根 `.env`。
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `IMAGE_ENABLED` | `true` | 总开关（false 时不挂 `/api/image/*`、不建表、不起 MCP 会话） |
+| `IMAGE_PROVIDER` | `fake` | 生图后端：`fake`（占位图，零成本）/ `volcengine`（后置） |
+| `IMAGE_PRODUCT_SOURCE` | `fake` | 参数与商品来源：`fake`（离线替身）/ `mcp`（经 MCP 取中台数据） |
+| `IMAGE_STORAGE` | `local` | 图片存储：`local`（24h 清理）/ `cos`（后置） |
+| `IMAGE_DISPATCHER` | `local` | 任务执行：`local`（进程内）/ `scf`（后置） |
+| `IMAGE_MAX_REFS` | `6` | 每任务参考图合计上限（来自中台商品图） |
+| `IMAGE_MAX_BATCH_PRODUCTS` | `5` | 一次批量最多选几个商品 |
+| `IMAGE_MAX_TOTAL_IMAGES` | `9` | 单任务最多出图张数 |
+| `IMAGE_CONCURRENCY` | `8` | 本地调度并发 |
+| `IMAGE_TIMEOUT_SECONDS` | `60` | 单任务超时 |
+| `IMAGE_RETENTION_HOURS` | `24` | 本地图片（refs + outputs）保留时长 |
+| `IMAGE_CLEANUP_INTERVAL_MINUTES` | `60` | 清理间隔（0 = 不启动后台清理） |
+| `IMAGE_AUTH_SECRET` | 仓库默认值 | 令牌签名密钥，**上线必须换**（启动会告警） |
+| `IMAGE_TOKEN_TTL_HOURS` | `8` | 令牌有效期 |
+| `IMAGE_LOGIN_MAX_ATTEMPTS` / `IMAGE_LOGIN_WINDOW_SECONDS` | `8` / `300` | 登录限流 |
+| `IMAGE_DEFAULT_QUOTA_PERIOD` / `IMAGE_DEFAULT_QUOTA_IMAGES` | `day` / `50` | 新账号默认配额 |
+| `IMAGE_CRITIC_PASS_SCORE` | `75` | Critic 通过线 |
+| `IMAGE_REFLEXION_MAX_ROUNDS` | `2` | 反思重写轮数上限 |
+| `IMAGE_RAG_ENABLED` / `IMAGE_RAG_TOP_K` | `true` / `2` | 本地知识库召回开关与条数 |
+| `IMAGE_MCP_TIMEOUT_SECONDS` / `IMAGE_MCP_RETRIES` | `5` / `2` | MCP 调用超时与重试（超限直接 503，不降级） |
+| `IMAGE_PLATFORM_URL` / `IMAGE_PLATFORM_TOKEN` | `http://127.0.0.1:8001` / 空 | 中台地址与令牌（令牌留空沿用 `PLATFORM_INTERNAL_TOKEN`） |
+| `IMAGE_COST_PER_IMAGE_CNY` / `IMAGE_COST_BUDGET_CNY` | `0` / `0.5` | 成本口径（fake 为 0） |
+| `ARK_API_KEY` / `ARK_IMAGE_MODEL` / `ARK_VISION_MODEL` | 空 | 火山方舟（后期验收门再填） |
+
+数据中台侧（`data_platform`）：`PLATFORM_DB_URL`、`PLATFORM_INTERNAL_TOKEN`、`PLATFORM_API_PORT`（默认 8001）。

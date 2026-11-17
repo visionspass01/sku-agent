@@ -315,3 +315,24 @@ sequenceDiagram
 > **匿名只读的范围**：上表标"否"的读接口不登录也能看，匿名按"全部门只读"渲染（登录账号按部门过滤），
 > `run_id` 是 uuid、不可枚举；写操作与 `/api/patrol/recent`、`/api/chat/*` 仍需登录。
 > 生产化时把入口收敛到 `require_user`，详见 [docs/ARCHITECTURE.md](ARCHITECTURE.md) 第 4 节。
+
+
+---
+
+## 生图 Agent 页面（`/image.html`）
+
+一页一 Agent：本页只加载 `web/image.js`（管理员再加载 `web/image_admin.js`），**不加载 `app.js`**，
+登录态存在 `localStorage.image_agent_token`，与 SKU 页完全隔离。
+
+| 区域 | 内容 |
+|---|---|
+| 顶部徽标 | 服务状态（`/api/image/health`）、数据源（中台 MCP / 本地替身）、产线（provider）、当前账号 |
+| 登录卡片 | 独立账号登录；演示账号写在提示里；默认密钥会提示"上线前改掉" |
+| 商品清单 | 搜索 + 勾选（≤5 个），显示类目与"是否有参考图"；**没有上传入口** |
+| 参数区 | 构图 / 场景风格（来自 `/api/image/catalog`）、张数（默认取 `plan_policy`）、比例（默认取平台规则） |
+| 需求 | 自然语言描述；提交后返回 `batch_id` 与每个商品的任务 |
+| 进度 | 每条任务一行，状态/回写状态实时更新（SSE：`snapshot → stage → asset → backfill → done`） |
+| 画廊 | 按图位卡片展示产出图、尺寸与 sha256，并附中台参考图缩略图 |
+| 管理面板 | 仅管理员：粒度切换（月/周/日/小时）、账户筛选、5 张指标卡、**手绘 SVG 折线图**（悬停显示按账户细分）、任务表、账号与配额表、"重放回写"按钮 |
+
+约束：CSP 为 `script-src 'self'`，因此页面只用外链脚本 + `createElementNS` 手绘图表，无任何第三方前端库。

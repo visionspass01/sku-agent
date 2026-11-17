@@ -41,3 +41,5 @@ docker/certs/*
 docker/deploy.env
 
 docs/myself/
+data/eval/image_fixtures/*.png
+!data/eval/image_fixtures/.gitkeep

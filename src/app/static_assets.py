@@ -18,7 +18,7 @@ import pathlib
 from app.config import STATIC_DIR
 
 # 所有页面共用的静态资源：任一文件改了，所有页面的 ?v= 一起变
-_ASSETS = ("app.js", "agents.js", "style.css")
+_ASSETS = ("app.js", "agents.js", "style.css", "image.js", "image_admin.js", "image.css")
 _cache: dict[str, tuple[float, str]] = {}
 
 

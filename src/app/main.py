@@ -323,6 +323,12 @@ def agents_page() -> HTMLResponse:
     return HTMLResponse(render_page_html("agents.html"))
 
 
+@app.get("/image.html", include_in_schema=False)
+def image_page() -> HTMLResponse:
+    """生图 Agent 演示页（第二个 Agent，独立登录态，互不影响）。"""
+    return HTMLResponse(render_page_html("image.html"))
+
+
 # 项目简介：about.html 通过 fetch('/about.md') 渲染。文档放在 docs/ 而不是 static/，
 # 前端资产目录只放真正的前端文件，文档也能在 GitHub 上直接阅读。
 _ABOUT_DOC = BASE_DIR / "docs" / "ABOUT.md"
