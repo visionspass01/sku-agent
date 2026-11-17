@@ -1,7 +1,13 @@
-"""图生图的最小编排：理解 → 规划图位 → 组装 Prompt → 校验 → 生图 → 落库。
+"""图生图编排：理解 → 召回 → 规划图位 → 组装 Prompt → 校验 →（生成 → 评审 → 反思）→ 落库 → 回写。
 
-D2–D3 的形态：不做 RAG / Critic / MCP / 配额（后续里程碑逐步接入），
-但**节点边界与顺序**已按最终形态留好，后续只往里填内容。
+节点顺序（timeline 里可见）：
+`understand → compose_prompt → retrieve → validate → generate → critic → (reflexion → generate → critic)*
+ → aggregate → backfill`
+
+两条硬边界：
+- 只有 `type=generate` 的图位进入出图通道（尺码对照 / 包装清单 / 售后排版不生成图片）；
+- Critic 不通过时**只重写对应图位的 Prompt**（Reflexion），轮数上限 `IMAGE_REFLEXION_MAX_ROUNDS`，
+  超限判 `IMG_CRITIC_FAILED` 并把失败签名归档进 `image_memory`；交付张数只算最终通过那一轮。
 """
 
 from __future__ import annotations
@@ -12,10 +18,12 @@ from app.agents_image import metrics
 from app.agents_image import registry as reg_mod
 from app.agents_image.config import get_image_settings
 from app.agents_image.generator import handler as generator_handler
-from app.agents_image.nodes import plan_slots, understand, validate
-from app.agents_image.state import ImageTaskState, RefImage, SlotPlan
+from app.agents_image.nodes import critic as critic_mod
+from app.agents_image.nodes import plan_slots, reflexion, understand, validate
+from app.agents_image.state import CriticResult, ImageTaskState, RefImage, SlotPlan
 from app.agents_image.storage.image_storage import get_storage
 from app.agents_image.store import assets as asset_store
+from app.agents_image.store import memory as memory_store
 from app.agents_image.store import tasks as task_store
 from app.agents_image.store.models import ImageAsset
 from app.core.errors import ImageError
@@ -30,13 +38,71 @@ def _load_refs(session, ref_ids: list[str]) -> list[dict]:
     for asset_id in ref_ids:
         asset = asset_store.get_asset(session, asset_id)
         if asset is None:
-            from app.core.errors import raise_image
-
-            raise_image("IMG_REFERENCE_INVALID", f"参考图不存在：{asset_id}")
+            raise ImageError("IMG_REFERENCE_INVALID", f"参考图不存在：{asset_id}")
         assert isinstance(asset, ImageAsset)
         refs.append({"asset_id": asset.asset_id, "data": storage.get(asset.key),
                      "mime": asset.mime, "sha256": asset.sha256})
     return refs
+
+
+async def _platform_rules(state: ImageTaskState):
+    """执行期尽量取平台规则（图内文字/禁用词/大小限制）；中台不可用只记 warning，
+    因为任务创建阶段已经校验过参数，这里失败不该让已交付的图作废。"""
+    try:
+        from app.agents_image.sources.product_source import get_catalog
+
+        return await get_catalog().get_platform_rules(platform=state.platform)
+    except Exception as exc:  # noqa: BLE001
+        logger.info("执行期取平台规则失败（用 manifest 默认）：%s", exc)
+        state.warnings.append(f"IMG_UPSTREAM_MCP_UNAVAILABLE: 执行期取平台规则失败（{type(exc).__name__}）")
+        return None
+
+
+def _recall_for_slots(state: ImageTaskState, settings) -> dict[int, list[str]]:
+    """按图位召回「写法片段」（RAG）：检索失败只记 warning，不影响出图。"""
+    if not getattr(settings, "rag_enabled", True):
+        return {}
+    try:
+        from app.agents_image.rag import index as rag_index
+
+        product = str((state.attrs or {}).get("product_type") or "")
+        top_k = int(getattr(settings, "rag_top_k", 2) or 2)
+        fragments: dict[int, list[str]] = {}
+        for item in state.slots or []:
+            slot_no = int(getattr(item, "slot", 0) or 0)
+            query = " ".join(part for part in (
+                product, getattr(item, "role", ""),
+                getattr(item, "composition_label", ""),
+                getattr(item, "scene_style_label", ""),
+            ) if part)
+            hits = rag_index.retrieve(query, top_k=top_k)
+            fragments[slot_no] = [hit.snippet for hit in hits]
+        state.touch("retrieve", slots=len(fragments),
+                    hits=sum(len(items) for items in fragments.values()))
+        return fragments
+    except Exception as exc:  # noqa: BLE001 —— RAG 是增强能力
+        logger.warning("知识库召回失败（按无片段继续）：%s", exc)
+        state.warnings.append(f"IMG_RAG_DEGRADED: 知识库召回失败（{type(exc).__name__}）")
+        return {}
+
+
+def _collect_images(result: dict) -> list[critic_mod.CheckedImage]:
+    images: list[critic_mod.CheckedImage] = []
+    for slot in result.get("slots") or []:
+        slot_no = int(slot.get("slot") or 1)
+        mime = slot.get("mime") or "image/png"
+        for data in slot.get("images") or []:
+            images.append(critic_mod.CheckedImage(slot=slot_no, data=data, mime=mime,
+                                                  meta=slot.get("meta") or {}))
+    return images
+
+
+def _memory_patches(signature: str) -> dict[str, str]:
+    try:
+        with session_scope() as session:
+            return memory_store.patches_for(session, signature)
+    except Exception:  # noqa: BLE001 —— 记忆读失败不影响出图
+        return {}
 
 
 async def execute_task(task_id: str) -> ImageTaskState:
@@ -74,34 +140,62 @@ async def execute_task(task_id: str) -> ImageTaskState:
         # 中台数据缺失只在"历史任务/异常任务"出现：退回启发式，但记一条 warning（可观测）
         state.attrs = understand.understand(state)
         state.warnings.append("IMG_SCHEMA_INVALID: 任务缺少中台商品属性，已退回启发式抽取")
+
+    rules = await _platform_rules(state)
     state.touch("compose_prompt")
     fragments = _recall_for_slots(state, settings)
-    state.prompt_pack = plan_slots.compose(state, registry, fragments=fragments)
+    all_drafts = plan_slots.compose(state, registry, rules=rules, fragments=fragments)
     state.touch("validate")
     validate.degrade_note(state)
     validate.validate(state, settings=settings)
-    # 只有 type=generate 的图位走出图通道；排版/实拍图位只登记规划（不产生图片、不计交付）
-    generate_drafts = [d for d in state.prompt_pack if d.type == "generate"]
+
+    generate_drafts = [draft for draft in all_drafts if draft.type == "generate"]
+    static_drafts = [draft for draft in all_drafts if draft.type != "generate"]
     if not generate_drafts:
         raise ImageError("IMG_INPUT_INVALID",
                          "所选图位都不需要 AI 出图（尺码对照/包装清单/售后排版请走设计排版）")
-    state.prompt_final = generate_drafts[0].prompt or state.prompt
+
+    max_attempts = max(1, int(getattr(settings, "reflexion_max_rounds", 2) or 0) + 1)
+    current = [draft.model_copy(deep=True) for draft in generate_drafts]
+    images: list[critic_mod.CheckedImage] = []
+    critic = CriticResult()
+    attempted = 0
+    for attempt in range(1, max_attempts + 1):
+        state.attempt = attempt
+        state.touch("generate", attempt=attempt, slots=len(current))
+        result = await generator_handler.run({
+            "provider": settings.provider,
+            "refs": refs,
+            "slots": [{"slot": draft.slot, "prompt": draft.prompt,
+                       "negative_prompt": draft.negative_prompt, "n": 1} for draft in current],
+            "width": current[0].width,
+            "height": current[0].height,
+            "preserve": current[0].preserve,
+        })
+        images = _collect_images(result)
+        attempted += len(images)
+        state.touch("critic", attempt=attempt, images=len(images))
+        critic = critic_mod.critique(state, current, images, settings=settings, rules=rules)
+        if critic.passed:
+            break
+        signature = critic_mod.failure_signature(state, critic)
+        memory_patches = _memory_patches(signature)
+        state.touch("reflexion", attempt=attempt, issues=len(critic.issues))
+        if attempt >= max_attempts:
+            _archive_failure(state, critic, signature, attempted)
+            raise ImageError("IMG_CRITIC_FAILED",
+                             f"评审未通过（第 {attempt} 轮，score={critic.score}）："
+                             f"{'；'.join(critic.issues[:3])}")
+        reflection = reflexion.reflect(state, critic, current, rules=rules,
+                                       memory=memory_patches)
+        current = reflexion.apply_patches(current, reflection)
+
+    state.prompt_pack = current + static_drafts
+    state.critic = critic
+    state.prompt_final = current[0].prompt or state.prompt
     if state.warnings:
         state.touch("validate_warnings", count=len(state.warnings))
 
-    payload = {
-        "provider": settings.provider,
-        "refs": refs,
-        "slots": [{"slot": d.slot, "prompt": d.prompt, "negative_prompt": d.negative_prompt,
-                   "n": 1} for d in generate_drafts],
-        "width": generate_drafts[0].width,
-        "height": generate_drafts[0].height,
-        "preserve": generate_drafts[0].preserve,
-    }
-    state.touch("generate")
-    result = await generator_handler.run(payload)
-
-    attempted = 0
     delivered = 0
     cost = 0.0
     outputs: list[dict] = []
@@ -109,65 +203,76 @@ async def execute_task(task_id: str) -> ImageTaskState:
         task = task_store.get_task(session, task_id)
         if task is None or task.status == "canceled":
             return state
-        for slot in result.get("slots") or []:
-            for data in slot.get("images") or []:
-                attempted += 1
-                asset = asset_store.save_bytes(
-                    session, data, kind="output", mime=slot.get("mime") or "image/png",
-                    task_id=task_id, slot=int(slot.get("slot") or 1),
-                    username=task.username, department=task.department,
-                )
-                delivered += 1 if asset is not None else 0
-                if asset is not None:
-                    # 只留纯数据：session 关闭后 ORM 对象不能再取属性（DetachedInstanceError）
-                    outputs.append({
-                        "slot": int(slot.get("slot") or 1),
-                        "mime": asset.mime or slot.get("mime") or "image/png",
-                        "sha256": asset.sha256, "width": asset.width,
-                        "height": asset.height, "bytes": asset.bytes,
-                        "storage": asset.storage, "key": asset.key,
-                    })
-            cost += float(slot.get("cost_cny") or 0.0)
+        for image in images:
+            asset = asset_store.save_bytes(
+                session, image.data, kind="output", mime=image.mime or "image/png",
+                task_id=task_id, slot=image.slot,
+                username=task.username, department=task.department,
+            )
+            delivered += 1 if asset is not None else 0
+            if asset is not None:
+                # 只留纯数据：session 关闭后 ORM 对象不能再取属性（DetachedInstanceError）
+                outputs.append({
+                    "slot": image.slot, "mime": asset.mime or image.mime or "image/png",
+                    "sha256": asset.sha256, "width": asset.width,
+                    "height": asset.height, "bytes": asset.bytes,
+                    "storage": asset.storage, "key": asset.key,
+                })
+            cost += float(getattr(settings, "cost_per_image_cny", 0.0) or 0.0)
         task_store.mark_done(session, task_id, attempted=attempted, delivered=delivered,
                              cost=cost, prompt_final=state.prompt_final,
-                             prompt_pack=[d.model_dump() for d in state.prompt_pack],
-                             slots=[s.model_dump() if hasattr(s, "model_dump") else dict(s)
-                                    for s in (state.slots or [])])
+                             prompt_pack=[draft.model_dump() for draft in state.prompt_pack],
+                             attempts=state.attempt,
+                             slots=[slot.model_dump() if hasattr(slot, "model_dump") else dict(slot)
+                                    for slot in (state.slots or [])])
+        _settle(session, state, delivered=delivered, attempted=attempted, cost=cost)
     metrics.record_task_done(delivered=delivered, attempted=attempted)
     state.attempted_images = attempted
     state.delivered_images = delivered
     state.cost_cny = cost
-    state.touch("aggregate", delivered=delivered)
+    state.touch("aggregate", delivered=delivered, attempts=state.attempt)
     await _backfill(state, outputs_by_slot=outputs)
     return state
 
 
-def _recall_for_slots(state: ImageTaskState, settings) -> dict[int, list[str]]:
-    """按图位召回「写法片段」（RAG）：检索失败只记 warning，不影响出图。"""
-    if not getattr(settings, "rag_enabled", True):
-        return {}
+def _archive_failure(state: ImageTaskState, critic: CriticResult, signature: str,
+                     attempted: int) -> None:
+    """失败归档：任务 attempts 落库 + 失败签名写进 `image_memory`（下次同因优先复用修复）。"""
+    patch = "；".join(critic.issues[:3]) or "未知原因"
     try:
-        from app.agents_image.rag import index as rag_index
+        with session_scope() as session:
+            task_store.update_task(session, state.task_id, attempts=attempted,
+                                   attempted_images=attempted, error_code="IMG_CRITIC_FAILED",
+                                   error_detail=patch[:500])
+            memory_store.remember(session, signature=signature, fix_summary=patch,
+                                  prompt_patch=patch, department=state.department)
+            from app.agents_image.store import usage as usage_store
 
-        product = str((state.attrs or {}).get("product_type") or "")
-        top_k = int(getattr(settings, "rag_top_k", 2) or 2)
-        fragments: dict[int, list[str]] = {}
-        for item in state.slots or []:
-            slot_no = int(getattr(item, "slot", 0) or 0)
-            query = " ".join(part for part in (
-                product, getattr(item, "role", ""),
-                getattr(item, "composition_label", ""),
-                getattr(item, "scene_style_label", ""),
-            ) if part)
-            hits = rag_index.retrieve(query, top_k=top_k)
-            fragments[slot_no] = [hit.snippet for hit in hits]
-        state.touch("retrieve", slots=len(fragments),
-                    hits=sum(len(items) for items in fragments.values()))
-        return fragments
-    except Exception as exc:  # noqa: BLE001 —— RAG 是增强能力
-        logger.warning("知识库召回失败（按无片段继续）：%s", exc)
-        state.warnings.append(f"IMG_RAG_DEGRADED: 知识库召回失败（{type(exc).__name__}）")
-        return {}
+            usage_store.record(session, username=state.username, department=state.department,
+                               failed=1, tasks=1, attempted=attempted)
+    except Exception:  # noqa: BLE001 —— 归档失败不改变任务结论
+        logger.warning("失败归档写入出错：task=%s", state.task_id)
+
+
+def _settle(session, state: ImageTaskState, *, delivered: int, attempted: int,
+            cost: float) -> None:
+    """结算：占配额（只算交付张数，管理员不限）+ 记使用量流水（交付/尝试分开）。"""
+    from app.agents_image.store import quota as quota_store
+    from app.agents_image.store import usage as usage_store
+    from app.agents_image.store import users as user_store
+
+    try:
+        row = user_store.get_user(session, state.username)
+        is_admin = bool(row is not None and (row.role or "") == "admin")
+    except Exception:  # noqa: BLE001 —— 账号查不到按普通用户处理
+        is_admin = False
+    if delivered and not is_admin:
+        if not quota_store.consume(session, state.username, delivered):
+            # 并发下额度被别的任务吃掉：图已交付，不回收，只标 warning 让人看见
+            state.warnings.append(
+                f"IMG_QUOTA_EXCEEDED: 交付 {delivered} 张时额度不足，已交付但未计入配额")
+    usage_store.record(session, username=state.username, department=state.department,
+                       delivered=delivered, attempted=attempted, tasks=1, cost=cost)
 
 
 async def _backfill(state: ImageTaskState, *, outputs_by_slot: list[dict]) -> str:
@@ -176,7 +281,6 @@ async def _backfill(state: ImageTaskState, *, outputs_by_slot: list[dict]) -> st
     from app.agents_image.sources.product_source import get_catalog
 
     generate_drafts = [draft for draft in state.prompt_pack if draft.type == "generate"]
-
     payload = {
         "request_id": state.request_id or state.task_id,
         "batch_id": state.batch_id,
@@ -189,11 +293,13 @@ async def _backfill(state: ImageTaskState, *, outputs_by_slot: list[dict]) -> st
         "scene_styles": list(state.scene_styles or []),
         "prompt_final": state.prompt_final,
         "prompt_pack": [draft.model_dump() for draft in state.prompt_pack],
+        "prompt_pack_yaml": pack_yaml(state, generate_drafts),
         "params": {"provider": get_image_settings().provider,
-                   "attempted": state.attempted_images, "delivered": state.delivered_images},
+                   "attempts": state.attempt, "attempted": state.attempted_images,
+                   "delivered": state.delivered_images,
+                   "critic_score": state.critic.score},
         "requester": state.username,
         "trace_id": state.trace_id,
-        "prompt_pack_yaml": pack_yaml(state, generate_drafts),
         "results": [{
             "slot": item["slot"], "role": _role_of(state, item["slot"]),
             "prompt": _prompt_of(state, item["slot"]),
@@ -204,6 +310,7 @@ async def _backfill(state: ImageTaskState, *, outputs_by_slot: list[dict]) -> st
             "bytes": item.get("bytes", 0),
             "storage": item.get("storage", "local"),
             "storage_key": item.get("key", ""),
+            "critic_score": state.critic.score,
             "cost_cny": 0.0, "status": "done",
         } for item in outputs_by_slot if item],
     }
@@ -215,6 +322,7 @@ async def _backfill(state: ImageTaskState, *, outputs_by_slot: list[dict]) -> st
         logger.warning("回写中台失败：task=%s %s", state.task_id, exc)
         state.warnings.append(f"IMG_BACKFILL_FAILED: 回写中台失败（{type(exc).__name__}），"
                               "图片已生成，等待重放")
+        _enqueue_outbox(state, payload)
     state.touch("backfill", status=status)
     try:
         with session_scope() as session:
@@ -222,6 +330,18 @@ async def _backfill(state: ImageTaskState, *, outputs_by_slot: list[dict]) -> st
     except Exception:  # noqa: BLE001 —— 状态写失败不阻塞
         logger.warning("回写状态落库失败：task=%s", state.task_id)
     return status
+
+
+def _enqueue_outbox(state: ImageTaskState, payload: dict) -> None:
+    """回写失败进 outbox（D12 的重放扫它）；这里只做最小投递，失败只记日志。"""
+    try:
+        from app.agents_image.store import outbox as outbox_store
+
+        with session_scope() as session:
+            outbox_store.enqueue(session, task_id=state.task_id, payload=payload,
+                                 error="backfill failed")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("outbox 入队失败：task=%s %s", state.task_id, exc)
 
 
 def _role_of(state: ImageTaskState, slot: int) -> str:

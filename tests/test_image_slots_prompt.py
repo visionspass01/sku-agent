@@ -109,9 +109,11 @@ def test_compose_applies_seven_rules(policy, rules):
     # ⑥ 图内文字策略按图位不同
     assert "不生成任何文字" in drafts[0].prompt
     assert "主标语 ≤4 词" in drafts[1].prompt
-    # 平台禁用词进了否定清单，文件大小限制进了技术参数
-    assert "全网最低价" in first.negative_prompt
-    assert "≤3.0MB" in prompt or "3.0MB" in prompt
+    # 平台禁用词按"规则卡 N 项"表述，不能把词本身写进 Prompt（否则评审会自伤）
+    assert "平台规则卡禁止词" in first.negative_prompt
+    assert "全网最低价" not in prompt and "国家级" not in prompt
+    assert "3 项" in prompt
+    assert "3.0MB" in prompt
     # ⑦ RAG 片段进 Prompt
     assert "主图优先纯白背景" in prompt
     assert first.fill_percent == 70 and first.margin_percent == 8

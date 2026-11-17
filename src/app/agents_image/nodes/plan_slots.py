@@ -134,7 +134,10 @@ def compose(state: ImageTaskState, registry, *, rules=None,
         # 知识库片段本身会提到禁用词（"不得使用国家级"），注入前先 masking，
         # 既不违规也不丢语义；落库的 fragments 保留原文便于审计。
         rag_block = "；".join(mask_banned(item, extra_forbidden) for item in rag_items if item)
-        banned = "、".join(extra_forbidden) if extra_forbidden else "无"
+        # 禁用词只按"规则卡列出 N 项"表述，绝不把词本身写进 Prompt——
+        # 否则评审阶段会把它们当成命中禁用词（自伤）。
+        banned = (f"平台规则卡所列禁止词（{len(extra_forbidden)} 项，出现即违规）"
+                  if extra_forbidden else "无")
 
         text, _version = registry.prompt(manifest["generator_prompt"], {
             "product_block": product_block,
@@ -161,7 +164,7 @@ def compose(state: ImageTaskState, registry, *, rules=None,
             slot=slot_no, role=role,
             prompt=text,
             negative_prompt=("文字水印、边框、拼图、多余物件、改变款式与颜色"
-                             + (f"、{banned}" if extra_forbidden else "")),
+                             + ("、平台规则卡禁止词" if extra_forbidden else "")),
             aspect=state.aspect, width=width, height=height,
             preserve=merge_preserve(None, must_not_change),
             type=_field(item, "type", "generate"),

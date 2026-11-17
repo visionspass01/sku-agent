@@ -118,3 +118,70 @@ class ImageTokenBlacklist(Base):
     exp: Mapped[dt.datetime] = mapped_column(DateTime, index=True)
     reason: Mapped[str] = mapped_column(String(32), default="logout")
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=dt.datetime.now)
+
+
+class ImageMemory(Base):
+    """失败签名 → 修复经验（Critic 不通过时归档，下次同因优先复用）。"""
+
+    __tablename__ = "image_memory"
+
+    memory_id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    department: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    failure_signature: Mapped[str] = mapped_column(String(120), default="", index=True)
+    fix_summary: Mapped[str] = mapped_column(Text, default="")
+    prompt_patch: Mapped[str] = mapped_column(Text, default="")
+    hits: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=dt.datetime.now)
+
+
+class ImageQuota(Base):
+    """按人按周期的配额（自然周期 Asia/Shanghai；管理员不受限）。"""
+
+    __tablename__ = "image_quota"
+
+    username: Mapped[str] = mapped_column(String(32), primary_key=True)
+    period_type: Mapped[str] = mapped_column(String(16), default="day")   # day|week|month|unlimited
+    period_limit: Mapped[int] = mapped_column(Integer, default=50)
+    period_key: Mapped[str] = mapped_column(String(16), default="")
+    used: Mapped[int] = mapped_column(Integer, default=0)
+    granted_by: Mapped[str] = mapped_column(String(32), default="")
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime, default=dt.datetime.now)
+
+
+class ImageUsage(Base):
+    """使用量流水（按小时粒度落，面板按周期聚合；交付与尝试分开记）。"""
+
+    __tablename__ = "image_usage"
+    __table_args__ = (
+        Index("idx_image_usage_user_period", "username", "period_key"),
+        Index("idx_image_usage_period", "period_key"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    username: Mapped[str] = mapped_column(String(32), default="", index=True)
+    department: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    period_key: Mapped[str] = mapped_column(String(20), default="")   # 2026-11-18T15（Asia/Shanghai）
+    granularity: Mapped[str] = mapped_column(String(8), default="hour")
+    images: Mapped[int] = mapped_column(Integer, default=0)            # 交付张数
+    images_attempted: Mapped[int] = mapped_column(Integer, default=0)  # 尝试张数
+    tasks: Mapped[int] = mapped_column(Integer, default=0)
+    failed: Mapped[int] = mapped_column(Integer, default=0)
+    tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cost_cny: Mapped[float] = mapped_column(default=0.0)
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime, default=dt.datetime.now)
+
+
+class ImageOutbox(Base):
+    """回写中台失败的补偿队列（D12）：可重放、可观测，不丢数据。"""
+
+    __tablename__ = "image_outbox"
+    __table_args__ = (Index("idx_image_outbox_status", "status", "next_retry_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    task_id: Mapped[str] = mapped_column(String(32), default="", index=True)
+    payload_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(16), default="pending")  # pending|sent|failed
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_retry_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    last_error: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=dt.datetime.now)

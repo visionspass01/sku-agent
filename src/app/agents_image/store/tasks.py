@@ -54,7 +54,8 @@ def mark_running(session, task_id: str) -> None:
 
 def mark_done(session, task_id: str, *, attempted: int, delivered: int, cost: float,
               prompt_final: str = "", prompt_pack: list[dict] | None = None,
-              slots: list[dict] | None = None, backfill_status: str | None = None) -> None:
+              slots: list[dict] | None = None, backfill_status: str | None = None,
+              attempts: int | None = None) -> None:
     fields: dict = dict(status="done", finished_at=dt.datetime.now(),
                         attempted_images=attempted, delivered_images=delivered, cost_cny=cost,
                         prompt_final=prompt_final,
@@ -62,6 +63,8 @@ def mark_done(session, task_id: str, *, attempted: int, delivered: int, cost: fl
                         slots_json=list(slots or []))
     if backfill_status:
         fields["backfill_status"] = backfill_status
+    if attempts is not None:
+        fields["attempts"] = int(attempts)
     update_task(session, task_id, **fields)
 
 

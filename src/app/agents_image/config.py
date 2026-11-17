@@ -51,6 +51,11 @@ class ImageSettings(BaseSettings):
     rag_top_k: int = Field(default=2, ge=1, le=6)
     rag_kb_dir: str = ""              # 空 = data/kb_image
 
+    # ---- 配额（按交付张数；管理员不受限）----
+    default_quota_period: str = "day"       # day | week | month
+    default_quota_images: int = Field(default=50, ge=0, le=100000)
+    quota_period_key_rollover: bool = True
+
     # ---- 质量与成本 ----
     critic_pass_score: int = Field(default=75, ge=0, le=100)
     reflexion_max_rounds: int = Field(default=2, ge=0, le=5)

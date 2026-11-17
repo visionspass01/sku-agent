@@ -190,6 +190,22 @@ async def create_tasks(request: Request) -> JSONResponse:
         catalog = get_catalog()
         params = await _resolve_request_parameters(catalog, body, settings)
 
+        planned_images = sum(1 for item in plan_slots.build_slots(
+            ImageTaskState(prompt=prompt, aspect=params["aspect"], count=params["count"],
+                           compositions=params["compositions"],
+                           scene_styles=params["scene_styles"]),
+            policy=params["policy"], labels=params["labels"])
+            if item["type"] == "generate") * len(product_ids)
+        with session_scope() as session:
+            from app.agents_image.store import quota as quota_store
+
+            quota = quota_store.check(session, user.username, planned_images,
+                                     is_admin=user.is_admin)
+        if not quota["allowed"]:
+            raise ImageError("IMG_QUOTA_EXCEEDED",
+                             f"配额不足：本期（{quota['period_type']}）剩余 {quota['remaining']} 张，"
+                             f"本次需要 {planned_images} 张", retryable=False)
+
         with session_scope() as session:
             resolution = await refs_source.resolve_refs(
                 catalog, product_ids, session=session,
