@@ -35,12 +35,23 @@ def test_metrics_llm_exposes_sources(app_client, _settings):
 
 def test_chat_turn_records_llm_usage(seeded, monkeypatch):
     """对话 Agent 用自己的 ChatOpenAI：run_chat 结束后要把用量补登记到全局统计。"""
+    import datetime as dt
+
     from langchain_core.messages import AIMessage
 
     from app.agents import chat_agent
     from app.auth import AuthUser
+    from app.db.engine import session_scope
+    from app.db.models import ChatSession
     from app.llm import get_llm
     from app.memory.runtime import chat_turn_context
+
+    # chat_memory.session_id 是真实外键：生产里 /api/chat 先建会话再写记忆，
+    # 所以这里也要先落一条会话行（SQLite 默认不校验外键，MySQL 会直接报 1452）
+    now = dt.datetime(2026, 11, 2, 11, 0)
+    with session_scope() as session:
+        session.add(ChatSession(id="s-llm-usage", username="admin", title="指标口径",
+                                created_at=now, updated_at=now))
 
     class FakeAgent:
         async def ainvoke(self, payload):

@@ -29,6 +29,9 @@ def _settings(tmp_path_factory):
         redis_url="",
         mcp_transport="direct",
         scheduler_enabled=False,
+        # 测试只构造客户端对象、不发真实请求；但 openai SDK 在 api_key 为空时会直接抛错，
+        # CI 环境没有 DEEPSEEK_API_KEY，所以要给一个占位值（不是真 Key，任何用例都不联网）。
+        deepseek_api_key="sk-test-not-used",
         seed_days=7,
         seed_skus=seed_skus,
         cache_jitter_ratio=0.2,
@@ -108,6 +111,11 @@ def seeded(_db, _settings):
                 stock=stock, return_rate=rr, supplier_id="SUP-02", status="在售",
                 list_date=(now - dt.timedelta(days=30)).date(),
             ))
+        # 先落 SKU 再落子表：MySQL 是真实外键约束（1452），SQLAlchemy 不应假设它会按 FK 排序
+        # ——和 `app/db/seed.py` 里踩过的坑同一类，SQLite 默认不校验外键所以本地看不出来。
+        session.flush()
+
+        for sku_id, _style_id, _category, _size, _stock, _rr, label in specs:
             session.add(EvalLabel(
                 sku_id=sku_id, anomaly_type=label if label != "normal" else "normal",
                 expected_risk={"断码": "高", "过季积压": "中"}.get(label, "低"),
@@ -116,7 +124,7 @@ def seeded(_db, _settings):
                 sku_id=sku_id, qty=50, eta=(now + dt.timedelta(days=5)).date(),
                 po_no="PO-TEST", status="在途",
             ))
-            session.flush()
+        session.flush()
 
         # 流水：正常 SKU 平稳；断码 SKU 零库存无销量但同款有动销；积压 SKU 低销量
         daily_rates = {"ST-90-C1-M": 10.0, "ST-91-C1-M": 0.5, "ST-92-C1-M": 0.5}

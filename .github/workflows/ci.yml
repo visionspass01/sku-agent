@@ -44,6 +44,11 @@ jobs:
         run: |
           python -m pytest --cov=src/app --cov-report=term-missing --cov-fail-under=80
 
+      # 检索评测读的是真实库里的 kb_chunk（知识库索引），全新 checkout 里还没有这张表，
+      # 所以先跑一次初始化（建表 + 300 SKU + KB 索引；data/ 是 gitignored，不会污染仓库）。
+      - name: 初始化演示数据（评测门槛需要知识库索引）
+        run: python scripts/init_db.py
+
       - name: 答案质量判定器自检（离线、确定性）
         run: python scripts/eval_agent_answers.py --offline
 
