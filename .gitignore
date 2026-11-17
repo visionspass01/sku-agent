@@ -20,6 +20,7 @@ data/qdrant_local/
 data/mysql/
 data/redis/
 data/cache/
+data/images/
 data/eval/report-*.json
 data/analyses/*
 data/artifacts/*

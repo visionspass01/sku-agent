@@ -47,6 +47,7 @@ from app.cache.redis_factory import redis_mode
 from app.cache.stream_queue import get_stream_queue
 from app.cache.ttl_cache import get_ttl_cache
 from app.config import get_settings
+from app.core import health as health_registry
 from app.db import repos
 from app.db.engine import session_scope
 from app.db.models import PatrolLog
@@ -307,6 +308,8 @@ def health() -> dict:
         "features": app_features(),
         "assets": asset_versions(),
         "latency_window": latency.MAX_SAMPLES,
+        # image Agent 等其它模块注册进来的健康段（模块自己负责内容，本路由不反向依赖它们）
+        **health_registry.collect(),
     }
 
 

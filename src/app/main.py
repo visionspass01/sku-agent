@@ -1,4 +1,10 @@
-"""FastAPI 应用入口：API + 静态看板 + 生命周期（MCP hub / 调度器 / 知识库自动索引）。"""
+"""FastAPI 应用入口：API + 静态看板 + 生命周期（按 APP_MODULES 决定启用哪些 Agent）。
+
+模块开关（`APP_MODULES`，默认 `sku,image`）：
+- `sku`：SKU 监管 Agent（看板 / 对话 / 研判 / 巡检 / 知识库索引 / MCP hub / 定时任务）；
+- `image`：电商生图 Agent（`/api/image/*`，独立账号 + 配额 + 生图链路）；
+只启用 `image` 时不会初始化 SKU 的表与后台任务，首页给一句入口提示。
+"""
 
 from __future__ import annotations
 
@@ -10,6 +16,8 @@ from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.agents import checkpoint as agent_checkpoint
+from app.agents_image import runtime as image_runtime
+from app.agents_image.api.routes import router as image_router
 from app.api.chat_routes import router as chat_router
 from app.api.routes import router
 from app.config import BASE_DIR, STATIC_DIR, get_settings
@@ -23,10 +31,23 @@ from app.static_assets import render_index_html, render_page_html
 logger = logging.getLogger("sku-agent")
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
+def parse_modules(value: str | None = None) -> set[str]:
+    """解析 `APP_MODULES`：逗号分隔，默认 sku,image。"""
+    import os
+
+    raw = (value if value is not None else os.environ.get("APP_MODULES")) or "sku,image"
+    modules = {part.strip().lower() for part in str(raw).split(",") if part.strip()}
+    return modules or {"sku", "image"}
+
+
+MODULES = parse_modules()
+SKU_ENABLED = "sku" in MODULES
+IMAGE_ENABLED = "image" in MODULES
+
+
+async def _sku_startup() -> None:
+    """SKU 监管 Agent 的全部启动逻辑（APP_MODULES 不含 sku 时整段跳过）。"""
     settings = get_settings()
-    settings.ensure_dirs()
     init_schema()
 
     # 部署自检：公开默认密钥仍在使用时告警（容器部署 .env 放错位置会静默退回默认值）
@@ -42,11 +63,6 @@ async def lifespan(app: FastAPI):
             "PLATFORM_INTERNAL_TOKEN 仍是仓库公开默认值：能访问中台端口的人即可获得全权身份。"
             "请改为随机值，并确认中台侧同名变量一致"
         )
-
-    # 日志注入 trace_id：一条用户提问产生的所有日志（工具/中台/MCP/RAG/LLM）可按 trace 串联
-    from app.observability import trace as trace_mod
-
-    trace_mod.install_logging()
 
     with session_scope() as session:
         # 索引增量同步：按 sha256 只重建变动的文档；首次（空库）则全量构建
@@ -169,7 +185,10 @@ async def lifespan(app: FastAPI):
         logger.info("RAG 同义词：%s", status)
     except Exception as exc:  # noqa: BLE001
         logger.info("RAG 同义词同步跳过：%s", exc)
-    yield
+
+
+async def _sku_shutdown() -> None:
+    """SKU 监管 Agent 的关闭逻辑（与启动对称）。"""
     stop_scheduler()
     await agent_checkpoint.shutdown()
     await shutdown_mcp_hub()
@@ -195,9 +214,41 @@ async def lifespan(app: FastAPI):
         pass
 
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    settings = get_settings()
+    settings.ensure_dirs()
+
+    # 日志注入 trace_id：一条用户提问产生的所有日志（工具/中台/MCP/RAG/LLM）可按 trace 串联
+    from app.observability import trace as trace_mod
+
+    trace_mod.install_logging()
+
+    if SKU_ENABLED:
+        await _sku_startup()
+    if IMAGE_ENABLED:
+        await image_runtime.startup()
+    yield
+    if IMAGE_ENABLED:
+        await image_runtime.shutdown()
+    if SKU_ENABLED:
+        await _sku_shutdown()
+
+
 app = FastAPI(title="电商 SKU 监管 Agent", version="0.1.0", lifespan=lifespan)
-app.include_router(router)
-app.include_router(chat_router)
+if SKU_ENABLED:
+    app.include_router(router)
+    app.include_router(chat_router)
+if IMAGE_ENABLED:
+    app.include_router(image_router)
+
+if not SKU_ENABLED:
+    from app.core import health as _health_registry
+
+    @app.get("/api/health", include_in_schema=False)
+    def health_without_sku() -> dict:
+        """只启用 image 时也保留一个 `/api/health`（目录页 / 前端自检都靠它）。"""
+        return {"status": "ok", "modules": sorted(MODULES), **_health_registry.collect()}
 
 # 静态页面/脚本必须每次回源校验：否则部署后浏览器可能"HTML 是新的、app.js 还是旧的"，
 # 导致新功能（运行详情 / 记忆面板 / 历史会话）函数不存在、bindEvents 中途抛错。
@@ -244,6 +295,17 @@ async def add_no_cache_headers(request: Request, call_next):
 @app.get("/", include_in_schema=False)
 @app.get("/index.html", include_in_schema=False)
 def index_page() -> HTMLResponse:
+    if not SKU_ENABLED:
+        return HTMLResponse(
+            "<!DOCTYPE html><html lang=\"zh-CN\"><head><meta charset=\"UTF-8\"/>"
+            "<title>仅启用图像 Agent</title></head>"
+            "<body style=\"font-family:system-ui;background:#0b1220;color:#dbeafe;"
+            "display:flex;align-items:center;justify-content:center;height:100vh\">"
+            "<div><h2>当前只启用了「电商生图 Agent」</h2>"
+            "<p>请访问 <a style=\"color:#7dd3fc\" href=\"/agents.html\">/agents.html</a>"
+            " 或 <a style=\"color:#7dd3fc\" href=\"/image.html\">/image.html</a>。</p>"
+            "<p style=\"color:#94a3b8\">（启动参数：APP_MODULES=image）</p></div></body></html>"
+        )
     return HTMLResponse(render_index_html())
 
 
