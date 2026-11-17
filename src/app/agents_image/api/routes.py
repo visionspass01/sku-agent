@@ -18,9 +18,11 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
 
 from app.agents_image import metrics
+from app.agents_image.api.admin_routes import router as admin_router
 from app.agents_image.api.auth_routes import router as auth_router
 from app.agents_image.api.common import asset_payload, error_response
 from app.agents_image.api.deps import require_user, trace_id_of
+from app.agents_image.api.stream_routes import router as stream_router
 from app.agents_image.config import get_image_settings
 from app.agents_image.dispatch.task_dispatcher import get_dispatcher
 from app.agents_image.ids import new_batch_id, new_task_id
@@ -39,6 +41,8 @@ logger = logging.getLogger("sku-agent.image.api")
 
 router = APIRouter(prefix="/api/image", tags=["image"])
 router.include_router(auth_router)
+router.include_router(stream_router)
+router.include_router(admin_router)
 
 
 @router.get("/health")
@@ -302,7 +306,7 @@ def get_task(task_id: str, request: Request) -> JSONResponse:
                 raise ImageError("IMG_TASK_NOT_FOUND", f"任务不存在：{task_id}")
             _ensure_owner(task.username, user, "任务")
             outputs = asset_store.list_outputs(session, task_id)
-            refs = asset_store.list_refs(session, task_id)
+            refs = asset_store.get_assets(session, list(task.ref_asset_ids or []))
             payload = {
                 "task_id": task.task_id, "batch_id": task.batch_id,
                 "product_id": task.product_id, "ref_source": task.ref_source,

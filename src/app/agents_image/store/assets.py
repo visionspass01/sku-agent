@@ -58,12 +58,27 @@ def list_outputs(session, task_id: str) -> list[ImageAsset]:
 
 
 def list_refs(session, task_id: str) -> list[ImageAsset]:
-    """任务的参考图（v6 由中台商品图落下，`task_id` 在建任务时回填）。"""
+    """任务的参考图（v6 由中台商品图落下）。
+
+    注意：ref 资产是**按商品+账号共享**的（同一商品重复解析复用同一行），所以不能靠
+    `asset.task_id` 反查某次任务用了哪些图——任务详情请用 `get_assets(task.ref_asset_ids)`。
+    """
     rows = session.execute(
         select(ImageAsset).where(ImageAsset.task_id == task_id,
                                  ImageAsset.kind == "ref")
     ).scalars().all()
     return list(rows)
+
+
+def get_assets(session, asset_ids: list[str]) -> list[ImageAsset]:
+    """按 id 列表取资产（保持传入顺序，忽略不存在的）。"""
+    if not asset_ids:
+        return []
+    rows = session.execute(
+        select(ImageAsset).where(ImageAsset.asset_id.in_(list(asset_ids)))
+    ).scalars().all()
+    by_id = {row.asset_id: row for row in rows}
+    return [by_id[item] for item in asset_ids if item in by_id]
 
 
 def bind_refs_to_task(session, asset_ids: list[str], task_id: str) -> int:
