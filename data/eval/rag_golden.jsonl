@@ -1,0 +1,38 @@
+{"id": "sizegap-01", "query": "断码补全 尺码结构 同款 2 个尺码没货 怎么处理", "expected_doc_ids": ["sop-sizegap"], "note": "断码定义与补全方式"}
+{"id": "sizegap-02", "query": "断码尺码里包含主销尺码时 多长时间内必须补货或调拨", "expected_doc_ids": ["sop-sizegap"], "note": "48 小时高优先级"}
+{"id": "sizegap-03", "query": "爆款断码预警 主销尺码可售天数低于 7 天", "expected_doc_ids": ["sop-sizegap"], "note": "爆款断码预警阈值"}
+{"id": "clearance-01", "query": "清仓折扣阶梯 最低能打到几折", "expected_doc_ids": ["sop-clearance"], "note": "折扣阶梯 8/7/6 折"}
+{"id": "clearance-02", "query": "清仓折扣低于 7 折需要谁审批 单季度金额超过多少要财务备案", "expected_doc_ids": ["sop-clearance"], "note": "审批与备案门槛"}
+{"id": "clearance-03", "query": "清仓每轮释放多少库存 节奏怎么控制", "expected_doc_ids": ["sop-clearance"], "note": "每轮 40% 避免价格踩踏"}
+{"id": "replenish-01", "query": "建议补货量怎么测算 目标覆盖天数 再订货点", "expected_doc_ids": ["sop-replenish"], "note": "补货量公式"}
+{"id": "replenish-02", "query": "安全库存 = 日均销量 × 交期 × 0.3 向上取整", "expected_doc_ids": ["sop-replenish"], "note": "安全库存口径"}
+{"id": "replenish-03", "query": "补货量必须是 MOQ 的整数倍 单次不超过历史最高补货量", "expected_doc_ids": ["sop-replenish"], "note": "数量约束"}
+{"id": "men-replenish-01", "query": "男装补货 尺码比例 S M L XL 怎么拆分下单", "expected_doc_ids": ["sop-replenish-men"], "note": "男装尺码比例 1:2:2:1"}
+{"id": "men-replenish-02", "query": "男装卫衣夹克交期 目标覆盖天数 供应商交期加多少天", "expected_doc_ids": ["sop-replenish-men", "sop-supplier"], "note": "男装覆盖天数 +14（扩为多文档可接受：新 SOP/供应商文档同样能回答）"}
+{"id": "women-replenish-01", "query": "女装羽绒服换季前多久启动首单 目标覆盖天数", "expected_doc_ids": ["sop-replenish-women"], "note": "女装羽绒服 +30 天、45 天首单"}
+{"id": "women-replenish-02", "query": "女装爆款按款号和颜色备货 不同颜色不能合并算销量", "expected_doc_ids": ["sop-replenish-women"], "note": "女装备货维度"}
+{"id": "men-clearance-01", "query": "男装断码清仓 尺码包 单轮清仓量比例", "expected_doc_ids": ["sop-clearance-men"], "note": "男装清仓执行"}
+{"id": "women-clearance-01", "query": "女装季末清仓 爆款保留多少尾货 童装按尺码包", "expected_doc_ids": ["sop-clearance-women"], "note": "女装清仓约束"}
+{"id": "platform-01", "query": "双11 报名门槛 动销率 断码率 到仓时间", "expected_doc_ids": ["sop-platform", "sop-promo"], "note": "双11 报名门槛（扩为多文档可接受：新 SOP/供应商文档同样能回答）"}
+{"id": "platform-02", "query": "618 年中大促 现货库存门槛 清仓款能报名吗", "expected_doc_ids": ["sop-platform"], "note": "618 门槛"}
+{"id": "platform-03", "query": "年货节 抖音直播爆款备货 10 天 库存报备", "expected_doc_ids": ["sop-platform"], "note": "年货节报备"}
+{"id": "platform-04", "query": "活动期主推款可售天数低于 3 天 平台会怎么处理", "expected_doc_ids": ["sop-platform"], "note": "活动期库存红线"}
+{"id": "platform-05", "query": "断码率超过 20% 还能报名活动吗 会被清退吗", "expected_doc_ids": ["sop-platform", "sop-sizegap"], "note": "断码率红线（两篇都提到）"}
+{"id": "promo-01", "query": "大促备货量按活动期预估销量乘多少 提前几天到仓", "expected_doc_ids": ["sop-promo"], "note": "备货量 ×1.5、提前 10 天"}
+{"id": "promo-02", "query": "活动款断码 优先调拨还是补货 为什么", "expected_doc_ids": ["sop-promo", "sop-sizegap"], "note": "活动期断码优先调拨（扩为多文档可接受：新 SOP/供应商文档同样能回答）"}
+{"id": "season-01", "query": "换季观察名单 距换季节点 30 天 可售天数 45 天", "expected_doc_ids": ["sop-season"], "note": "换季观察名单"}
+{"id": "season-02", "query": "季末最后两周 停止补货 只保留爆款安全库存", "expected_doc_ids": ["sop-season"], "note": "季末停止补货"}
+{"id": "supplier-01", "query": "供应商交期和加急交期 加急费怎么算 SUP-02 的 MOQ", "expected_doc_ids": ["sop-supplier"], "note": "供应商档案表"}
+{"id": "supplier-02", "query": "加急单报备提前几天 单次加急量不超过月产能比例", "expected_doc_ids": ["sop-supplier"], "note": "加急规则"}
+{"id": "supplier-03", "query": "缺货判断要用可售天数加交期内可到在途量", "expected_doc_ids": ["sop-supplier"], "note": "交期覆盖口径"}
+{"id": "case-01", "query": "历史案例 大促断码 48 小时调拨 200 件 加急补货", "expected_doc_ids": ["case-history"], "note": "案例一"}
+{"id": "case-02", "query": "案例 换季积压清仓 折扣轮次 8 折 7 折 6.5 折", "expected_doc_ids": ["case-history"], "note": "案例二"}
+{"id": "case-03", "query": "案例 爆款缺货销量突增 3 倍 可售天数 2 天 调拨", "expected_doc_ids": ["case-history"], "note": "案例三"}
+{"id": "para-01", "query": "奥莱甩货 清库存 折扣怎么走 能不能低于成本", "expected_doc_ids": ["sop-clearance"], "note": "清仓的口语表述"}
+{"id": "para-02", "query": "补单 要按什么公式算数量 别压货", "expected_doc_ids": ["sop-replenish", "sop-sizecurve"], "note": "补货（补单）口径（扩为多文档可接受：新 SOP/供应商文档同样能回答）"}
+{"id": "para-03", "query": "买家看不到某个码 卖家断码了怎么办", "expected_doc_ids": ["sop-sizegap", "sop-sizecurve"], "note": "断码的口语表述（扩为多文档可接受：新 SOP/供应商文档同样能回答）"}
+{"id": "para-04", "query": "直播间缺码还能挂链接卖吗", "expected_doc_ids": ["sop-sizegap"], "note": "抖音直播间断码 SKU"}
+{"id": "para-05", "query": "活动被降权 库存不够卖 平台怎么处罚", "expected_doc_ids": ["sop-platform"], "note": "平台活动期降权"}
+{"id": "para-06", "query": "换季大甩卖 观察名单提前多久建立", "expected_doc_ids": ["sop-season"], "note": "换季观察名单提前量"}
+{"id": "para-07", "query": "供应商拖期 加急要加钱吗 多久能到", "expected_doc_ids": ["sop-supplier"], "note": "交期与加急费"}
+{"id": "para-08", "query": "多件一起买能便宜点吗 清仓多件折", "expected_doc_ids": ["sop-clearance"], "note": "多件折"}

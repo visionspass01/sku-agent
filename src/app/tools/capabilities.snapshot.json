@@ -1,0 +1,406 @@
+{
+  "_comment": "由 scripts/gen_capabilities_snapshot.py 生成，请勿手改。真相在中台 src/data_platform/capabilities.py。",
+  "version": "1.1",
+  "groups": {
+    "approval": [
+      "list_pending_approvals"
+    ],
+    "kb": [
+      "search_knowledge"
+    ],
+    "memory": [
+      "read_analysis",
+      "save_analysis",
+      "search_analyses"
+    ],
+    "meta": [
+      "plan_query"
+    ],
+    "order": [
+      "get_logistics",
+      "get_order_status",
+      "list_orders"
+    ],
+    "read": [
+      "create_transfer_suggestion",
+      "get_in_transit",
+      "get_inventory",
+      "get_metric_definitions",
+      "get_orders",
+      "get_reservations",
+      "get_sales",
+      "get_sales_rate",
+      "get_sell_through",
+      "get_sku_metrics"
+    ],
+    "skill": [
+      "list_skills",
+      "load_skill"
+    ],
+    "style": [
+      "get_apparel_overview",
+      "get_size_curve",
+      "get_size_gap",
+      "get_style_metrics"
+    ],
+    "write": [
+      "create_after_sales",
+      "create_replenishment_order"
+    ]
+  },
+  "reserved_groups": {
+    "image": "生图 Agent 的工具组（尚未实现；声明该分组会立即失败，而不是静默降级）"
+  },
+  "capabilities": [
+    {
+      "id": "sku.inventory",
+      "group": "read",
+      "tool": "get_inventory",
+      "name": "可用库存",
+      "scopes": [
+        "read"
+      ],
+      "scope_kind": "sku",
+      "transport": "rest",
+      "endpoints": [
+        "GET /api/v1/skus/{sku_id}/inventory"
+      ]
+    },
+    {
+      "id": "sku.sell_through",
+      "group": "read",
+      "tool": "get_sell_through",
+      "name": "预计售罄天数",
+      "scopes": [
+        "read"
+      ],
+      "scope_kind": "sku",
+      "transport": "rest",
+      "endpoints": [
+        "GET /api/v1/skus/{sku_id}/sell-through"
+      ]
+    },
+    {
+      "id": "sku.metrics",
+      "group": "read",
+      "tool": "get_sku_metrics",
+      "name": "SKU 治理指标",
+      "scopes": [
+        "read"
+      ],
+      "scope_kind": "sku",
+      "transport": "rest",
+      "endpoints": [
+        "GET /api/v1/skus/{sku_id}/metrics"
+      ]
+    },
+    {
+      "id": "sku.in_transit",
+      "group": "read",
+      "tool": "get_in_transit",
+      "name": "在途采购",
+      "scopes": [
+        "read"
+      ],
+      "scope_kind": "sku",
+      "transport": "rest",
+      "endpoints": [
+        "GET /api/v1/skus/{sku_id}/in-transit"
+      ]
+    },
+    {
+      "id": "sku.reservations",
+      "group": "read",
+      "tool": "get_reservations",
+      "name": "CRM 预订",
+      "scopes": [
+        "read"
+      ],
+      "scope_kind": "sku",
+      "transport": "rest",
+      "endpoints": [
+        "GET /api/v1/skus/{sku_id}/reservations"
+      ]
+    },
+    {
+      "id": "sku.orders",
+      "group": "read",
+      "tool": "get_orders",
+      "name": "SKU 近 N 天订单",
+      "scopes": [
+        "read"
+      ],
+      "scope_kind": "sku",
+      "transport": "rest",
+      "endpoints": [
+        "GET /api/v1/skus/{sku_id}/orders"
+      ]
+    },
+    {
+      "id": "sku.sales",
+      "group": "read",
+      "tool": "get_sales",
+      "name": "SKU 销量",
+      "scopes": [
+        "read"
+      ],
+      "scope_kind": "sku",
+      "transport": "rest",
+      "endpoints": [
+        "GET /api/v1/skus/{sku_id}/sales"
+      ]
+    },
+    {
+      "id": "meta.metric_definitions",
+      "group": "read",
+      "tool": "get_metric_definitions",
+      "name": "指标口径元数据",
+      "scopes": [
+        "read"
+      ],
+      "scope_kind": "global",
+      "transport": "rest",
+      "endpoints": [
+        "GET /api/v1/metadata/metrics"
+      ]
+    },
+    {
+      "id": "metric.sales_rate",
+      "group": "read",
+      "tool": "get_sales_rate",
+      "name": "动销率",
+      "scopes": [
+        "read"
+      ],
+      "scope_kind": "department",
+      "transport": "rest",
+      "endpoints": [
+        "GET /api/v1/metrics/sales-rate"
+      ]
+    },
+    {
+      "id": "sku.transfer_suggestion",
+      "group": "read",
+      "tool": "create_transfer_suggestion",
+      "name": "跨仓调拨建议",
+      "scopes": [
+        "read"
+      ],
+      "scope_kind": "sku",
+      "transport": "rest",
+      "endpoints": [
+        "POST /api/v1/transfer-suggestions"
+      ]
+    },
+    {
+      "id": "style.metrics",
+      "group": "style",
+      "tool": "get_style_metrics",
+      "name": "款级指标（含尺码曲线/生命周期）",
+      "scopes": [
+        "read"
+      ],
+      "scope_kind": "style",
+      "transport": "rest",
+      "endpoints": [
+        "GET /api/v1/styles/{style_id}/metrics"
+      ]
+    },
+    {
+      "id": "style.size_curve",
+      "group": "style",
+      "tool": "get_size_curve",
+      "name": "尺码曲线",
+      "scopes": [
+        "read"
+      ],
+      "scope_kind": "style",
+      "transport": "rest",
+      "endpoints": [
+        "GET /api/v1/metrics/size-curve"
+      ]
+    },
+    {
+      "id": "style.size_gap",
+      "group": "style",
+      "tool": "get_size_gap",
+      "name": "断码款清单",
+      "scopes": [
+        "read"
+      ],
+      "scope_kind": "department",
+      "transport": "rest",
+      "endpoints": [
+        "GET /api/v1/metrics/size-gap"
+      ]
+    },
+    {
+      "id": "style.apparel_overview",
+      "group": "style",
+      "tool": "get_apparel_overview",
+      "name": "服装经营概览（齐码率/断码率/周转/售罄）",
+      "scopes": [
+        "read"
+      ],
+      "scope_kind": "department",
+      "transport": "rest",
+      "endpoints": [
+        "GET /api/v1/metrics/apparel-overview"
+      ]
+    },
+    {
+      "id": "erp.replenish_order",
+      "group": "write",
+      "tool": "create_replenishment_order",
+      "name": "创建补货草稿单",
+      "scopes": [
+        "write"
+      ],
+      "scope_kind": "sku",
+      "transport": "rest",
+      "endpoints": [
+        "POST /api/v1/erp/replenish-orders"
+      ]
+    },
+    {
+      "id": "order.after_sales",
+      "group": "write",
+      "tool": "create_after_sales",
+      "name": "发起售后工单草稿",
+      "scopes": [
+        "write"
+      ],
+      "scope_kind": "order",
+      "transport": "mcp",
+      "endpoints": [
+        "POST /api/v1/after-sales"
+      ]
+    },
+    {
+      "id": "approval.list",
+      "group": "approval",
+      "tool": "list_pending_approvals",
+      "name": "待审批列表",
+      "scopes": [
+        "read"
+      ],
+      "scope_kind": "sku_list",
+      "transport": "rest",
+      "endpoints": [
+        "GET /api/v1/approvals"
+      ]
+    },
+    {
+      "id": "order.status",
+      "group": "order",
+      "tool": "get_order_status",
+      "name": "订单状态",
+      "scopes": [
+        "read"
+      ],
+      "scope_kind": "order",
+      "transport": "mcp",
+      "endpoints": [
+        "GET /api/v1/orders/{order_id}"
+      ]
+    },
+    {
+      "id": "order.list",
+      "group": "order",
+      "tool": "list_orders",
+      "name": "SKU 订单列表",
+      "scopes": [
+        "read"
+      ],
+      "scope_kind": "sku",
+      "transport": "mcp",
+      "endpoints": [
+        "GET /api/v1/skus/{sku_id}/orders"
+      ]
+    },
+    {
+      "id": "order.logistics",
+      "group": "order",
+      "tool": "get_logistics",
+      "name": "物流轨迹",
+      "scopes": [
+        "read"
+      ],
+      "scope_kind": "order",
+      "transport": "mcp",
+      "endpoints": [
+        "GET /api/v1/orders/{order_id}/logistics"
+      ]
+    },
+    {
+      "id": "skill.list",
+      "group": "skill",
+      "tool": "list_skills",
+      "name": "技能清单",
+      "scopes": [],
+      "scope_kind": "local",
+      "transport": "local",
+      "endpoints": []
+    },
+    {
+      "id": "skill.load",
+      "group": "skill",
+      "tool": "load_skill",
+      "name": "加载技能全文",
+      "scopes": [],
+      "scope_kind": "local",
+      "transport": "local",
+      "endpoints": []
+    },
+    {
+      "id": "kb.search",
+      "group": "kb",
+      "tool": "search_knowledge",
+      "name": "知识库检索（SOP/规则/案例）",
+      "scopes": [],
+      "scope_kind": "kb",
+      "transport": "local",
+      "endpoints": []
+    },
+    {
+      "id": "meta.plan_query",
+      "group": "meta",
+      "tool": "plan_query",
+      "name": "查询计划",
+      "scopes": [],
+      "scope_kind": "local",
+      "transport": "local",
+      "endpoints": []
+    },
+    {
+      "id": "memory.search",
+      "group": "memory",
+      "tool": "search_analyses",
+      "name": "检索历史档案",
+      "scopes": [],
+      "scope_kind": "org",
+      "transport": "local",
+      "endpoints": []
+    },
+    {
+      "id": "memory.read",
+      "group": "memory",
+      "tool": "read_analysis",
+      "name": "读取档案全文",
+      "scopes": [],
+      "scope_kind": "org",
+      "transport": "local",
+      "endpoints": []
+    },
+    {
+      "id": "memory.save",
+      "group": "memory",
+      "tool": "save_analysis",
+      "name": "沉淀分析档案",
+      "scopes": [],
+      "scope_kind": "org",
+      "transport": "local",
+      "endpoints": []
+    }
+  ]
+}

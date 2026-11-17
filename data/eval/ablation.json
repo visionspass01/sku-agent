@@ -1,0 +1,47 @@
+[
+  {
+    "mode": "bm25",
+    "rerank": "none",
+    "recall@1": 0.9211,
+    "recall@5": 1.0,
+    "mrr": 0.9605,
+    "no_answer_rate": 0.9,
+    "rerank_degraded": 0
+  },
+  {
+    "mode": "vector",
+    "rerank": "none",
+    "recall@1": 0.9474,
+    "recall@5": 1.0,
+    "mrr": 0.9737,
+    "no_answer_rate": 0.9,
+    "rerank_degraded": 0
+  },
+  {
+    "mode": "rrf",
+    "rerank": "none",
+    "recall@1": 1.0,
+    "recall@5": 1.0,
+    "mrr": 1.0,
+    "no_answer_rate": 0.9,
+    "rerank_degraded": 0
+  },
+  {
+    "mode": "rrf",
+    "rerank": "heuristic",
+    "recall@1": 1.0,
+    "recall@5": 1.0,
+    "mrr": 1.0,
+    "no_answer_rate": 0.9,
+    "rerank_degraded": 0
+  },
+  {
+    "mode": "rrf",
+    "rerank": "llm",
+    "recall@1": 1.0,
+    "recall@5": 1.0,
+    "mrr": 1.0,
+    "no_answer_rate": 0.9,
+    "rerank_degraded": 40
+  }
+]

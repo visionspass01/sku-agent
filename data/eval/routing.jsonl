@@ -1,0 +1,26 @@
+{"id": "r01", "message": "ST-01-C1-M 断码了吗？哪些尺码缺货", "expect": "diagnostician", "expect_tools": ["get_sku_metrics", "get_size_gap"], "forbid_tools": ["save_analysis", "create_replenishment_order", "create_after_sales"]}
+{"id": "r02", "message": "这个款要补多少件？按安全库存算", "expect": "diagnostician", "expect_tools": ["get_sku_metrics"], "forbid_tools": ["create_replenishment_order"]}
+{"id": "r03", "message": "ST-12-C1-L 预计多久售罄，有断货风险吗", "expect": "diagnostician", "expect_tools": ["get_sell_through", "get_sku_metrics"], "forbid_tools": ["save_analysis"]}
+{"id": "r04", "message": "男装哪些款是积压候选", "expect": "diagnostician", "expect_tools": ["get_apparel_overview"], "forbid_tools": ["save_analysis"]}
+{"id": "r05", "message": "再订货点是多少，需要调拨吗", "expect": "diagnostician", "expect_tools": ["get_sku_metrics"], "forbid_tools": ["create_replenishment_order"]}
+{"id": "r06", "message": "这款近 7 天动销很差，该怎么处理", "expect": "diagnostician", "expect_tools": ["get_sku_metrics"], "forbid_tools": ["save_analysis"]}
+{"id": "r07", "message": "S 码和 L 码都缺货，优先补哪个码", "expect": "diagnostician", "expect_tools": ["get_size_curve", "get_size_gap"], "forbid_tools": ["create_replenishment_order"]}
+{"id": "r08", "message": "库存风险等级怎么看，我需要一份诊断结论", "expect": "diagnostician", "expect_tools": ["get_sku_metrics"], "forbid_tools": ["save_analysis"]}
+{"id": "r09", "message": "帮我建一张补货单，500 件", "expect": "operator", "expect_tools": ["create_replenishment_order", "get_inventory"], "forbid_tools": ["save_analysis"]}
+{"id": "r10", "message": "给 ST-01-C1-M 创建补货草稿单 300 件", "expect": "operator", "expect_tools": ["create_replenishment_order", "get_inventory", "get_sku_metrics"], "forbid_tools": []}
+{"id": "r11", "message": "这单能退货吗，帮我发起售后", "expect": "operator", "expect_tools": ["create_after_sales", "get_order_status"], "forbid_tools": ["save_analysis"]}
+{"id": "r12", "message": "订单 SO07208742 的物流到哪了", "expect": "operator", "expect_tools": ["get_logistics", "get_order_status"], "forbid_tools": []}
+{"id": "r13", "message": "我的补货单审批了吗", "expect": "operator", "expect_tools": ["list_pending_approvals"], "forbid_tools": []}
+{"id": "r14", "message": "客户要退款，走什么流程", "expect": "operator", "expect_tools": ["create_after_sales"], "forbid_tools": []}
+{"id": "r15", "message": "查一下最近 30 天这个 SKU 的订单", "expect": "operator", "expect_tools": ["list_orders", "get_orders"], "forbid_tools": ["save_analysis"]}
+{"id": "r16", "message": "快递什么时候能到", "expect": "operator", "expect_tools": ["get_logistics"], "forbid_tools": []}
+{"id": "r17", "message": "ST-01-C1-M 当前可用库存多少", "expect": "analyst", "expect_tools": ["get_inventory"], "forbid_tools": []}
+{"id": "r18", "message": "可用库存和现存库存有什么区别", "expect": "analyst", "expect_tools": ["get_metric_definitions"], "forbid_tools": []}
+{"id": "r19", "message": "帮我解释一下安全库存的计算口径", "expect": "analyst", "expect_tools": ["get_metric_definitions"], "forbid_tools": []}
+{"id": "r20", "message": "你好，你能做什么", "expect": "analyst", "expect_tools": [], "forbid_tools": []}
+{"id": "r21", "message": "先查一下 ST-01-C1-M 还剩多少，再帮我建补货单", "expect": "operator", "expect_tools": ["get_inventory", "create_replenishment_order"], "forbid_tools": []}
+{"id": "r22", "message": "断码严重吗，需要补货到多少件，能直接下单吗", "expect": "diagnostician", "expect_tools": ["get_size_gap", "get_sku_metrics"], "forbid_tools": ["create_replenishment_order"]}
+{"id": "r23", "message": "帮我看下这个情况", "plan_intent": "diagnose", "expect": "diagnostician", "expect_tools": ["get_sku_metrics"], "forbid_tools": ["save_analysis"]}
+{"id": "r24", "message": "帮我看下这个情况", "plan_intent": "restock", "expect": "diagnostician", "expect_tools": ["get_sku_metrics"], "forbid_tools": ["create_replenishment_order"]}
+{"id": "r25", "message": "帮我看下这个情况", "plan_intent": "approval", "expect": "operator", "expect_tools": ["list_pending_approvals"], "forbid_tools": []}
+{"id": "r26", "message": "帮我看下这个情况", "plan_intent": "lookup", "expect": "analyst", "expect_tools": [], "forbid_tools": []}

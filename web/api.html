@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>接口文档 · 电商 SKU 监管 Agent</title>
+  <link rel="stylesheet" href="/style.css" />
+  <style>
+    .api-page { min-height: 100vh; background: radial-gradient(1200px 600px at 20% -10%, #122033 0%, var(--bg) 55%); }
+    .api-wrap { max-width: 1080px; margin: 0 auto; padding: 36px 28px 80px; }
+    .api-head h1 { font-size: 22px; margin: 0 0 8px; }
+    .api-head p { color: var(--muted); font-size: 13px; line-height: 1.8; margin: 0 0 16px; }
+    .api-back { font-size: 13px; }
+    .api-toolbar { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin: 0 0 20px; }
+    .api-toolbar input {
+      flex: 1 1 320px; min-width: 220px; padding: 8px 12px; font-size: 13px;
+      color: var(--text); background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    }
+    .api-count { font-size: 12px; color: var(--muted); }
+    .api-group { margin: 0 0 22px; }
+    .api-group h2 {
+      font-size: 15px; margin: 0 0 10px; padding-left: 9px;
+      border-left: 3px solid var(--accent); color: #dbeafe;
+    }
+    .api-op { border: 1px solid var(--border); border-radius: 10px; background: var(--panel); margin: 0 0 8px; }
+    .api-op > summary { display: flex; gap: 10px; align-items: center; cursor: pointer; padding: 9px 12px; }
+    .api-op > summary::-webkit-details-marker { display: none; }
+    .api-method {
+      flex: 0 0 auto; font-size: 11px; font-weight: 700; letter-spacing: .4px;
+      padding: 2px 7px; border-radius: 5px; background: #12314a; color: #7dd3fc;
+    }
+    .api-method.post, .api-method.put, .api-method.patch { background: #2a2140; color: #c4b5fd; }
+    .api-method.delete { background: #3a1f24; color: #fca5a5; }
+    .api-path { font-family: Consolas, "Cascadia Mono", monospace; font-size: 12.5px; color: #e2e8f0; }
+    .api-summary { color: var(--muted); font-size: 12.5px; }
+    .api-deprecated { color: var(--warn); font-size: 11px; }
+    .api-body { padding: 2px 14px 14px; border-top: 1px solid var(--border); }
+    .api-desc { color: #c9d7e6; font-size: 13px; line-height: 1.85; white-space: pre-wrap; margin: 10px 0 0; }
+    .api-label { font-size: 12px; color: var(--muted); margin: 12px 0 4px; }
+    .api-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+    .api-table th, .api-table td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; vertical-align: top; }
+    .api-table th { background: var(--panel-2); color: #dbeafe; font-weight: 600; }
+    .api-empty { color: var(--muted); font-size: 13px; }
+    .api-err { color: var(--warn); font-size: 13px; }
+  </style>
+</head>
+<body class="api-page">
+  <div class="api-wrap">
+    <div class="api-head">
+      <h1>接口文档</h1>
+      <p>
+        本页直接读取同源 <code>/openapi.json</code> 并用原生 JS 渲染，不加载任何 CDN 资源。
+        FastAPI 自带的 <code>/docs</code> 需要从 cdn.jsdelivr.net 拉 Swagger UI，而本项目 CSP 是
+        <code>default-src 'self'</code>，外链脚本会被浏览器拦掉、页面一片空白，所以导航里改用本页。
+      </p>
+      <div class="api-toolbar">
+        <input id="api-filter" type="search" autocomplete="off"
+               placeholder="过滤：路径 / 方法 / 摘要，例如 chat、rag、memory、approve" />
+        <span class="api-count" id="api-count">加载中…</span>
+      </div>
+      <p class="api-back"><a href="/agents.html">← Agent 目录</a> · <a href="/">SKU 监管 Agent</a> · <a href="/about.html">项目简介</a></p>
+    </div>
+
+    <div id="api-body"><p class="api-empty">正在读取 /openapi.json …</p></div>
+  </div>
+
+  <script src="/api.js"></script>
+</body>
+</html>

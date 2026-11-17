@@ -1,0 +1,40 @@
+{
+  "id": "operator",
+  "name": "动作执行助手",
+  "description": "补货草稿单、售后工单、物流查询；写操作走人工确认，不自动审批。",
+  "prompt": "operator",
+  "tools": [
+    "write",
+    "read",
+    "order",
+    "style",
+    "skill",
+    "approval"
+  ],
+  "model": "",
+  "temperature": 0.0,
+  "max_tokens": 1500,
+  "max_tool_calls": 6,
+  "memory_scope": "session",
+  "routing": {
+    "keywords": [
+      "补货单",
+      "建单",
+      "创建",
+      "下单",
+      "退货",
+      "退款",
+      "售后",
+      "审批",
+      "物流",
+      "快递",
+      "发货",
+      "订单"
+    ],
+    "intents": [
+      "approval"
+    ]
+  },
+  "enabled": true,
+  "default": false
+}

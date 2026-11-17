@@ -1,0 +1,18 @@
+{
+  "id": "analyst",
+  "name": "库存分析助手",
+  "description": "默认 Agent：问数、口径解释、补货草稿、订单/售后查询。全量工具，覆盖所有常规问题。",
+  "prompt": "chat_system",
+  "tools": ["*"],
+  "model": "",
+  "temperature": 0.2,
+  "max_tokens": 2500,
+  "max_tool_calls": 15,
+  "memory_scope": "session",
+  "routing": {
+    "keywords": [],
+    "intents": []
+  },
+  "enabled": true,
+  "default": true
+}

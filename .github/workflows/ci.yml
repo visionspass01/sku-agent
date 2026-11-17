@@ -1,0 +1,130 @@
+name: ci
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # 脚本（eval_* / verify_stack）按 PYTHONPATH 找包；pytest 自己配了 pythonpath
+  PYTHONPATH: ${{ github.workspace }}/src
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Lint（ruff：import 顺序 / 未用变量 / 未定义名等）
+        run: python -m ruff check src tests scripts
+
+      - name: Compile all sources（语法检查，早于测试快速失败）
+        run: python -m compileall -q src scripts
+
+      - name: "Run tests（离线：FakeLLM / MockTransport / fakeredis / qdrant local）+ 覆盖率门槛"
+        run: |
+          python -m pytest --cov=src/app --cov-report=term-missing --cov-fail-under=80
+
+      - name: 答案质量判定器自检（离线、确定性）
+        run: python scripts/eval_agent_answers.py --offline
+
+      - name: 检索评测门槛（Recall@1 ≥ 0.8）
+        run: python scripts/eval_rag.py --min-recall 0.8
+
+      - name: Agent 路由准确率门槛（≥ 0.9）
+        run: python scripts/eval_routing.py --min-accuracy 0.9
+
+      - name: 工具部门作用域门槛（27 工具 × 3 账号 / 34 用例，必须 100%）
+        run: python scripts/eval_permissions.py --min-pass 1.0
+
+      - name: 出口溯源闸门门槛（准确率 ≥ 0.9、误杀率 ≤ 0.1）
+        run: python scripts/eval_grounding.py --max-false-positive 0.1
+
+      - name: 中台治理门槛（身份/scope/部门/配额/审计/并发，必须 100%）
+        run: python scripts/eval_platform_governance.py --min-pass 1.0
+
+      - name: Agent 工具面/写路径门禁（描述+参数说明/幂等键/未知工具契约/证据下限/聚合口径）
+        run: python scripts/eval_agent_tooling.py --min-pass 1.0
+
+      - name: 并发写自检（两个 agent 写同一份档案不静默覆盖）
+        run: python scripts/verify_concurrent_writes.py
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Frontend DOM smoke (no browser required)
+        run: node scripts/ui_smoke.js
+
+  # 生产数据库分支：CI 只跑 SQLite 的话，MySQL 方言（ensure_columns 的 CREATE INDEX、
+  # utf8mb4、事务隔离）从来没被验证过。这里用 service container 跑关键子集。
+  mysql:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: sku_ci
+          MYSQL_USER: sku
+          MYSQL_PASSWORD: sku
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -usku -psku"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=12
+    env:
+      PYTHONPATH: ${{ github.workspace }}/src
+      TEST_DATABASE_URL: mysql+pymysql://sku:sku@127.0.0.1:3306/sku_ci?charset=utf8mb4
+      TEST_SEED_SKUS: "40"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-dev.txt
+      - name: Tests on MySQL（档案/巡检/接口/记忆/检索索引/看板 + 中台治理）
+        run: |
+          python -m pytest -q \
+            tests/test_analysis_idempotent.py \
+            tests/test_analysis_concurrency.py \
+            tests/test_patrol.py \
+            tests/test_api.py \
+            tests/test_chat_store.py \
+            tests/test_memory_layers.py \
+            tests/test_rag_index_reconcile.py \
+            tests/test_screening.py \
+            tests/test_metrics_cards.py \
+            tests/test_platform.py \
+            tests/test_platform_authz.py \
+            tests/test_platform_governance.py \
+            tests/test_demo_catalog_contract.py

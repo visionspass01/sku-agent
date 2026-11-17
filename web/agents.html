@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<!--
+  Agent 目录页（/agents.html）
+
+  扩展方式：新增一个 Agent 演示页 =
+    ① 新增 web/<page>.html（复用同一套 header / 卡片样式，style.css 已含 .agent-* 类）
+    ② 在 web/agents.js 的 AGENT_PAGES 里加一条数据（严格 JSON：id / name / page / tagline / caps / accounts）
+  目录页会自动出现卡片，不需要改后端路由；
+  新页面若需要服务端注入 ?v= 版本号（避免"页面新、脚本旧"），再加一条 render_page_html 路由。
+
+  这段说明只作为代码注释保留，不在页面上渲染——访客看到的是入口卡片与运行状态。
+-->
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Agent 演示 · 服装电商</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body data-page="agents" data-ui-build="agents-v1">
+  <header>
+    <div class="brand">
+      <h1>Agent 演示平台</h1>
+      <p>一个页面一个 Agent：每个演示页独立开跑，互不影响 · 当前 <b id="agent-count">-</b> 个 Agent</p>
+    </div>
+    <div class="header-right">
+      <a class="doc-link" href="/about.html" target="_blank" rel="noopener">📘 项目简介</a>
+      <div class="badges" id="badges">
+        <span class="badge" id="badge-service">服务 <b id="badge-service-value">检测中…</b></span>
+        <span class="badge">存储 <b id="badge-db">-</b></span>
+        <span class="badge">缓存 <b id="badge-cache">-</b></span>
+        <span class="badge">模型 <b id="badge-llm">-</b></span>
+        <span class="badge">MCP <b id="badge-mcp">-</b></span>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <div class="scope-hint" id="scope-hint">
+      选择下方任一 Agent 进入演示；目录页只做入口与运行状态展示，登录、指标与对话都在各自的 Agent 页面里。
+    </div>
+
+    <div class="agent-grid" id="agent-grid">
+      <div class="agent-card agent-card-loading">
+        <div class="agent-name">正在加载 Agent 列表…</div>
+        <div class="muted">若长时间无响应，请确认后端已启动（<code>/api/health</code>）。</div>
+      </div>
+    </div>
+
+    <div class="agent-foot muted">
+      <a href="/api.html" target="_blank" rel="noopener">接口文档（OpenAPI）</a> ·
+      <a href="/about.html" target="_blank" rel="noopener">项目简介</a> ·
+      <a href="/">SKU 监管 Agent</a>
+      <span class="build-tag" id="build-tag">目录页</span>
+    </div>
+  </main>
+
+  <script src="/agents.js"></script>
+</body>
+</html>

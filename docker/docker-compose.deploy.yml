@@ -1,0 +1,192 @@
+name: sku-agent
+
+services:
+  # 关系库（必选）：4C4G 上给 128M buffer pool + 关 performance_schema，RSS 约 350–450MB。
+  # 不用 MySQL 8.4：它默认禁用 mysql_native_password，PyMySQL 走 caching_sha2 在无 TLS 时易踩坑。
+  # app / platform 默认连这里（DATABASE_URL / PLATFORM_DB_URL 见下）；要退回 SQLite 就显式覆盖成 sqlite:///...
+  mysql:
+    image: mysql:8.0.39
+    container_name: sku-agent-mysql
+    restart: unless-stopped
+    mem_limit: 768m
+    command: >
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_unicode_ci
+      --innodb-buffer-pool-size=128M
+      --performance-schema=OFF
+      --max-connections=100
+      --innodb-flush-log-at-trx-commit=2
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root-demo-pass}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-sku_demo}
+      MYSQL_USER: ${MYSQL_USER:-sku}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-sku-demo-pass}
+      # 中台库名：initdb 脚本按它建库并给 MYSQL_USER 授权（改用户名不会丢授权）
+      PLATFORM_MYSQL_DATABASE: ${PLATFORM_MYSQL_DATABASE:-platform}
+    volumes:
+      - ../data/mysql:/var/lib/mysql
+      - ./initdb:/docker-entrypoint-initdb.d:ro
+    expose:
+      - "3306"
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 40s
+
+  # 缓存（可选）：TTL 抖动缓存 / Stream 队列 / 分布式锁；挂掉时 Agent 自动降级为不缓存。
+  # 默认不启动（REDIS_URL 默认空 → 应用走进程内 fakeredis）；需要真实 Redis 时：
+  #   docker compose --env-file .env -f docker/docker-compose.deploy.yml --profile redis up -d
+  # 并在 .env 中设置 REDIS_URL=redis://redis:6379/0
+  redis:
+    image: redis:7.4-alpine
+    container_name: sku-agent-redis
+    restart: unless-stopped
+    mem_limit: 192m
+    profiles: ["redis"]
+    command: redis-server --maxmemory 128mb --maxmemory-policy allkeys-lru --save 60 1
+    volumes:
+      - ../data/redis:/data
+    expose:
+      - "6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 30
+
+  # 向量库（可选）：不发布端口，仅容器内 app → qdrant:6333；SQLite 仍是语料权威源，
+  # qdrant 挂掉时 app 自动降级到内存检索（见 src/app/rag/vector_store.py）。
+  qdrant:
+    image: qdrant/qdrant:v1.12.4
+    container_name: sku-agent-qdrant
+    restart: unless-stopped
+    mem_limit: 384m
+    cpus: 1.0
+    volumes:
+      - ../data/qdrant:/qdrant/storage
+    expose:
+      - "6333"
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  app:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
+    image: sku-agent:latest
+    container_name: sku-agent-app
+    restart: unless-stopped
+    mem_limit: 1536m
+    env_file:
+      - ../.env
+    environment:
+      # 默认 MySQL（与真实部署同构）；要退回 SQLite 就在 .env 里显式设 DATABASE_URL=sqlite:////app/data/sku_demo.db
+      DATABASE_URL: ${DATABASE_URL:-mysql+pymysql://${MYSQL_USER:-sku}:${MYSQL_PASSWORD:-sku-demo-pass}@mysql:3306/${MYSQL_DATABASE:-sku_demo}?charset=utf8mb4}
+      REDIS_URL: ${REDIS_URL:-}
+      MCP_TRANSPORT: memory
+      PYTHONPATH: /app/src
+      PLATFORM_API_URL: http://platform:8001
+      # AUTH_SECRET / PLATFORM_INTERNAL_TOKEN 不在此处赋值：由 env_file（../.env）注入。
+      # 原因：compose 的 ${VAR:-默认值} 替换只读 --env-file / docker/.env，不看 env_file，
+      # 若这里再写一遍会把 .env 里的真实密钥覆盖成公开默认值（安全风险）。
+      # 两者缺省时应用侧使用自身默认值，并在 /api/health.security 标记 is_default 告警。
+      # 检索栈：服务器默认走 Qdrant + 腾讯 TokenHub embedding；两者不可用时自动降级
+      # （memory + 哈希向量），演示不会 500。本地不配这两个变量即保持零依赖。
+      VECTOR_STORE: ${VECTOR_STORE:-qdrant}
+      QDRANT_URL: ${QDRANT_URL:-http://qdrant:6333}
+      QDRANT_COLLECTION: ${QDRANT_COLLECTION:-kb_chunks}
+      EMBEDDING_BACKEND: ${EMBEDDING_BACKEND:-tencent}
+      TENCENT_EMBEDDING_API_KEY: ${TENCENT_EMBEDDING_API_KEY:-}
+      TENCENT_EMBEDDING_BASE_URL: ${TENCENT_EMBEDDING_BASE_URL:-https://tokenhub.tencentmaas.com/v1}
+      TENCENT_EMBEDDING_MODEL: ${TENCENT_EMBEDDING_MODEL:-kinfra-text-embedding-0.6b}
+      # Demo 默认关闭定时巡检：开启后每小时/每日会真实调用 LLM，
+      # 无人访问时也会持续消耗 token。需要演示定时能力再改为 "true"。
+      SCHEDULER_ENABLED: ${SCHEDULER_ENABLED:-false}
+      TZ: Asia/Shanghai
+    volumes:
+      - ../data:/app/data
+    expose:
+      - "8000"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    command: >
+      sh -c "python scripts/ensure_init.py;
+             exec uvicorn app.main:app --host 0.0.0.0 --port 8000
+                  --proxy-headers --forwarded-allow-ips=*"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://127.0.0.1:8000/api/health', timeout=3).raise_for_status()"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
+  platform:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
+    image: sku-agent:latest
+    container_name: sku-agent-platform
+    restart: unless-stopped
+    mem_limit: 512m
+    env_file:
+      - ../.env
+    environment:
+      # PLATFORM_INTERNAL_TOKEN 由 env_file（../.env）注入，不在此赋值（原因同 app 段注释）
+      # 多 Agent 治理：按调用方发 key（scopes/departments/rate_limit），见 docs/CONFIG.md
+      PLATFORM_API_KEYS: ${PLATFORM_API_KEYS:-}
+      PLATFORM_RATE_LIMIT_PER_MINUTE: ${PLATFORM_RATE_LIMIT_PER_MINUTE:-600}
+      # 数据源：默认中台自举（不读 Agent 库）；要复用 Agent 演示库再显式指定
+      PLATFORM_SOURCE_DB: ${PLATFORM_SOURCE_DB:-}
+      # 中台库默认也在 MySQL 里（initdb 会建 platform 库并授权）；
+      # 想留 SQLite 就设 PLATFORM_DB_URL=sqlite:////app/data/platform.db
+      PLATFORM_DB_URL: ${PLATFORM_DB_URL:-mysql+pymysql://${MYSQL_USER:-sku}:${MYSQL_PASSWORD:-sku-demo-pass}@mysql:3306/${PLATFORM_MYSQL_DATABASE:-platform}?charset=utf8mb4}
+      PYTHONPATH: /app/src
+    volumes:
+      - ../data:/app/data
+    expose:
+      - "8001"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    command: >
+      sh -c "python scripts/ensure_init.py --platform && 
+             exec uvicorn data_platform.api.main:app --host 0.0.0.0 --port 8001
+                  --proxy-headers --forwarded-allow-ips=*"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://127.0.0.1:8001/api/v1/health', timeout=3).raise_for_status()"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: sku-agent-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "500:500"
+      # 443 只用于「浏览器默认 https」兜底：握手后 301 到 http（见 docker/nginx.conf 末尾）
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      # 自签证书目录（由 scripts/gen_redirect_cert.sh 生成，docker/certs/ 已在 .gitignore）
+      - ./certs:/etc/nginx/certs:ro
+    depends_on:
+      app:
+        condition: service_healthy
+      platform:
+        condition: service_healthy

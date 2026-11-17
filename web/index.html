@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>电商 SKU 监管 Agent · Demo</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body data-ui-build="v20261110-ui9" data-agent="sku">
+  <header>
+    <div class="brand">
+      <h1>电商 SKU 监管 Agent</h1>
+      <p>LangGraph Supervisor-Worker · MCP 工具链 · RAG SOP 引用溯源 · 部门权限隔离 · 模拟数据演示</p>
+    </div>
+    <div class="header-right">
+      <a class="doc-link" href="/agents.html">🗂 Agent 目录</a>
+      <a class="doc-link" href="/about.html" target="_blank" rel="noopener">📘 项目简介</a>
+      <div class="badges" id="badges">
+        <span class="badge">存储 <b id="badge-db">-</b></span>
+        <span class="badge">缓存 <b id="badge-cache">-</b></span>
+        <span class="badge">LLM <b id="badge-llm">-</b></span>
+        <span class="badge">MCP <b id="badge-mcp">-</b></span>
+      </div>
+
+      <div class="account" id="account">
+        <button id="btn-login" class="account-chip login-chip">登录账号</button>
+        <button id="account-chip" class="account-chip user-chip hidden">
+          <span class="avatar" id="account-avatar">?</span>
+          <span class="acc-name" id="account-name">-</span>
+          <span class="caret">▾</span>
+        </button>
+        <div class="account-menu hidden" id="account-menu">
+          <div class="acc-head" id="account-head"></div>
+          <button class="menu-item" id="menu-switch">切换账号</button>
+          <button class="menu-item" id="menu-security">安全记录
+            <span class="menu-note">仅保留近 4 小时</span>
+          </button>
+          <button class="menu-item danger" id="menu-logout">登出</button>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <div class="scope-hint" id="scope-hint">未登录 · 登录后可查看数据</div>
+
+    <div class="grid-cards">
+      <div class="card clickable" id="card-skus" data-card="skus">
+        <div class="label" id="label-skus">SKU 总数</div>
+        <div class="value" id="m-skus">-</div>
+        <div class="hint">点击查看各部门明细（管理员）</div>
+      </div>
+      <div class="card clickable" id="card-anomalies" data-card="anomalies">
+        <div class="label" id="label-anomalies">异常 SKU</div>
+        <div class="value" id="m-anomalies">-</div>
+        <div class="hint">点击查看各部门明细（管理员）</div>
+      </div>
+      <div class="card clickable" id="card-hit" title="点击查看缓存命中与延迟分位明细（接口/工具/中台/LLM/整轮对话）">
+        <div class="label">缓存命中率（Agent 旁路缓存）</div>
+        <div class="value" id="m-hit">-</div>
+        <div class="hint">P50 <b id="m-lat-p50">-</b> · P95 <b id="m-lat-p95">-</b>（对话取数 / MCP / RAG；点击看明细）</div>
+      </div>
+      <div class="card clickable" id="card-llm">
+        <div class="label">LLM 调用次数 / token 量</div>
+        <div class="value" id="m-llm">-</div>
+        <div class="hint">对话 + 巡检等全部调用（点击看来源/部门）</div>
+      </div>
+      <div class="card clickable" id="card-queue">
+        <div class="label">巡检队列 pending / 流长度</div>
+        <div class="value" id="m-pending">-</div>
+        <div class="hint">对话进行中 <b id="m-chat-streams">0</b>（对话不排队，SSE 直推；点击看明细）</div>
+      </div>
+    </div>
+    <div class="muted cards-note">
+      指标口径：<b>缓存</b>=Agent 旁路缓存（对话取数 GET / MCP / RAG 检索；中台层单列在明细里）；
+      <b>LLM</b>=对话 + 巡检研判 + 校验等全部调用；<b>队列</b>=巡检 Redis Stream 队列 + 对话进行中的 SSE 连接数；
+      异常列表 / SKU 定位等只读组件不产生上述指标。
+    </div>
+
+          <div class="chat-row">
+        <div class="panel chat-panel">
+          <h2><span class="dot"></span>AI 助手（自然语言问数 / 智能诊断 / 自动补货）
+            <span class="build-tag" id="build-tag" title="前端版本号：若与服务器不一致说明浏览器缓存了旧脚本">UI v20261110-ui8</span>
+          </h2>
+          <div class="chat-examples">
+            <button type="button" class="chip-btn" data-example="ST-01-C1-M 当前可用库存和预计售罄时间是多少？">可用库存 &amp; 售罄时间</button>
+            <button type="button" class="chip-btn" data-example="ST-13-C1-M 是否面临断货风险？请结合 CRM 预订和订单给出影响评估。">断货风险诊断</button>
+            <button type="button" class="chip-btn" data-example="帮我看看 ST-06-C1-M 是否需要补货，给出建议并创建补货草稿单。">自动补货建议</button>
+          </div>
+          <div class="chat-toolbar">
+            <label class="chat-opt" title="勾选后，每个问题下方会出现一张蓝标「Query 重写」卡片：意图/实体/时间窗/必需数据/置信度/plan_id。只展示，不改写你的原话。">
+              <input type="checkbox" id="chk-query-plan" />
+              <span>Query 重写</span>
+            </label>
+            <label class="chat-opt" title="勾选后，每条回答下方会出现绿标「显示运行详情」：证据链 + 可展开面板（工具时间线 / 事实卡 / token / 权限）。">
+              <input type="checkbox" id="chk-run-detail" checked />
+              <span>显示运行详情</span>
+            </label>
+            <button type="button" id="btn-memory" class="mini-btn secondary" title="查看当前会话的记忆：事实卡、工作集实体、最近取数台账、最近一次查询计划">记忆面板</button>
+            <span class="chat-hint-label" title="仅展示最近 24 小时的会话；选中一条会把当时的问答、运行详情与事实卡快照重新显示出来，也可以接着聊">历史会话（近 24 小时）</span>
+            <select id="chat-history" title="选中后回放那次会话的问答，并带回当时的运行详情与事实卡快照（只读回放，可继续对话；超过 24 小时的会话会自动清理）">
+              <option value="">选择会话回放…</option>
+            </select>
+          </div>
+          <div class="feature-hints hidden" id="feature-hints"></div>
+          <div class="chat-messages" id="chat-messages">
+            <div class="muted">登录后可对话：支持问数、缺货诊断与补货草稿单（大额补货需人工确认）。</div>
+          </div>
+          <div class="row" style="margin-top:10px">
+            <input id="chat-input" placeholder="例如：ST-01-C1-M 当前可用库存和预计售罄时间" />
+            <button id="btn-chat-send">发送</button>
+            <button id="btn-chat-reset" class="secondary">新会话</button>
+          </div>
+          <div class="facts-underbar" id="facts-underbar">
+            <div class="facts-underbar-head">
+              <span class="artifact-badge badge-facts">当前事实卡</span>
+              <span class="muted" id="facts-underbar-meta">第 1 轮还没有可压缩的历史，第 2 轮起自动生成</span>
+              <span class="facts-underbar-actions">
+                <button type="button" class="mini-btn secondary" id="facts-copy" title="复制事实卡全文">复制</button>
+                <button type="button" class="mini-btn secondary" id="facts-more" title="打开记忆面板查看事实卡、工作集与取数台账">完整记忆</button>
+              </span>
+            </div>
+            <pre class="facts-pre facts-underbar-body" id="facts-underbar-body">—</pre>
+            <div class="working-set-underbar" id="working-set-underbar">
+              <div class="facts-underbar-head">
+                <span class="artifact-badge badge-mem">实体表（工作集）</span>
+                <span class="muted" id="working-set-underbar-meta">提问里出现 SKU/款号/尺码后自动累积</span>
+                <span class="facts-underbar-actions">
+                  <button type="button" class="mini-btn secondary" id="working-set-copy" title="复制实体表（&lt;working-set&gt; 原文）">复制</button>
+                </span>
+              </div>
+              <div class="working-set-body empty" id="working-set-underbar-body">—</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panels">
+        <div class="panel">
+          <h2><span class="dot"></span>单 SKU 研判</h2>
+          <div class="row">
+            <input id="sku-input" list="sku-options" placeholder="输入 SKU 编码，如 ST-05-C1-M" value="ST-12-C1-L" />
+            <datalist id="sku-options"></datalist>
+            <button id="btn-inspect">启动研判</button>
+          </div>
+          <div class="muted" style="margin-top:8px" id="inspect-hint">完整链路：Supervisor 拆解 → ERP/拍立淘/RAG 并行采集 → Skill 子图 → 预案生成 → 校验 Agent（含合规/SOP 检查）</div>
+          <div id="resultCard" style="margin-top:14px">
+            <div class="muted">请先登录账号后发起研判。</div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2><span class="dot"></span>异常 SKU 列表（量化筛选）</h2>
+          <div class="muted" style="margin-bottom:8px" id="anomaly-hint">点击行可直接发起该 SKU 研判</div>
+          <div style="overflow:auto; max-height: min(360px, 46vh)">
+            <table>
+              <thead><tr><th>SKU</th><th>严重度</th><th>可售天数</th><th>日均销量</th><th>原因</th></tr></thead>
+              <tbody id="anomaly-rows"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2><span class="dot"></span>批量巡检</h2>
+          <div class="row">
+            <select id="patrol-mode">
+              <option value="daily">每日全量巡检（daily）</option>
+              <option value="hourly">小时增量巡检</option>
+            </select>
+            <input id="patrol-limit" type="number" value="8" min="1" max="50" style="width:90px" title="本次处理数量" />
+            <button id="btn-patrol">触发巡检</button>
+            <button id="btn-patrol-cancel" class="secondary" disabled>终止巡检</button>
+          </div>
+          <div class="muted" id="patrol-hint" style="margin-top:6px">
+            数量 = 本次最多处理的异常 SKU 数；daily=全量口径（不跳过已处理），hourly=增量口径（跳过最近 1 小时已研判的 SKU）。<br/>
+            巡检到异常后：生成处置预案 → 校验 Agent 做合规/SOP 检查 → 落库异常与预案结果；高风险补货动作进入「补货单列表」等待人工确认。
+          </div>
+          <div class="log" id="patrol-status" style="margin-top:8px; max-height: min(160px, 30vh)">暂无正在进行的巡检（最近 10 次见下表）</div>
+          <div id="patrol-report" style="margin-top:10px"></div>
+          <div class="section-title" style="margin-top:12px">巡检日志（最近 10 次，含本次简报）</div>
+          <div style="overflow:auto; max-height: min(220px, 40vh)">
+            <table>
+              <thead><tr><th>时间</th><th>操作人</th><th>模式</th><th>部门</th><th>处理</th><th>失败</th><th>报告</th></tr></thead>
+              <tbody id="patrol-log-rows"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2><span class="dot"></span>SOP 知识库检索（RAG）</h2>
+          <div class="muted" style="margin-bottom:8px" id="rag-scope">登录后可检索：通用 SOP + 所属部门内部 SOP</div>
+          <div class="row">
+            <input id="rag-input" placeholder="如：大促期间断码如何处理" value="大促期间断码如何处理" />
+            <button id="btn-rag" class="secondary">检索</button>
+          </div>
+          <div class="citations" id="rag-results" style="margin-top:10px"></div>
+        </div>
+
+        <div class="panel">
+          <h2><span class="dot"></span>SKU 快速定位</h2>
+          <div class="row">
+            <input id="sku-search" placeholder="按 SKU / 款号 / 品名搜索" value="ST-12" />
+            <button id="btn-sku-search" class="secondary">搜索</button>
+          </div>
+          <div style="overflow:auto; max-height: min(240px, 40vh); margin-top:10px">
+            <table>
+              <thead><tr><th>SKU</th><th>款名</th><th>库存</th><th>仓</th></tr></thead>
+              <tbody id="sku-rows"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2><span class="dot"></span>人工确认（补货单 + 售后工单）</h2>
+          <div class="muted" style="margin-bottom:8px" id="approvals-hint">
+            两类「Agent 只建草稿、人来做决定」的动作都在这里：<b>补货</b>（数量≥200 件或金额≥5 万元，保留近 4 小时）与
+            <b>售后</b>（退款/换货建议，保留全部待确认与已处理记录）。确认后都会记录审批账号与确认时间。
+          </div>
+          <div class="row">
+            <button type="button" id="btn-refresh-approvals" class="secondary">刷新列表</button>
+            <button type="button" id="btn-approval-demo" class="secondary">生成演示草稿单</button>
+          </div>
+          <div class="section-title" style="margin-top:10px">补货单（近 4 小时）</div>
+          <div style="overflow:auto; max-height: min(280px, 40vh)">
+            <table>
+              <thead><tr><th>SKU</th><th>数量</th><th>金额</th><th>状态</th><th>操作</th></tr></thead>
+              <tbody id="approval-rows"></tbody>
+            </table>
+          </div>
+          <div class="section-title" style="margin-top:12px">售后工单（待确认 / 已处理）</div>
+          <div style="overflow:auto; max-height: min(280px, 40vh)">
+            <table>
+              <thead><tr><th>订单</th><th>SKU</th><th>原因</th><th>数量</th><th>状态</th><th>操作</th></tr></thead>
+              <tbody id="after-sales-rows"></tbody>
+            </table>
+          </div>
+        </div>
+
+      </div>
+
+  </main>
+
+<div class="modal-overlay hidden" id="login-modal">
+    <div class="modal login-modal">
+      <div class="modal-title">登录账号</div>
+      <form id="login-form" autocomplete="off">
+        <label>用户名
+          <input id="login-username" placeholder="admin / worker1 / worker2" autocomplete="username" />
+        </label>
+        <label>密码
+          <input id="login-password" type="password" placeholder="请输入密码" autocomplete="current-password" />
+        </label>
+        <div class="login-error" id="login-error"></div>
+        <div class="modal-actions">
+          <button type="button" id="login-cancel" class="secondary">取消</button>
+          <button type="submit" id="login-submit">登录</button>
+        </div>
+      </form>
+      <div class="login-hint muted">
+        演示账号：<b>admin / hhw123</b>（管理员）· <b>worker1 / hhw111</b>（男装部门）· <b>worker2 / hhw222</b>（女装部门）
+      </div>
+    </div>
+  </div>
+
+  <!-- 通用弹窗（安全记录 / 部门明细） -->
+  <div class="modal-overlay hidden" id="modal-overlay">
+    <div class="modal" id="modal">
+      <div class="modal-title" id="modal-title"></div>
+      <div class="modal-body" id="modal-body"></div>
+      <div class="modal-actions">
+        <button type="button" id="modal-close" class="secondary">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+<script>
+  // 兜底自检：脚本没加载成功 / 版本与页面不一致时给出可见提示，并自动强刷一次（防循环）
+  window.addEventListener("load", function () {
+    var pageBuild = document.body.dataset.uiBuild || "";
+    var jsBuild = window.__UI_BUILD || "";
+    var broken = typeof window.attachRunDetail !== "function";
+    var mismatch = pageBuild && jsBuild && pageBuild !== jsBuild;
+    if (!broken && !mismatch) return;
+    var bar = document.createElement("div");
+    bar.className = "stale-banner";
+    bar.innerHTML = "⚠ 前端脚本与页面版本不一致（浏览器缓存了旧 app.js：页面 " +
+      (pageBuild || "?") + " / 脚本 " + (jsBuild || "缺失") + "），新功能不会生效。" +
+      "<button type='button' class='mini-btn' id='stale-reload-inline'>强制刷新</button>";
+    document.body.insertBefore(bar, document.body.firstChild);
+    document.getElementById("stale-reload-inline").onclick = function () {
+      location.replace(location.pathname + "?v=" + Date.now());
+    };
+    // 自动带版本参数重载一次；用 sessionStorage 防止死循环
+    try {
+      if (!sessionStorage.getItem("uiAutoReload")) {
+        sessionStorage.setItem("uiAutoReload", "1");
+        location.replace(location.pathname + "?v=" + Date.now());
+      }
+    } catch (e) { /* 隐私模式忽略 */ }
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>项目简介 · 电商 SKU 监管 Agent</title>
+  <link rel="stylesheet" href="/style.css" />
+  <style>
+    .doc-page {
+      min-height: 100vh;
+      background: radial-gradient(1200px 600px at 20% -10%, #122033 0%, var(--bg) 55%);
+    }
+    .doc-wrap {
+      max-width: 980px;
+      margin: 0 auto;
+      padding: 40px 32px 80px;
+    }
+    .doc-card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 28px 36px 40px;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+    }
+    .doc-card article h1 {
+      font-size: 24px;
+      margin: 0 0 18px;
+      letter-spacing: 0.5px;
+      background: linear-gradient(90deg, #7dd3fc, #818cf8);
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+    }
+    .doc-card article h2 {
+      font-size: 17px;
+      margin: 30px 0 12px;
+      padding-left: 10px;
+      border-left: 3px solid var(--accent);
+      color: #dbeafe;
+    }
+    .doc-card article h3,
+    .doc-card article h4 { font-size: 15px; margin: 20px 0 10px; color: #c9d7e6; }
+    .doc-card article p { font-size: 13.5px; line-height: 1.9; color: #c9d7e6; margin: 8px 0; }
+    .doc-card article strong { color: #f1f5f9; }
+    .doc-card article ul,
+    .doc-card article ol { margin: 8px 0 12px; padding-left: 22px; color: #c9d7e6; font-size: 13.5px; line-height: 1.9; }
+    .doc-card article li { margin: 4px 0; }
+    .doc-card article ul ul { margin: 2px 0; }
+    .doc-card article a { color: var(--accent); text-decoration: none; }
+    .doc-card article a:hover { text-decoration: underline; }
+    .doc-card article code {
+      font-family: Consolas, "Cascadia Mono", monospace;
+      font-size: 12.5px;
+      background: #0a1017;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 1px 6px;
+      color: #7dd3fc;
+    }
+    .doc-card article pre {
+      background: #081019;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px 16px;
+      overflow-x: auto;
+      margin: 12px 0;
+    }
+    .doc-card article pre code {
+      background: none;
+      border: none;
+      padding: 0;
+      color: #a5d8ff;
+      font-size: 12.5px;
+      line-height: 1.7;
+      display: block;
+      white-space: pre;
+    }
+    .doc-card article table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+      margin: 12px 0;
+    }
+    .doc-card article th,
+    .doc-card article td {
+      border: 1px solid var(--border);
+      padding: 8px 12px;
+      text-align: left;
+      vertical-align: top;
+    }
+    .doc-card article th { background: var(--panel-2); color: #dbeafe; font-weight: 600; }
+    .doc-card article td { color: #c9d7e6; }
+    .doc-card article hr { border: none; border-top: 1px solid var(--border); margin: 24px 0; }
+    /* 目录锚点跳转：平滑滚动 + 标题不被顶部裁切 */
+    html { scroll-behavior: smooth; }
+    .doc-card article h1,
+    .doc-card article h2,
+    .doc-card article h3,
+    .doc-card article h4 { scroll-margin-top: 18px; }
+    .doc-card article a.anchor { text-decoration: none; border-bottom: 1px dashed rgba(125, 211, 252, 0.5); }
+    .doc-card article a.anchor:hover { text-decoration: none; border-bottom-color: var(--accent); }
+    .doc-card article blockquote {
+      margin: 10px 0;
+      padding: 8px 14px;
+      border-left: 3px solid var(--warn);
+      background: rgba(251, 191, 36, 0.06);
+      color: #e2e8f0;
+    }
+    .doc-loading { color: var(--muted); font-size: 13px; }
+  </style>
+</head>
+<body class="doc-page">
+  <div class="doc-wrap">
+    <div class="doc-card">
+      <article id="content"><p class="doc-loading">正在加载项目简介…</p></article>
+    </div>
+  </div>
+
+  <script src="/markdown-lite.js"></script>
+  <script>
+    (function () {
+      var article = document.getElementById("content");
+      fetch("/about.md")
+        .then(function (resp) {
+          if (!resp.ok) throw new Error("HTTP " + resp.status);
+          return resp.text();
+        })
+        .then(function (text) {
+          article.innerHTML = window.renderMarkdown(text);
+          document.title = "项目简介 · 电商 SKU 监管 Agent";
+        })
+        .catch(function (err) {
+          article.innerHTML = '<p class="doc-loading">项目简介加载失败：' +
+            String(err.message || err) + "</p>";
+        });
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,48 @@
+[project]
+name = "sku-agent-demo"
+version = "1.0.0"
+description = "电商 SKU 库存监管 Agent：LangGraph Supervisor-Worker + MCP + RAG 引用溯源 + 四层记忆 + 可观测性（本地可运行 Demo）"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "<请替换为你的姓名>" }]
+keywords = [
+    "agent", "langgraph", "langchain", "mcp", "rag", "fastapi",
+    "ecommerce", "inventory", "observability", "qdrant",
+]
+classifiers = [
+    "Programming Language :: Python :: 3.11",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+]
+# 依赖仍以 requirements*.txt 为准（HTTP 服务直接源码运行，不做 pip 打包发布）
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "."]
+addopts = "-q"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+exclude = [".venv", "data", "web", "docs"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501", "E731"]
+
+[tool.coverage.run]
+# 治理下沉之后，中台也是"要交付的代码"：它的身份/作用域/配额/审计同样纳入覆盖率门槛
+source = ["src/app", "src/data_platform"]
+omit = [
+    "*/tests/*",
+    "src/app/mcp_servers/*",   # MCP server 由 tests/test_order_server.py 以函数直调覆盖
+    "src/data_platform/mock_sources.py",   # 演示数据生成器（由 bootstrap/contract 测试间接覆盖）
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true

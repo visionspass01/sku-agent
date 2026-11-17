@@ -1,0 +1,14 @@
+# 统一换行与二进制标记，避免 Windows CRLF 污染 diff
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+
+# 生成物/演示数据不参与 diff 统计
+data/*.db binary
+data/**/*.db binary

@@ -1,0 +1,18 @@
+{
+  "id": "diagnostician",
+  "name": "库存诊断专家",
+  "description": "断码/断货/积压/补货量诊断与建议，只读；不建单、不改状态。",
+  "prompt": "diagnostician",
+  "tools": ["read", "style", "kb", "skill", "meta", "memory"],
+  "model": "",
+  "temperature": 0.1,
+  "max_tokens": 2000,
+  "max_tool_calls": 12,
+  "memory_scope": "session",
+  "routing": {
+    "keywords": ["断码", "断货", "缺货", "售罄", "积压", "补货量", "补多少", "安全库存", "再订货点", "调拨", "动销", "风险"],
+    "intents": ["diagnose", "restock", "transfer"]
+  },
+  "enabled": true,
+  "default": false
+}

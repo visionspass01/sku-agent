@@ -1,0 +1,42 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+data/sku_demo.db
+data/*.db
+data/checkpoints.sqlite*
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.idea/
+.vscode/
+*.egg-info/
+.DS_Store
+*.log
+data/platform/
+data/qdrant/
+data/qdrant_local/
+data/mysql/
+data/redis/
+data/cache/
+data/eval/report-*.json
+data/analyses/*
+data/artifacts/*
+data/sku_demo.db-*
+!data/analyses/.gitkeep
+!data/artifacts/.gitkeep
+
+# 本地打包/备份产物（部署时会在仓库外或仓库内生成的临时文件）
+*.tar.gz
+*.bak
+*.old-*
+backup-*
+
+# 部署期生成的 TLS 证书（自签兜底证书 / 真实证书私钥都不要入库）
+docker/certs/*
+!docker/certs/.gitkeep
+# 由 deploy.env.example 复制出来的真实部署变量（含密码）
+docker/deploy.env
+
+docs/myself/

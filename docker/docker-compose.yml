@@ -1,0 +1,112 @@
+version: "3.9"
+
+# 一键起 MySQL + Redis + 数据中台(8001) + SKU 监管 Agent(8000)。
+# 默认关系库就是 MySQL（与真实部署同构）；想零依赖本地跑（SQLite + fakeredis）请按 README
+# 直接 `uvicorn` 启动，不必用 compose。
+services:
+  mysql:
+    image: mysql:8.0.39
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci --innodb-buffer-pool-size=128M --performance-schema=OFF
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: sku_demo
+      MYSQL_USER: sku
+      MYSQL_PASSWORD: sku
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-psku"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
+
+  redis:
+    image: redis:7.4
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  platform:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    # 自举成功才起服务（&&）：中台现在自带演示目录，不再依赖 Agent 演示库，
+    # 因此容器里没有 data/sku_demo.db 也能把 mart 灌满。
+    command: sh -c "python scripts/ensure_init.py --platform && uvicorn data_platform.api.main:app --host 0.0.0.0 --port 8001"
+    environment:
+      PLATFORM_INTERNAL_TOKEN: demo-internal-token
+      PLATFORM_API_PORT: "8001"
+      # 多 Agent 治理：按调用方发 key（scopes / departments / rate_limit），见 docs/CONFIG.md
+      # PLATFORM_API_KEYS: '{"sku-agent":{"key":"k-sku","scopes":["read","write","approve"],"departments":null}}'
+      PLATFORM_RATE_LIMIT_PER_MINUTE: "600"
+      # 想复用 Agent 演示库（仅本地便利）：PLATFORM_SOURCE_DB=/app/data/sku_demo.db
+      PLATFORM_SOURCE_DB: ""
+      # 中台库同样默认走 MySQL（compose 内网地址），保证「部署态 = 面试官看到的样子」
+      PLATFORM_DB_URL: ${PLATFORM_DB_URL:-mysql+pymysql://sku:sku@mysql:3306/platform?charset=utf8mb4}
+      PYTHONPATH: /app/src
+    ports:
+      - "8001:8001"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://127.0.0.1:8001/api/v1/health', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
+  app:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY}
+      DEEPSEEK_BASE_URL: https://api.deepseek.com
+      LLM_MODEL: deepseek-flash
+      # 默认 MySQL（Agent 主库）；本机开发想用 SQLite 就设 DATABASE_URL=sqlite:////app/data/sku_demo.db
+      DATABASE_URL: ${DATABASE_URL:-mysql+pymysql://sku:sku@mysql:3306/sku_demo?charset=utf8mb4}
+      REDIS_URL: redis://redis:6379/0
+      MCP_TRANSPORT: memory
+      PYTHONPATH: /app/src
+      SCHEDULER_ENABLED: "false"
+      PLATFORM_API_URL: http://platform:8001
+      PLATFORM_INTERNAL_TOKEN: demo-internal-token
+      # 调用方身份（与中台 PLATFORM_API_KEYS 里的 agent_id 对应）：审计/配额按它归因
+      PLATFORM_AGENT_ID: sku-agent
+      # 契约校验严格度：生产建议 true（中台漏版本号也当错误，灰度期就能发现）
+      PLATFORM_CONTRACT_STRICT: "false"
+      # RAG：默认离线可跑（heuristic 重排）。演示"真重排"改成 llm（需要 DEEPSEEK_API_KEY）
+      RAG_RERANK_BACKEND: heuristic
+      RAG_RERANK_TIMEOUT_MS: "400"
+      # 会话锁 fail-closed：Redis 抖动时宁可 503，也不放弃"同一会话一次一轮"
+      CHAT_SESSION_LOCK_REQUIRED: "true"
+    ports:
+      - "8000:8000"
+    volumes:
+      - app_data:/app/data
+    depends_on:
+      mysql:
+        condition: service_healthy
+      platform:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://127.0.0.1:8000/api/health', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 90s
+
+volumes:
+  mysql_data:
+  app_data:
