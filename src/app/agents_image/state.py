@@ -45,6 +45,11 @@ class PromptDraft(BaseModel):
     width: int = 1024
     height: int = 1024
     preserve: list[str] = Field(default_factory=list)
+    type: str = "generate"        # generate | layout | photo_required
+    fill_percent: int = 70        # 铁律②：商品占比数字化
+    margin_percent: int = 8       # 铁律③：留白显式声明
+    text_policy: str = "none"     # none | headline | spec
+    fragments: list[str] = Field(default_factory=list)   # RAG 命中的写法片段
 
 
 class GeneratedImage(BaseModel):

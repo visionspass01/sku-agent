@@ -1,0 +1,24 @@
+# prompt_pack.yaml —— 生图 Agent 的输出结构（D9，回写中台与人工审计共用）
+#
+# 由 `agents_image/prompt_pack.py::pack_document()` 生成；字段是**稳定契约**，
+# 下游（运营复用 / 评测脚本 / 审计）按图位重放即可。
+task_id: "20261117153045a3f9"     # 18 位任务 ID
+batch_id: "20261117153040b7c1"    # 一次批量请求共享
+product_id: "P-1001"              # 本任务商品（来自中台）
+platform: "淘系"
+aspect: "1:1"
+count: 2
+slots:
+  - slot: 1
+    role: "主图"
+    type: "generate"              # generate 出图；layout/photo_required 不出图
+    aspect: "1:1"                 # 画幅比例与请求一致
+    width: 1024
+    height: 1024
+    fill_percent: 70              # 铁律②：占比数字化
+    margin_percent: 8             # 铁律③：留白数字化
+    text_policy: "none"           # none | headline | spec（铁律⑥）
+    preserve: ["颜色", "版型", "图案", "logo 文字", "关键部件位置"]   # 铁律④
+    fragments: []                 # RAG 命中的写法片段（D10）
+    prompt: "五槽位 Prompt 全文"
+    negative_prompt: "文字水印、边框、拼图、多余物件、改变款式与颜色"

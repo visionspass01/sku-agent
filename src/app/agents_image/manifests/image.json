@@ -7,5 +7,22 @@
   "max_refs": 6,
   "max_total_images": 9,
   "default_aspect": "1:1",
-  "default_background": "白底电商风"
+  "default_background": "白底电商风",
+  "prompt_pack_version": "v2",
+  "slot_rules": {
+    "主图": {"fill": 70, "margin": 8, "text": "none", "reserve": true},
+    "上装卖点": {"fill": 68, "margin": 10, "text": "headline", "reserve": false},
+    "下装卖点": {"fill": 68, "margin": 10, "text": "headline", "reserve": false},
+    "场景 A": {"fill": 55, "margin": 12, "text": "none", "reserve": false},
+    "场景 B": {"fill": 55, "margin": 12, "text": "none", "reserve": false},
+    "细节特写": {"fill": 80, "margin": 6, "text": "none", "reserve": false},
+    "尺码对照": {"fill": 85, "margin": 5, "text": "spec", "reserve": false},
+    "配件/包装清单": {"fill": 80, "margin": 8, "text": "spec", "reserve": false},
+    "售后/退换": {"fill": 85, "margin": 5, "text": "spec", "reserve": false}
+  },
+  "non_generate_types": ["layout", "photo_required"],
+  "critic": {
+    "pass_score": 75,
+    "blocking": ["identity", "aspect", "text_policy"]
+  }
 }

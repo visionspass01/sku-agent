@@ -18,6 +18,7 @@ from app.agents_image.storage.image_storage import get_storage
 from app.agents_image.store import assets as asset_store
 from app.agents_image.store import tasks as task_store
 from app.agents_image.store.models import ImageAsset
+from app.core.errors import ImageError
 from app.db.engine import session_scope
 
 logger = logging.getLogger("sku-agent.image.graph")
@@ -78,7 +79,12 @@ async def execute_task(task_id: str) -> ImageTaskState:
     state.touch("validate")
     validate.degrade_note(state)
     validate.validate(state, settings=settings)
-    state.prompt_final = state.prompt_pack[0].prompt if state.prompt_pack else state.prompt
+    # 只有 type=generate 的图位走出图通道；排版/实拍图位只登记规划（不产生图片、不计交付）
+    generate_drafts = [d for d in state.prompt_pack if d.type == "generate"]
+    if not generate_drafts:
+        raise ImageError("IMG_INPUT_INVALID",
+                         "所选图位都不需要 AI 出图（尺码对照/包装清单/售后排版请走设计排版）")
+    state.prompt_final = generate_drafts[0].prompt or state.prompt
     if state.warnings:
         state.touch("validate_warnings", count=len(state.warnings))
 
@@ -86,10 +92,10 @@ async def execute_task(task_id: str) -> ImageTaskState:
         "provider": settings.provider,
         "refs": refs,
         "slots": [{"slot": d.slot, "prompt": d.prompt, "negative_prompt": d.negative_prompt,
-                   "n": 1} for d in state.prompt_pack],
-        "width": state.prompt_pack[0].width if state.prompt_pack else 1024,
-        "height": state.prompt_pack[0].height if state.prompt_pack else 1024,
-        "preserve": state.prompt_pack[0].preserve if state.prompt_pack else [],
+                   "n": 1} for d in generate_drafts],
+        "width": generate_drafts[0].width,
+        "height": generate_drafts[0].height,
+        "preserve": generate_drafts[0].preserve,
     }
     state.touch("generate")
     result = await generator_handler.run(payload)
@@ -137,7 +143,10 @@ async def execute_task(task_id: str) -> ImageTaskState:
 
 async def _backfill(state: ImageTaskState, *, outputs_by_slot: list[dict]) -> str:
     """结果元数据回写中台（**不含图片二进制**）；失败只改 `backfill_status`，不影响已交付的图。"""
+    from app.agents_image.prompt_pack import pack_yaml
     from app.agents_image.sources.product_source import get_catalog
+
+    generate_drafts = [draft for draft in state.prompt_pack if draft.type == "generate"]
 
     payload = {
         "request_id": state.request_id or state.task_id,
@@ -155,6 +164,7 @@ async def _backfill(state: ImageTaskState, *, outputs_by_slot: list[dict]) -> st
                    "attempted": state.attempted_images, "delivered": state.delivered_images},
         "requester": state.username,
         "trace_id": state.trace_id,
+        "prompt_pack_yaml": pack_yaml(state, generate_drafts),
         "results": [{
             "slot": item["slot"], "role": _role_of(state, item["slot"]),
             "prompt": _prompt_of(state, item["slot"]),

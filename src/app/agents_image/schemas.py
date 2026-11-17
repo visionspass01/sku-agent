@@ -66,10 +66,14 @@ class ClothingAttrs(BaseModel):
         return out or list(DEFAULT_MUST_NOT_CHANGE)
 
     def prompt_block(self) -> str:
-        """商品槽位的文字（compose 直接拼进模板，保持一处措辞）。"""
-        colors = "、".join(self.color_names) or self.color_hex
+        """商品槽位的文字（compose 直接拼进模板，保持一处措辞）。
+
+        铁律①：颜色**必须写 hex**，中文色名只作括号注（"#C8B7A6（米色）"），避免模型把米色渲染成别的色。
+        """
+        names = "、".join(self.color_names)
+        color = f"{self.color_hex}（{names}）" if names else self.color_hex
         return (
-            f"{self.product_type}（{self.category}）；版型：{self.shape}；主色：{colors}；"
+            f"{self.product_type}（{self.category}）；版型：{self.shape}；主色：{color}；"
             f"材质：{self.materials}；logo/文字：{self.logo_text}"
         )
 
