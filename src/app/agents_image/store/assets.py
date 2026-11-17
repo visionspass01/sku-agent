@@ -14,15 +14,19 @@ from app.core.errors import raise_image
 def save_bytes(session, data: bytes, *, kind: str, mime: str = "",
                task_id: str | None = None, slot: int = 0,
                username: str = "anonymous", department: str | None = None) -> ImageAsset:
-    """落盘并入库；同 (sha256, kind) 已存在则复用已有资产行（不重复占盘、不重复计费）。"""
+    """落盘并入库；同一账号重复上传同一张图 → 复用已有资产行（不重复占盘）。"""
     storage = get_storage()
     ref = storage.put(data, kind=kind, mime=mime)
-    # 上传件按内容去重（同一张图反复上传不重复占盘）；产出必须按 task 独立成行，
-    # 否则两次任务产出同样字节（比如同 prompt 同 seed）会被并成一条、任务查不到自己的图。
+    # 上传件按 (sha256, 账号) 去重：同一张图反复上传不重复占盘，但**不同账号各留各的行**
+    # ——否则 A 上传的图会被 B "命中"成 A 的资产，越权校验和 24h 清理都会串号。
+    # 产出必须按 task 独立成行，否则两次任务产出同样字节（同 prompt 同 seed）会被并成一条，
+    # 任务就查不到自己的图。
     existing = None
     if kind == "upload":
         existing = session.execute(
-            select(ImageAsset).where(ImageAsset.sha256 == ref.sha256, ImageAsset.kind == kind)
+            select(ImageAsset).where(ImageAsset.sha256 == ref.sha256,
+                                     ImageAsset.kind == kind,
+                                     ImageAsset.username == username)
         ).scalars().first()
     if existing is not None:
         return existing

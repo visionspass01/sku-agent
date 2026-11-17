@@ -85,7 +85,8 @@ def test_image_only_mode_boots_without_sku(tmp_path):
     env["APP_MODULES"] = "image"
     env["PYTHONPATH"] = str(SRC)
     env["DATABASE_URL"] = f"sqlite:///{(tmp_path / 'image_only.db').as_posix()}"
-    env["IMAGE_AGENT_ENABLED"] = "true"
+    env["IMAGE_ENABLED"] = "true"
+    env["PYTHONIOENCODING"] = "utf-8"   # 子进程日志是中文，避免父进程按 GBK 解码报警
     env["IMAGE_STORAGE"] = "local"
     env["IMAGE_CLEANUP_INTERVAL_MINUTES"] = "0"
     script = (

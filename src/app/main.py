@@ -286,6 +286,13 @@ async def add_no_cache_headers(request: Request, call_next):
         response.headers["Cache-Control"] = "no-cache, must-revalidate"
     for name, value in _SECURITY_HEADERS.items():
         response.headers.setdefault(name, value)
+    if IMAGE_ENABLED and path.startswith("/api/image"):
+        # 成功响应也回传 trace：用户报障时直接给 id 就能串起日志与任务（错误响应由 core.errors 写）
+        if "X-Trace-Id" not in response.headers:
+            import uuid
+
+            response.headers["X-Trace-Id"] = (request.headers.get("X-Trace-Id")
+                                              or uuid.uuid4().hex[:12])
     if path.startswith("/api/") and path not in _LATENCY_SKIP:
         latency.record("api", elapsed_ms)
     return response

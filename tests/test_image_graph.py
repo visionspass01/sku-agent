@@ -11,10 +11,10 @@ from app.agents_image import metrics as image_metrics
 from app.agents_image.config import reset_image_settings
 from app.agents_image.dispatch.local_generator import LocalGenerator
 from app.agents_image.graph import execute_task
+from app.agents_image.ids import new_task_id
 from app.agents_image.registry import reset_registry
 from app.agents_image.store import assets as asset_store
 from app.agents_image.store import tasks as task_store
-from app.agents_image.ids import new_task_id
 from app.agents_image.store.schema import ensure_image_schema
 from app.core.errors import ImageError, raise_image
 from tests.test_image_storage import make_png

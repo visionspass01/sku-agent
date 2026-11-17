@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from app.agents_image.schemas import attrs_of, merge_preserve
 from app.agents_image.state import ImageTaskState, PromptDraft
 
 
@@ -16,14 +17,9 @@ def build_slots(state: ImageTaskState) -> list[dict]:
 
 def compose(state: ImageTaskState, registry) -> list[PromptDraft]:
     """把「身份锁定 + 图位 + 场景风格」套进五槽位模板，产出每图位的 PromptDraft。"""
-    attrs = state.attrs or {}
-    must_not_change = list(attrs.get("must_not_change") or
-                           ["颜色", "版型", "图案", "logo 文字"])
-    product_block = (
-        f"{attrs.get('product_type', '服装商品')}；形状/版型：{attrs.get('shape', '以参考图为准')}；"
-        f"主色 {attrs.get('color_hex', '#FFFFFF')}；材质：{attrs.get('materials', '以参考图为准')}；"
-        f"logo/文字：{attrs.get('logo_text', '无')}"
-    )
+    attrs = attrs_of(state.attrs)
+    must_not_change = list(attrs.must_not_change)
+    product_block = attrs.prompt_block()
     scene_style = (state.scene_styles[0] if state.scene_styles else
                    registry.manifest.get("default_background", "白底电商风"))
     composition = state.compositions[0] if state.compositions else "正面全身像·上装突出"
@@ -50,7 +46,8 @@ def compose(state: ImageTaskState, registry) -> list[PromptDraft]:
         drafts.append(PromptDraft(
             slot=int(slot_no or 1), role=role,
             prompt=text, negative_prompt="文字水印、边框、拼图、多余物件、改变款式与颜色",
-            aspect=state.aspect, width=width, height=height, preserve=must_not_change,
+            aspect=state.aspect, width=width, height=height,
+            preserve=merge_preserve(None, must_not_change),
         ))
     return drafts
 

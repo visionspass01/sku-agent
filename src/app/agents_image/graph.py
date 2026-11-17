@@ -68,8 +68,11 @@ async def execute_task(task_id: str) -> ImageTaskState:
     state.touch("compose_prompt")
     state.prompt_pack = plan_slots.compose(state, registry)
     state.touch("validate")
+    validate.degrade_note(state)
     validate.validate(state, settings=settings)
     state.prompt_final = state.prompt_pack[0].prompt if state.prompt_pack else state.prompt
+    if state.warnings:
+        state.touch("validate_warnings", count=len(state.warnings))
 
     payload = {
         "provider": settings.provider,

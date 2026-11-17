@@ -1,7 +1,7 @@
 """生图 Agent 的表模型（挂在 SKU 的 `Base` 上，但表名全部 `image_*`，互不干扰）。
 
-D2–D3 只需要任务表与资产表；账号 / 配额 / 使用量 / 记忆 / outbox 在后续里程碑加入
-（`ensure_image_schema()` 只创建实际存在的表，所以可以逐个加）。
+已建：任务表 / 资产表（D2–D3）、账号表 / 令牌黑名单（D4）；配额 / 使用量 / 记忆 /
+outbox 在后续里程碑加入（`ensure_image_schema()` 只创建实际存在的表，所以可以逐个加）。
 """
 
 from __future__ import annotations
@@ -82,3 +82,33 @@ class ImageAsset(Base):
         Index("idx_image_asset_sha_kind", "sha256", "kind"),
         Index("idx_image_asset_task", "task_id", "slot"),
     )
+
+
+class ImageUser(Base):
+    """生图 Agent 的独立账号（不依赖 SKU 的 users 表，关掉 SKU 也能用）。
+
+    口令只存 `sha256(salt + plain)`，不落明文；不开放自助注册，账号由种子/管理员建。
+    """
+
+    __tablename__ = "image_user"
+
+    username: Mapped[str] = mapped_column(String(32), primary_key=True)
+    display_name: Mapped[str] = mapped_column(String(64), default="")
+    department: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    role: Mapped[str] = mapped_column(String(16), default="user")      # user | admin
+    password_salt: Mapped[str] = mapped_column(String(32), default="")
+    password_hash: Mapped[str] = mapped_column(String(64), default="")
+    enabled: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=dt.datetime.now)
+    last_login_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class ImageTokenBlacklist(Base):
+    """已登出/已踢下线的令牌（jti），到期后由清理任务删除。"""
+
+    __tablename__ = "image_token_blacklist"
+
+    jti: Mapped[str] = mapped_column(String(32), primary_key=True)
+    exp: Mapped[dt.datetime] = mapped_column(DateTime, index=True)
+    reason: Mapped[str] = mapped_column(String(32), default="logout")
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=dt.datetime.now)

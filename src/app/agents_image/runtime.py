@@ -85,6 +85,19 @@ async def startup() -> None:
     result = ensure_image_schema()
     if result["created"]:
         logger.info("image_* 表已就绪：%s", result["created"])
+    # 独立账号：预置 3 个演示账号（幂等，已存在不覆盖密码）
+    try:
+        from app.agents_image.store.users import ensure_seed_users
+        from app.db.engine import session_scope
+
+        with session_scope() as session:
+            created_users = ensure_seed_users(session)
+        if created_users:
+            logger.info("生图账号已预置：%s", created_users)
+    except Exception as exc:  # noqa: BLE001 —— 账号预置失败不阻塞启动
+        logger.warning("生图账号预置失败：%s", exc)
+    if settings.secret_is_default:
+        logger.warning("IMAGE_AUTH_SECRET 仍是默认值，上线前务必改掉（当前令牌可被伪造）")
     health_registry.register("image", health_block)
     if settings.storage.strip().lower() == "local":
         for directory in (settings.uploads_dir, settings.outputs_dir, settings.thumbs_dir):

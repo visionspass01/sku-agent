@@ -62,6 +62,18 @@ def mark_failed(session, task_id: str, *, code: str, detail: str = "") -> None:
                 error_code=code, error_detail=detail)
 
 
+def list_tasks(session, *, username: str | None = None, limit: int = 50,
+               status: str | None = None) -> list[ImageTask]:
+    """按创建时间倒序列任务；`username=None` 表示不限（管理员视角）。"""
+    statement = select(ImageTask)
+    if username:
+        statement = statement.where(ImageTask.username == username)
+    if status:
+        statement = statement.where(ImageTask.status == status)
+    statement = statement.order_by(ImageTask.created_at.desc()).limit(max(1, int(limit)))
+    return list(session.execute(statement).scalars().all())
+
+
 def list_recoverable(session, *, timeout_seconds: int) -> list[ImageTask]:
     """重启后需要续跑的任务：`queued`，或 `running` 但已超时（进程被杀时留下的）。"""
     cutoff = dt.datetime.now() - dt.timedelta(seconds=timeout_seconds)

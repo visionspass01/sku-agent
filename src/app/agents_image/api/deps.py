@@ -1,30 +1,66 @@
-"""生图 API 的依赖：当前以「可选用户」占位，D4 换成独立账号令牌校验（签名不变）。"""
+"""生图 API 的依赖：独立账号令牌校验（Bearer）与角色判定。
+
+错误语义：
+- 未登录 / 令牌无效 / 过期 / 已登出 → 401 `IMG_UNAUTHORIZED`
+- 普通用户访问管理员能力 / 越权看别人数据 → 403 `IMG_FORBIDDEN`
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 from fastapi import Request
 
-
-@dataclass
-class CurrentUser:
-    username: str
-    role: str = "user"
-    department: str | None = None
-
-    @property
-    def is_admin(self) -> bool:
-        return self.role == "admin"
+from app.agents_image.auth import (
+    AuthUser,
+    bearer_from_header,
+    get_throttle,
+    parse_token,
+)
+from app.agents_image.store import tokens as token_store
+from app.core.errors import ImageError, raise_image
 
 
-def current_user_optional(request: Request) -> CurrentUser | None:
-    """D2–D3 阶段：还没有账号体系，返回 None（任务按 anonymous 落库）。
+def _load_user(request: Request) -> AuthUser | None:
+    """解析 Bearer → 校验签名/过期/黑名单 → 查账号是否启用；失败抛 401。"""
+    cached = getattr(request.state, "image_user", None)
+    if cached is not None:
+        return cached
+    from app.db.engine import session_scope
 
-    D4 会改为「读 Authorization: Bearer <token> → 校验 → 返回 CurrentUser」，
-    调用方（routes）不感知变化。
-    """
-    return None
+    token = bearer_from_header(request.headers.get("Authorization"))
+    user = parse_token(token)
+    with session_scope() as session:
+        if token_store.is_revoked(session, user.jti):
+            raise_image("IMG_UNAUTHORIZED", "令牌已登出，请重新登录")
+        from app.agents_image.store.users import get_user
+
+        row = get_user(session, user.username)
+        if row is None or not row.enabled:
+            raise_image("IMG_UNAUTHORIZED", "账号不存在或已停用")
+        user.role = row.role or user.role
+        user.department = row.department
+    request.state.image_user = user
+    return user
+
+
+def current_user_optional(request: Request) -> AuthUser | None:
+    """没有 Authorization 头 → None；带了但无效 → 401（不静默降级成匿名）。"""
+    if not request.headers.get("Authorization"):
+        return None
+    return _load_user(request)
+
+
+def require_user(request: Request) -> AuthUser:
+    user = current_user_optional(request)
+    if user is None:
+        raise ImageError("IMG_UNAUTHORIZED", "请先登录（Authorization: Bearer <token>）")
+    return user
+
+
+def require_admin(request: Request) -> AuthUser:
+    user = require_user(request)
+    if not user.is_admin:
+        raise ImageError("IMG_FORBIDDEN", "需要管理员权限")
+    return user
 
 
 def trace_id_of(request: Request) -> str:
@@ -32,3 +68,18 @@ def trace_id_of(request: Request) -> str:
     import uuid
 
     return request.headers.get("X-Trace-Id") or uuid.uuid4().hex[:12]
+
+
+def client_ip(request: Request) -> str:
+    """登录限流用：优先 X-Forwarded-For 首跳（容器/nginx 后），否则直连 IP。"""
+    forwarded = (request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+    if forwarded:
+        return forwarded
+    real = (request.headers.get("X-Real-IP") or "").strip()
+    if real:
+        return real
+    return request.client.host if request.client else "-"
+
+
+__all__ = ["AuthUser", "current_user_optional", "require_user", "require_admin",
+           "trace_id_of", "client_ip", "get_throttle"]
