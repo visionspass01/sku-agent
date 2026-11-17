@@ -21,6 +21,12 @@ DEFAULT_MUST_NOT_CHANGE = ["颜色", "版型", "图案", "logo 文字", "关键�
 MAX_FEATURES = 8
 MAX_FEATURE_LEN = 40
 
+# 全局禁用表述（平台规则另有一套，由中台给）。放在这里是为了让 compose 也能 masking，
+# 避免「知识库片段里提到禁用词」被误判成 Prompt 违规。
+FORBIDDEN_WORDS = ("伪造", "官方认证", "真人明星", "冒充实拍", "极限词", "绝对化",
+                   "最便宜", "第一品牌")
+MASK_TEXT = "（平台禁用词）"
+
 
 class ClothingAttrs(BaseModel):
     """参考图里商品的固定属性（Prompt 的商品槽位 + 身份锁定的依据）。"""
@@ -196,5 +202,15 @@ def attrs_of(value: Any) -> ClothingAttrs:
     return ClothingAttrs.model_validate(value or {})
 
 
-__all__ = ["ClothingAttrs", "ImageIntent", "DEFAULT_MUST_NOT_CHANGE", "parse_attrs",
-           "parse_intent", "merge_preserve", "attrs_of", "HEX_PATTERN"]
+def mask_banned(text: str, banned: tuple[str, ...] | list[str] = ()) -> str:
+    """把禁用词替换成占位说明：知识库片段提到"禁用词"是正常的，不能因此判 Prompt 违规。"""
+    out = str(text or "")
+    for word in tuple(FORBIDDEN_WORDS) + tuple(banned or ()):
+        if word and word in out:
+            out = out.replace(word, MASK_TEXT)
+    return out
+
+
+__all__ = ["ClothingAttrs", "ImageIntent", "DEFAULT_MUST_NOT_CHANGE", "FORBIDDEN_WORDS",
+           "parse_attrs", "parse_intent", "merge_preserve", "attrs_of", "mask_banned",
+           "HEX_PATTERN"]

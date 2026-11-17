@@ -15,7 +15,7 @@ from app.agents_image.ids import new_task_id
 from app.agents_image.nodes import plan_slots
 from app.agents_image.prompt_pack import pack_document, pack_yaml
 from app.agents_image.registry import get_registry, reset_registry
-from app.agents_image.sources.fake_catalog import FakeCatalog, _PRODUCTS
+from app.agents_image.sources.fake_catalog import _PRODUCTS, FakeCatalog
 from app.agents_image.state import ImageTaskState, RefImage, SlotPlan
 from app.agents_image.store import assets as asset_store
 from app.agents_image.store import tasks as task_store

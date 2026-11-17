@@ -8,14 +8,12 @@
 
 from __future__ import annotations
 
-from app.agents_image.schemas import attrs_of
+from app.agents_image.schemas import FORBIDDEN_WORDS, attrs_of
 from app.agents_image.state import ImageTaskState
 from app.agents_image.storage.image_storage import get_storage
 from app.core.errors import raise_image
 
 ALLOWED_ASPECTS = {"1:1", "3:4", "4:3", "16:9"}
-FORBIDDEN_WORDS = ("伪造", "官方认证", "真人明星", "冒充实拍", "极限词", "绝对化",
-                   "最便宜", "第一品牌")
 MAX_FEATURE_COUNT = 8
 
 

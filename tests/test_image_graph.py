@@ -60,7 +60,7 @@ def test_execute_task_runs_nodes_in_order(image_db):
     task_id, _refs = _seed_task(n=2)
     state = asyncio.run(execute_task(task_id))
     stages = [item["stage"] for item in state.timeline]
-    assert stages[:4] == ["understand", "compose_prompt", "validate", "generate"]
+    assert stages[:5] == ["understand", "compose_prompt", "retrieve", "validate", "generate"]
     assert stages[-2:] == ["aggregate", "backfill"]      # 回写中台在交付之后
     assert state.delivered_images == 2
     assert len(state.prompt_pack) == 2

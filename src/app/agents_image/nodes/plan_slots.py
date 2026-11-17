@@ -15,7 +15,7 @@
 
 from __future__ import annotations
 
-from app.agents_image.schemas import attrs_of, merge_preserve
+from app.agents_image.schemas import attrs_of, mask_banned, merge_preserve
 from app.agents_image.state import ImageTaskState, PromptDraft
 
 # 图位角色 → 占比/留白/图内文字策略（可被 manifest.slot_rules 覆盖）
@@ -100,8 +100,8 @@ def slot_rule(slot, role: str, manifest: dict | None = None) -> dict:
     return rule
 
 
-def compose(state: ImageTaskState, registry, *, rules=None, fragments: list[str] | None = None
-            ) -> list[PromptDraft]:
+def compose(state: ImageTaskState, registry, *, rules=None,
+            fragments: list[str] | dict[int, list[str]] | None = None) -> list[PromptDraft]:
     """把「身份锁定 + 图位 + 构图/场景（中台 label）+ 平台规则 + RAG 片段」套进五槽位模板。"""
     attrs = attrs_of(state.attrs)
     must_not_change = list(attrs.must_not_change)
@@ -130,7 +130,10 @@ def compose(state: ImageTaskState, registry, *, rules=None, fragments: list[str]
                       else (background_rule or "与场景风格一致"))
         reserve_block = ("左上角约 8% 面积留白，不放置任何关键信息（留给平台角标；主图硬性要求）"
                          if rule.get("reserve") else "四周留白均匀，不留平台角标位")
-        rag_block = "；".join(item for item in (fragments or []) if item)
+        rag_items = _fragments_of(fragments, slot_no)
+        # 知识库片段本身会提到禁用词（"不得使用国家级"），注入前先 masking，
+        # 既不违规也不丢语义；落库的 fragments 保留原文便于审计。
+        rag_block = "；".join(mask_banned(item, extra_forbidden) for item in rag_items if item)
         banned = "、".join(extra_forbidden) if extra_forbidden else "无"
 
         text, _version = registry.prompt(manifest["generator_prompt"], {
@@ -163,9 +166,16 @@ def compose(state: ImageTaskState, registry, *, rules=None, fragments: list[str]
             preserve=merge_preserve(None, must_not_change),
             type=_field(item, "type", "generate"),
             fill_percent=int(rule["fill"]), margin_percent=int(rule["margin"]),
-            text_policy=text_key,
+            text_policy=text_key, fragments=list(rag_items),
         ))
     return drafts
+
+
+def _fragments_of(fragments, slot_no: int) -> list[str]:
+    """RAG 片段可以是「全体共用」或「按图位给」两种形态。"""
+    if isinstance(fragments, dict):
+        return [str(item) for item in (fragments.get(slot_no) or []) if item]
+    return [str(item) for item in (fragments or []) if item]
 
 
 def _field(item, name: str, default):

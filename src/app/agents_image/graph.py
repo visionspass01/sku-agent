@@ -75,7 +75,8 @@ async def execute_task(task_id: str) -> ImageTaskState:
         state.attrs = understand.understand(state)
         state.warnings.append("IMG_SCHEMA_INVALID: 任务缺少中台商品属性，已退回启发式抽取")
     state.touch("compose_prompt")
-    state.prompt_pack = plan_slots.compose(state, registry)
+    fragments = _recall_for_slots(state, settings)
+    state.prompt_pack = plan_slots.compose(state, registry, fragments=fragments)
     state.touch("validate")
     validate.degrade_note(state)
     validate.validate(state, settings=settings)
@@ -139,6 +140,34 @@ async def execute_task(task_id: str) -> ImageTaskState:
     state.touch("aggregate", delivered=delivered)
     await _backfill(state, outputs_by_slot=outputs)
     return state
+
+
+def _recall_for_slots(state: ImageTaskState, settings) -> dict[int, list[str]]:
+    """按图位召回「写法片段」（RAG）：检索失败只记 warning，不影响出图。"""
+    if not getattr(settings, "rag_enabled", True):
+        return {}
+    try:
+        from app.agents_image.rag import index as rag_index
+
+        product = str((state.attrs or {}).get("product_type") or "")
+        top_k = int(getattr(settings, "rag_top_k", 2) or 2)
+        fragments: dict[int, list[str]] = {}
+        for item in state.slots or []:
+            slot_no = int(getattr(item, "slot", 0) or 0)
+            query = " ".join(part for part in (
+                product, getattr(item, "role", ""),
+                getattr(item, "composition_label", ""),
+                getattr(item, "scene_style_label", ""),
+            ) if part)
+            hits = rag_index.retrieve(query, top_k=top_k)
+            fragments[slot_no] = [hit.snippet for hit in hits]
+        state.touch("retrieve", slots=len(fragments),
+                    hits=sum(len(items) for items in fragments.values()))
+        return fragments
+    except Exception as exc:  # noqa: BLE001 —— RAG 是增强能力
+        logger.warning("知识库召回失败（按无片段继续）：%s", exc)
+        state.warnings.append(f"IMG_RAG_DEGRADED: 知识库召回失败（{type(exc).__name__}）")
+        return {}
 
 
 async def _backfill(state: ImageTaskState, *, outputs_by_slot: list[dict]) -> str:

@@ -46,6 +46,11 @@ class ImageSettings(BaseSettings):
     retention_hours: int = Field(default=24, ge=1, le=24 * 30)
     cleanup_interval_minutes: int = Field(default=60, ge=0, le=24 * 60)  # 0 = 不启动后台清理
 
+    # ---- 本地知识库（RAG：写法片段 / 修复经验，不提供参数与规则真相）----
+    rag_enabled: bool = True
+    rag_top_k: int = Field(default=2, ge=1, le=6)
+    rag_kb_dir: str = ""              # 空 = data/kb_image
+
     # ---- 质量与成本 ----
     critic_pass_score: int = Field(default=75, ge=0, le=100)
     reflexion_max_rounds: int = Field(default=2, ge=0, le=5)
