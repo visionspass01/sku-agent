@@ -71,6 +71,7 @@ class ImageTaskState(BaseModel):
     department: str | None = None
 
     prompt: str = ""
+    prompt_final: str = ""
     platform: str = "淘系"
     aspect: str = "1:1"
     count: int = 1

@@ -41,6 +41,7 @@ class ImageSettings(BaseSettings):
     timeout_seconds: int = Field(default=60, ge=5, le=600)
 
     # ---- 本地存储与清理（测试环境图片保留 24h）----
+    images_root: str = ""             # 空 = data/images；测试/多实例时显式覆盖
     retention_hours: int = Field(default=24, ge=1, le=24 * 30)
     upload_retention_hours: int = Field(default=24, ge=1, le=24 * 30)
     cleanup_interval_minutes: int = Field(default=60, ge=0, le=24 * 60)  # 0 = 不启动后台清理
@@ -69,7 +70,7 @@ class ImageSettings(BaseSettings):
 
     @property
     def images_dir(self) -> pathlib.Path:
-        return pathlib.Path(DATA_DIR) / "images"
+        return pathlib.Path(self.images_root) if self.images_root else pathlib.Path(DATA_DIR) / "images"
 
     @property
     def uploads_dir(self) -> pathlib.Path:

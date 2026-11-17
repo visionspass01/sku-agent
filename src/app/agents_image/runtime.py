@@ -95,6 +95,15 @@ async def startup() -> None:
             _cleanup_loop(settings.cleanup_interval_minutes * 60),
             name="image-cleanup",
         )
+    # 无状态续跑：进程重启后，queued / 超时 running 的任务重新提交
+    try:
+        from app.agents_image.dispatch.task_dispatcher import get_dispatcher
+
+        resumed = await get_dispatcher().resume_pending()
+        if resumed:
+            logger.info("生图任务续跑：%d 个", len(resumed))
+    except Exception as exc:  # noqa: BLE001 —— 续跑失败不该阻塞启动
+        logger.warning("生图任务续跑失败：%s", exc)
     logger.info("Image Agent 已启动：provider=%s storage=%s dispatcher=%s",
                 settings.provider, settings.storage, settings.dispatcher)
 

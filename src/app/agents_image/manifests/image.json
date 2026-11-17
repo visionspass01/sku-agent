@@ -1,0 +1,11 @@
+{
+  "id": "image",
+  "name": "电商生图 Agent（图生图）",
+  "prompt": "image_system",
+  "generator_prompt": "prompt_generator",
+  "platform": "淘系",
+  "max_refs": 6,
+  "max_total_images": 9,
+  "default_aspect": "1:1",
+  "default_background": "白底电商风"
+}
