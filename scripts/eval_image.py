@@ -62,6 +62,16 @@ def _prompt_compliance(drafts) -> bool:
     ])
 
 
+def _gate_ok(images, rules) -> bool:
+    """主图过像素门禁（M5 的交付前门禁；离线用占位图，正常应全通过）。"""
+    from app.agents_image.nodes import compliance
+
+    mains = [image for image in images if image.slot == 1] or images[:1]
+    return all(compliance.gate(image.data, slot=image.slot, role="主图",
+                               platform_rules=rules, gate_mode="main",
+                               autofix=True).passed for image in mains)
+
+
 def evaluate_case(case: dict, catalog: FakeCatalog, registry, rules) -> dict:
     started = time.perf_counter()
     product = asyncio.run(catalog.get_product(case["product_id"]))
@@ -90,15 +100,16 @@ def evaluate_case(case: dict, catalog: FakeCatalog, registry, rules) -> dict:
     generate = [draft for draft in drafts if draft.type == "generate"]
     images = []
     for draft in generate:
-        from app.agents_image.png import placeholder_png
+        from app.agents_image.png import placeholder_compliant_png
 
         # 出图比例与请求一致（尺寸缩到 ≤256px：占位图是纯 Python 生成，全尺寸太慢）
+        # 用**合规占位图**（白底+居中主体），这样像素门禁在离线也能真实判过
         scale = 256 / max(draft.width, draft.height)
         width = max(64, int(draft.width * scale))
         height = max(64, int(draft.height * scale))
         images.append(critic_mod.CheckedImage(
             slot=draft.slot,
-            data=placeholder_png(f"{case['case_id']}:{draft.slot}", width, height),
+            data=placeholder_compliant_png(f"{case['case_id']}:{draft.slot}", width, height),
             mime="image/png", width=width, height=height,
         ))
     critic = critic_mod.critique(state, generate, images, rules=rules)
@@ -110,7 +121,61 @@ def evaluate_case(case: dict, catalog: FakeCatalog, registry, rules) -> dict:
         "prompt_compliant": _prompt_compliance(drafts),
         "critic_passed": critic.passed, "critic_score": critic.score,
         "issues": critic.issues, "elapsed_ms": elapsed_ms,
+        "gate_passed": _gate_ok(images, rules),
+        "platform_differ": evaluate_platforms(case, catalog, registry).get("differ", False),
+        "variant_differ": evaluate_variant(case, catalog, registry).get("differ", False),
     }
+
+
+def evaluate_platforms(case: dict, catalog, registry) -> dict:
+    """双平台双套（M5）：淘系允许主图文字、抖系不允许——两套 Prompt 应确实不同。"""
+    out = {}
+    for platform in ("淘系", "抖系"):
+        rules = asyncio.run(catalog.get_platform_rules(platform=platform))
+        policy = asyncio.run(catalog.get_plan_policy(platform=platform))
+        state = ImageTaskState(
+            task_id=case["case_id"], prompt=case["prompt"], aspect=case.get("aspect", "1:1"),
+            count=int(case.get("count") or 6), platform=platform,
+            refs=[RefImage(asset_id="ref-" + case["product_id"])],
+            attrs={},
+        )
+        product = asyncio.run(catalog.get_product(case["product_id"]))
+        state.attrs = dict(product.attrs)
+        state.slots = [SlotPlan(**item) for item in
+                       plan_slots.build_slots(state, policy=policy)]
+        drafts = plan_slots.compose(state, registry, rules=rules, policy=policy)
+        generate = [draft for draft in drafts if draft.type == "generate"]
+        out[platform] = {
+            "copy_allowed": any(draft.copy_spec.get("allowed") for draft in generate),
+            "prompt_len": sum(len(draft.prompt) for draft in generate),
+            "rules_notes": rules.notes,
+            "compliance": dict(rules.compliance or {}),
+        }
+    out["differ"] = (out["淘系"]["copy_allowed"] != out["抖系"]["copy_allowed"]
+                     or abs(out["淘系"]["prompt_len"] - out["抖系"]["prompt_len"]) > 40)
+    return out
+
+
+def evaluate_variant(case: dict, catalog, registry) -> dict:
+    """variant 差异化：A/B 两套主图方向的 Prompt 必须不同。"""
+    rules = asyncio.run(catalog.get_platform_rules(platform="淘系"))
+    policy = asyncio.run(catalog.get_plan_policy(platform="淘系"))
+    product = asyncio.run(catalog.get_product(case["product_id"]))
+    prompts = {}
+    for variant_id, direction in (("A", "版型优先"), ("B", "面料优先")):
+        state = ImageTaskState(
+            task_id=case["case_id"] + variant_id, prompt=case["prompt"], aspect="1:1",
+            count=2, platform="淘系", variant_id=variant_id, variant_direction=direction,
+            refs=[RefImage(asset_id="ref")], attrs=dict(product.attrs),
+        )
+        state.slots = [SlotPlan(**item) for item in
+                       plan_slots.build_slots(state, policy=policy, slot_count=2)]
+        drafts = [draft for draft in plan_slots.compose(state, registry, rules=rules,
+                                                        policy=policy, fragments=None)
+                  if draft.type == "generate"]
+        prompts[variant_id] = drafts[0].prompt if drafts else ""
+    return {"differ": prompts["A"] != prompts["B"],
+            "a_headline": "", "b_headline": ""}
 
 
 def summarize(rows: list[dict]) -> dict:
@@ -127,6 +192,15 @@ def summarize(rows: list[dict]) -> dict:
         "first_pass_rate": round(passed / len(rows), 4) if rows else 0.0,
         "elapsed_ms_p50": int(statistics.median(times)),
         "elapsed_ms_p95": int(p95),
+        "pixel_gate_pass_rate": round(
+            sum(1 for row in rows if row.get("gate_passed", True)) / len(rows), 4)
+        if rows else 0.0,
+        "platform_variant_differ_rate": round(
+            sum(1 for row in rows if row.get("platform_differ")) / len(rows), 4)
+        if rows else 0.0,
+        "variant_differ_rate": round(
+            sum(1 for row in rows if row.get("variant_differ")) / len(rows), 4)
+        if rows else 0.0,
         "rag_cache": rag_index.cache_stats(),
         "index": rag_index.index_status(),
     }
@@ -152,6 +226,9 @@ def main(argv: list[str] | None = None) -> int:
     else:
         summary = report["summary"]
         print(f"用例 {summary['cases']} 个｜Recall@3 {summary['recall_at_3']:.1%}"
+              f"｜门禁通过 {summary['pixel_gate_pass_rate']:.1%}"
+              f"｜双平台差异 {summary['platform_variant_differ_rate']:.1%}"
+              f"｜variant 差异 {summary['variant_differ_rate']:.1%}"
               f"｜Prompt 合规 {summary['prompt_compliance_rate']:.1%}"
               f"｜首轮通过 {summary['first_pass_rate']:.1%}"
               f"｜P50 {summary['elapsed_ms_p50']}ms / P95 {summary['elapsed_ms_p95']}ms")

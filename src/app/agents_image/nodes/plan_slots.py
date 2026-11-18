@@ -152,10 +152,8 @@ def compose(state: ImageTaskState, registry, *, rules=None, policy=None,
 
         text, _version = registry.prompt(manifest["generator_prompt"], {
             "product_block": product_block,
-            "scene_block": (f"{composition}；场景风格：{scene_style}；"
-                            f"商品占画面 {rule['fill']}%，四周留白 {rule['margin']}%"
-                            if (composition or scene_style)
-                            else f"商品占画面 {rule['fill']}%，四周留白 {rule['margin']}%"),
+            "scene_block": _scene_block(
+                composition, scene_style, rule, state.variant_direction),
             "light_block": "柔和棚拍光，方向自左上，sRGB，颜色准确",
             "aspect": state.aspect,
             "width": width,
@@ -187,6 +185,16 @@ def compose(state: ImageTaskState, registry, *, rules=None, policy=None,
             state.warnings.extend(copy_warnings)
             drafts[-1].copy_spec = {**slot_copy.as_dict(), "warnings": copy_warnings}
     return drafts
+
+
+def _scene_block(composition: str, scene_style: str, rule: dict,
+                 direction: str = "") -> str:
+    """场景与构图槽位：含占比/留白数字化；variant 方向（A/B）要体现在 Prompt 里。"""
+    parts = [part for part in (composition, f"场景风格：{scene_style}" if scene_style else "") if part]
+    parts.append(f"商品占画面 {rule['fill']}%，四周留白 {rule['margin']}%")
+    if direction:
+        parts.append(f"本图侧重：{direction}")
+    return "；".join(parts)
 
 
 def _fragments_of(fragments, slot_no: int) -> list[str]:

@@ -724,3 +724,21 @@ DeepSeek 的上下文缓存是**前缀命中**：请求前若干 token 与上次
 - **回写解耦**：图片交付与结果回写分开，回写失败只改 `backfill_status` 并进 outbox，
   由 `/api/image/admin/replay-outbox` 或定时任务重放，已交付的图不受影响。
 - **前端可观测**：手绘 SVG 折线图（月/周/日/小时 × 近 30 桶 + 按账户细分），零外部依赖、CSP 兼容。
+
+
+---
+
+## v7 架构要点（生图 Agent）
+
+```
+/image.html → 网关(鉴权/部门/幂等/配额预留/预算闸) → 取数接缝(catalog: 商品+颜色+预设+规则+回写)
+  → 编排: understand → compose(图内文案) → retrieve(RAG) → validate
+          → generate(provider 并发≤10) → critic →(reflexion→generate)*
+          → 像素门禁(主图 blocking, autofix) → aggregate → backfill(outbox)
+```
+
+- 出图最小单位 = **商品 + 颜色**；`slot_count` 与 `image_count` 分离（9 图位模板里只有 generate 图位出图）。
+- 配额**预留 → 成功结算 → 失败释放**；成本一律取 provider 真实计费，驳回不返还。
+- 取消语义：未调模型可取消；已调模型无法撤回，结果丢弃。
+- 恢复看门狗周期扫租约过期任务，多副本下 DB 为准。
+- 人工采纳/驳回 → 正/负样本（`image_memory.sample_kind`），参与后续 Reflexion。

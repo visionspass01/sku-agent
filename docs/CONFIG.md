@@ -208,3 +208,21 @@
 | `ARK_API_KEY` / `ARK_IMAGE_MODEL` / `ARK_VISION_MODEL` | 空 | 火山方舟（后期验收门再填） |
 
 数据中台侧（`data_platform`）：`PLATFORM_DB_URL`、`PLATFORM_INTERNAL_TOKEN`、`PLATFORM_API_PORT`（默认 8001）。
+
+
+---
+
+## v7 新增配置（生图 Agent）
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `ACCOUNTS_SOURCE` | `db` | 账号来源；`legacy` 回滚到 SKU 常量账号（故障回退） |
+| `IMAGE_REFS_PER_ITEM` | `2` | 每个「商品+颜色」取几张参考图（主图 + 细节） |
+| `IMAGE_MAX_TASKS_PER_REQUEST` | `60` | 颜色×平台×变体的任务数上限 |
+| `IMAGE_PROVIDER_CONCURRENCY` | `10` | 调第三方生图 API 的并发上限（与任务并发分开） |
+| `IMAGE_RECOVERY_INTERVAL_SECONDS` | `60` | 恢复看门狗扫描间隔（0=关闭） |
+| `IMAGE_COMPLIANCE_GATE` | `main` | 交付前像素门禁：`main`（只拦主图）/`all`/`off` |
+| `IMAGE_COMPLIANCE_AUTOFIX` | `true` | 门禁不过时先归白/裁方/放大再复检 |
+| `IMAGE_COST_BUDGET_CNY` | `0.5` | 单次请求成本估算上限（估算用 `IMAGE_COST_PER_IMAGE_CNY`；真实成本取 provider） |
+
+平台标识：**淘系 / 抖系**（`通用` 仅作中台兜底规则卡）。

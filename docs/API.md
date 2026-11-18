@@ -299,3 +299,19 @@ MCP server 现在**不碰任何数据库**：它们是「工具名 → `/api/v1/
 `IMG_TOO_MANY_REFS`(422) · `IMG_QUOTA_EXCEEDED`(429) · `IMG_UPSTREAM_MCP_UNAVAILABLE`(503，中台不可用直接失败) ·
 `IMG_UPSTREAM_INVALID`(502) · `IMG_CONTENT_BLOCKED`(422) · `IMG_SCHEMA_INVALID`(422) · `IMG_CRITIC_FAILED`(422) ·
 `IMG_BACKFILL_FAILED`(502) · `IMG_TASK_NOT_FOUND`(404) · `IMG_TASK_CONFLICT`(409) · `IMG_TIMEOUT`(504)
+
+
+---
+
+## v7 接口变化（生图 Agent）
+
+| 变化 | 说明 |
+|---|---|
+| `POST /api/image/tasks` 新增字段 | `product_colors[]` / `all_colors`、`slot_count`、`image_count`、`platforms[]` / `platform_variant`、`mode`(standard/variant/iterate)、`Idempotency-Key` 头 |
+| `POST /api/image/tasks` 响应 | `{batch_id, tasks[{task_id,product_id,color,color_key,platform,variant_id,image_count,slot_count}], slots, planned_images, idempotent}` |
+| `GET /api/image/tasks/{id}` | 增加 `platform/variant_id/color_key/slot_count/image_count/copy`；`assets[]` 带 `signed_url/adopt_status/blocked_reason/purged` |
+| `POST /api/image/tasks/{id}/cancel` | 未调模型 → 200「未调用生图模型的任务请求已取消。」；已调模型 → 409 `provider_in_flight=true` |
+| 新增 | `POST /tasks/{id}/assets/{aid}/adopt` · `/reject{reason}` · `/unblock`；`GET /admin/samples` · `/admin/feedback` |
+| `GET /api/image/assets/{id}` | 支持 `?exp=&sig=` 短签名（5 分钟），给 `<img src>` 用；过期/篡改 403 |
+| `GET /api/image/tasks` | 支持 `limit` / `offset` 分页 |
+| 错误码新增 | `IMG_REFS_BUDGET`(422，颜色×参考图超预算)、`IMG_COST_BUDGET_EXCEEDED`(429，预算闸) |

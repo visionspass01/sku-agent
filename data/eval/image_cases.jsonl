@@ -2,7 +2,7 @@
 {"case_id": "case-002", "product_id": "P-1002", "prompt": "工装裤卖点图，侧身像下装突出", "aspect": "1:1", "count": 6, "expect_docs": ["slot-selling-points", "slot-main-image"]}
 {"case_id": "case-003", "product_id": "P-2001", "prompt": "童装卫衣场景图，街拍清新风", "aspect": "1:1", "count": 6, "expect_docs": ["slot-scene", "platform-taobao"]}
 {"case_id": "case-004", "product_id": "P-3001", "prompt": "半身裙细节特写，微距面料", "aspect": "1:1", "count": 6, "expect_docs": ["slot-detail-and-layout", "fragment-lighting"]}
-{"case_id": "case-005", "product_id": "P-3002", "prompt": "冲锋衣工厂实用风场景，突出防水面料", "aspect": "3:4", "count": 4, "expect_docs": ["slot-scene", "fragment-lighting"]}
+{"case_id": "case-005", "product_id": "P-3002", "prompt": "冲锋衣工厂实用风场景，突出防水面料", "aspect": "1:1", "count": 4, "expect_docs": ["slot-scene", "fragment-lighting"]}
 {"case_id": "case-006", "product_id": "P-3003", "prompt": "连衣裙主图，白底，正面半身", "aspect": "1:1", "count": 3, "expect_docs": ["slot-main-image", "slot-selling-points"]}
 {"case_id": "case-007", "product_id": "P-1001", "prompt": "尺码对照排版图，标注 cm", "aspect": "1:1", "count": 9, "expect_docs": ["slot-detail-and-layout"]}
 {"case_id": "case-008", "product_id": "P-1002", "prompt": "白底主图，背景发灰需要修复", "aspect": "1:1", "count": 2, "expect_docs": ["fix-white-bg-dirty", "slot-main-image"]}

@@ -479,3 +479,29 @@ PYTHONPATH=src python scripts/bench_image.py       # 并发压测（零成本）
 PYTHONPATH=src python scripts/check_image.py 主图.png --platform 淘系 [--fix out.png]
 ```
 `check_image.py` 的像素级校验对 PNG **零依赖**（自带解码），JPEG/WebP 才需要可选的 Pillow。
+
+
+---
+
+## v7：面试评审后的修复与新增（生图 Agent）
+
+评审发现的问题（P0/P1/P2）已全部处理，另按参考仓库 `04_Product_Image_Agent` 补了四项能力。
+
+| 类别 | 变化 |
+|---|---|
+| **账号体系** | 统一到一张共享 `user` 表（SKU 与生图共用；`ACCOUNTS_SOURCE=legacy` 可回滚）；中台只做机器令牌（scope+部门），不含人员账号 |
+| **出图粒度** | 改为「商品 + 颜色」（`product_colors` / `all_colors`），颜色 hex 锁进身份锁定；`slot_count`（图位数）与 `image_count`（出图张数）分离 |
+| **幂等/配额/成本** | `Idempotency-Key` 幂等；配额改为**预留→成功结算→失败释放**；成本取 provider 真实计费（`external_cost_cny`） |
+| **可靠性** | 执行期取数失败与创建期同口径（直接失败）；恢复看门狗（60s 扫租约过期任务）；取消区分「未调模型/已调模型」；SSE 轮询 3s；第三方生图并发上限 10 |
+| **人工闭环** | 采纳（正样本）/驳回（负样本，需原因）接口 + 样本表；成本按 provider 成功计入，驳回不返还 |
+| **图内文案** | 按图位的文案 + 字数表（主标语 ≤4 词 / 副文案 ≤7 词 / 角标仅数字），平台策略驱动（抖系主图禁文字） |
+| **平台双套** | `platform_variant=true` 或 `platforms=[淘系,抖系]` 一次产出两套（硬冲突：淘系允许主图叠字、抖系禁止） |
+| **variant 差异化** | `mode=variant` 输出 A/B 两套方向（版型优先 / 面料优先）；`iterate` 只重做主图 |
+| **像素门禁** | 交付前按平台卡检查（白底纯度/主体占比/留白/尺寸/大小），主图 blocking、可 autofix、不过落 `blocked` 资产并可人工放行 |
+| **部门隔离** | 普通账号只看到/只能出本部门商品（男装 / 女装含童装），管理员跨部门 |
+| **前端** | 画廊用短签名 URL 直出（不再每图一次 401）、任务分页、SSE 断线重连、`scripts/ui_smoke_image.js` DOM 冒烟 |
+
+新增接口：`POST /tasks/{id}/assets/{aid}/adopt|reject|unblock`、`GET /admin/samples`、`GET /admin/feedback`、`GET /assets/{id}?sig=&exp=`。
+
+**评测口径**（`scripts/eval_image.py`，离线）：Recall@3、Prompt 合规率、像素门禁通过率、双平台差异率、variant 差异率、首轮通过率、时延。
+出图**质量**评估后期由人工评测（采纳率/上架率/驳回原因），自动评测只覆盖结构与规则指标。
