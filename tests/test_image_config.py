@@ -66,9 +66,11 @@ def test_env_override(monkeypatch):
     assert settings.is_fake_catalog is False
 
 
-def test_max_refs_is_capped_at_six():
+def test_max_refs_is_capped_at_twelve():
+    """M3 起参考图按颜色分配，上限放宽到 12（仍挡明显异常值）。"""
+    assert ImageSettings(max_refs=12).max_refs == 12
     with pytest.raises(Exception):
-        ImageSettings(max_refs=7)
+        ImageSettings(max_refs=13)
 
 
 def test_batch_size_is_bounded():

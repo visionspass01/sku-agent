@@ -32,12 +32,28 @@ def cat(tmp_path, monkeypatch, _db):
     ps._ensure_builtin()
 
 
-def _resolve(catalog, product_ids, *, username="worker1", max_refs=6, timeout=5.0):
+def _resolve(catalog, product_ids, *, colors=None, username="worker1", max_refs=6,
+             refs_per_item=2, timeout=5.0):
+    """按「商品 + 颜色」构造目标（colors=None 时每个商品只取第一个颜色）。"""
+    targets = []
+    for product_id in product_ids:
+        data = asyncio.run(catalog.get_product(product_id)) if colors is not None else None
+        if data is not None:
+            chosen = [item for item in data.colors() if item["color"] in (colors or [])]
+            for item in chosen:
+                targets.append(refs_source.RefTarget(product_id, item["color"],
+                                                     item["color_hex"]))
+            if not chosen:
+                targets.append(refs_source.RefTarget(product_id))
+        else:
+            targets.append(refs_source.RefTarget(product_id))
+
     async def run():
         with session_scope() as session:
             return await refs_source.resolve_refs(
-                catalog, product_ids, session=session, username=username,
-                department=None, max_refs=max_refs, timeout_seconds=timeout,
+                catalog, targets, session=session, username=username,
+                department=None, refs_per_item=refs_per_item, max_refs=max_refs,
+                timeout_seconds=timeout,
             )
 
     return asyncio.run(run())
@@ -83,24 +99,27 @@ def test_registry_switching_and_unknown_source(cat):
 
 # ---------------------------------------------------------------- 参考图解析
 def test_resolve_refs_writes_ref_assets(cat):
-    resolution = _resolve(cat, ["P-1001"])
-    assert resolution.total == 3
-    refs = resolution.refs_of("P-1001")
+    resolution = _resolve(cat, ["P-1002"], colors=["藏蓝"])
+    assert resolution.total == 2                          # 每个颜色取主图 + 细节
+    refs = resolution.refs_of("P-1002#藏蓝")
     assert refs and all(item.source == "mcp" for item in refs)
-    assert all(item.product_id == "P-1001" for item in refs)
-    assert refs[0].image_id == "P-1001-img-1"
+    assert all(item.product_id == "P-1002" for item in refs)
+    assert refs[0].image_id == "P-1002-img-1"
     with session_scope() as session:
         asset = asset_store.get_asset(session, refs[0].asset_id)
-        assert asset.kind == "ref" and asset.product_id == "P-1001"
+        assert asset.kind == "ref" and asset.product_id == "P-1002"
         assert len(asset_store.read_asset_bytes(asset)) == refs[0].bytes
 
 
 def test_resolve_refs_respects_total_budget(cat):
-    resolution = _resolve(cat, ["P-1001", "P-2001"], max_refs=2)
-    assert resolution.total == 2                     # 每商品至少 1 张，合计不超上限
-    assert len(resolution.refs_of("P-1001")) == 1
-    assert len(resolution.refs_of("P-2001")) == 1
-    assert resolution.truncated > 0
+    from app.core.errors import ImageError
+
+    resolution = _resolve(cat, ["P-1002", "P-2001"], colors=["藏蓝", "草绿"], max_refs=4)
+    assert resolution.total == 4                      # 两个目标 × 每目标 2 张
+    # 预算不足要明确报错，而不是悄悄少给参考图（M3 规则）
+    with pytest.raises(ImageError) as exc:
+        _resolve(cat, ["P-1002", "P-2001"], colors=["藏蓝", "草绿"], max_refs=2)
+    assert exc.value.code == "IMG_REFS_BUDGET"
 
 
 def test_resolve_refs_product_without_images(cat):

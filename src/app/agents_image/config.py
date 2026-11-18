@@ -34,8 +34,10 @@ class ImageSettings(BaseSettings):
     dispatcher: str = "local"         # local | scf
     product_source: str = "fake"      # fake（开发/测试替身）| mcp（经 MCP 取中台数据）
 
-    # ---- 商品与参考图（v6：用户只选商品，参考图来自中台）----
-    max_refs: int = Field(default=6, ge=1, le=6)          # 每任务合计参考图上限
+    # ---- 商品与参考图（v6：用户只选商品，参考图来自中台；M3：按「商品+颜色」粒度）----
+    max_refs: int = Field(default=6, ge=1, le=12)           # 每个「商品+颜色」的参考图合计上限
+    refs_per_item: int = Field(default=2, ge=1, le=6)        # 每个颜色取几张（主图 + 细节）
+    max_tasks_per_request: int = Field(default=60, ge=1, le=200)  # 颜色×平台×变体后的任务上限
     max_batch_products: int = Field(default=5, ge=1, le=10)   # 一次批量最多选几个商品
     max_total_images: int = Field(default=9, ge=1, le=9)
     concurrency: int = Field(default=8, ge=1, le=32)

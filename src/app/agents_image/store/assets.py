@@ -17,7 +17,8 @@ from app.core.errors import raise_image
 def save_bytes(session, data: bytes, *, kind: str, mime: str = "",
                task_id: str | None = None, slot: int = 0,
                username: str = "anonymous", department: str | None = None,
-               product_id: str | None = None, source: str = "mcp") -> ImageAsset:
+               product_id: str | None = None, color_key: str = "",
+               source: str = "mcp") -> ImageAsset:
     """落盘并入库；参考图按 `(sha256, 账号, 商品)` 去重，产出按 task 独立成行。"""
     storage = get_storage()
     ref = storage.put(data, kind=kind, mime=mime)
@@ -29,13 +30,15 @@ def save_bytes(session, data: bytes, *, kind: str, mime: str = "",
             select(ImageAsset).where(ImageAsset.sha256 == ref.sha256,
                                      ImageAsset.kind == kind,
                                      ImageAsset.username == username,
-                                     ImageAsset.product_id == product_id)
+                                     ImageAsset.product_id == product_id,
+                                     ImageAsset.color_key == (color_key or ""))
         ).scalars().first()
     if existing is not None:
         return existing
     asset = ImageAsset(
         asset_id=uuid.uuid4().hex, task_id=task_id, slot=slot,
         username=username, department=department, product_id=product_id,
+        color_key=color_key or "",
         kind=kind, source=source, sha256=ref.sha256,
         storage=ref.storage, key=ref.key, mime=ref.mime,
         width=ref.width, height=ref.height, bytes=ref.bytes,

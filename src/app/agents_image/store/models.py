@@ -87,7 +87,11 @@ class ImageAsset(Base):
     username: Mapped[str] = mapped_column(String(32), default="anonymous", index=True)
     department: Mapped[str | None] = mapped_column(String(32), nullable=True)
     product_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    color_key: Mapped[str] = mapped_column(String(64), default="", index=True)  # 商品+颜色
     kind: Mapped[str] = mapped_column(String(16), default="ref")   # ref | output | thumb
+    adopt_status: Mapped[str] = mapped_column(String(16), default="pending")  # pending|adopted|rejected
+    blocked_reason: Mapped[str] = mapped_column(String(64), default="")       # 合规门禁拦截原因
+    purged_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
     source: Mapped[str] = mapped_column(String(16), default="mcp")  # mcp（v6：参考图只来自中台）
     sha256: Mapped[str] = mapped_column(String(64), index=True)
     storage: Mapped[str] = mapped_column(String(16), default="local")

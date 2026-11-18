@@ -54,10 +54,10 @@ def generate_slots(slots: list) -> list[dict]:
     return out
 
 
-def build_slots(state: ImageTaskState, *, policy=None, labels: dict | None = None
-                ) -> list[dict]:
-    """按中台 `plan_policy` 生成图位（截断到请求张数）；无 policy 时退到通用占位图位。"""
-    count = max(1, min(int(state.count or 1), 9))
+def build_slots(state: ImageTaskState, *, policy=None, labels: dict | None = None,
+                slot_count: int | None = None) -> list[dict]:
+    """按中台 `plan_policy` 生成图位；`slot_count` 未给时退到 `state.count`（M3 起两者分离）。"""
+    count = max(1, min(int(slot_count if slot_count is not None else (state.count or 1)), 9))
     labels = labels or {}
     composition_labels = labels.get("compositions") or {}
     style_labels = labels.get("scene_styles") or {}

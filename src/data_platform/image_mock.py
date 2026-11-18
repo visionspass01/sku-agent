@@ -20,6 +20,7 @@ from data_platform.image_png import placeholder_png
 PRODUCTS: dict[str, dict] = {
     "P-1001": {
         "title": "女装·针织开衫（短款）", "category": "女装", "images": 3,
+        "colors": [{"color": "米色", "color_hex": "#C8B7A6"}, {"color": "黑色", "color_hex": "#111111"}, {"color": "藏蓝", "color_hex": "#2C5D8F"}],
         "sku_ids": ["ST-1001-C1-S", "ST-1001-C1-M", "ST-1001-C1-L"],
         "attrs": {"product_type": "针织开衫（短款）", "category": "女装",
                   "shape": "落肩、V 领、单排 5 粒扣", "color_hex": "#C8B7A6",
@@ -31,6 +32,7 @@ PRODUCTS: dict[str, dict] = {
     },
     "P-1002": {
         "title": "男装·工装直筒裤", "category": "男装", "images": 2,
+        "colors": [{"color": "藏蓝", "color_hex": "#4A6B8A"}],
         "sku_ids": ["ST-1002-C1-M", "ST-1002-C1-L"],
         "attrs": {"product_type": "工装直筒裤", "category": "男装",
                   "shape": "直筒、高腰、双侧贴袋", "color_hex": "#4A6B8A",
@@ -42,6 +44,7 @@ PRODUCTS: dict[str, dict] = {
     },
     "P-2001": {
         "title": "童装·卫衣（加绒）", "category": "童装", "images": 4,
+        "colors": [{"color": "草绿", "color_hex": "#3F7A5E"}],
         "sku_ids": ["ST-2001-C1-120", "ST-2001-C1-130"],
         "attrs": {"product_type": "加绒卫衣", "category": "童装",
                   "shape": "宽松套头、落肩", "color_hex": "#3F7A5E",
@@ -53,6 +56,7 @@ PRODUCTS: dict[str, dict] = {
     },
     "P-3001": {
         "title": "女装·半身裙（长款）", "category": "女装", "images": 2,
+        "colors": [{"color": "黑色", "color_hex": "#111111"}],
         "sku_ids": ["ST-3001-C1-S", "ST-3001-C1-M"],
         "attrs": {"product_type": "半身裙（长款）", "category": "女装",
                   "shape": "A 字、中长、侧隐形拉链", "color_hex": "#111111",
@@ -64,6 +68,7 @@ PRODUCTS: dict[str, dict] = {
     },
     "P-3002": {
         "title": "男装·冲锋衣（三合一）", "category": "男装", "images": 3,
+        "colors": [{"color": "正红", "color_hex": "#C0392B"}, {"color": "黑色", "color_hex": "#111111"}],
         "sku_ids": ["ST-3002-C1-M", "ST-3002-C1-XL"],
         "attrs": {"product_type": "冲锋衣（三合一）", "category": "男装",
                   "shape": "连帽、收腰抽绳、可拆内胆", "color_hex": "#C0392B",
@@ -75,6 +80,7 @@ PRODUCTS: dict[str, dict] = {
     },
     "P-3003": {
         "title": "童装·连衣裙", "category": "童装", "images": 2,
+        "colors": [{"color": "雾蓝", "color_hex": "#2C5D8F"}],
         "sku_ids": ["ST-3003-C1-110"],
         "attrs": {"product_type": "连衣裙", "category": "童装",
                   "shape": "A 字、圆领、后隐形拉链", "color_hex": "#2C5D8F",
@@ -181,13 +187,25 @@ def get_product(product_id: str) -> dict | None:
     spec = PRODUCTS.get((product_id or "").strip())
     if spec is None:
         return None
-    images = [{
-        "image_id": f"{product_id}-img-{index + 1}",
-        "url": f"/api/v1/image/assets/{product_id}-img-{index + 1}.png",
-        "mime": "image/png", "is_main": index == 0, "width": 640, "height": 640,
-    } for index in range(int(spec.get("images") or 0))]
+    colors = list(spec.get("colors") or [])
+    images = []
+    total = int(spec.get("images") or 0)
+    for index in range(total):
+        # 颜色维度：每个颜色一张主图，其余图挂到第一个颜色上做细节图
+        color = colors[index] if index < len(colors) else (colors[0] if colors else {})
+        images.append({
+            "image_id": f"{product_id}-img-{index + 1}",
+            "url": f"/api/v1/image/assets/{product_id}-img-{index + 1}.png",
+            "mime": "image/png", "is_main": index < max(1, len(colors)),
+            "width": 640, "height": 640,
+            "color": color.get("color", ""), "color_hex": color.get("color_hex", ""),
+        })
+    skus = [{"sku_id": sku_id, "color": color.get("color", ""),
+             "color_hex": color.get("color_hex", ""), "size": ""}
+            for sku_id, color in zip(spec.get("sku_ids") or [], colors, strict=False)]
     return {"product_id": product_id, "title": spec["title"], "category": spec["category"],
             "attrs": dict(spec.get("attrs") or {}), "images": images,
+            "skus": skus,
             "sku_ids": list(spec.get("sku_ids") or []),
             "broken_image": bool(spec.get("broken_image"))}
 

@@ -151,6 +151,9 @@ async def execute_task(task_id: str) -> ImageTaskState:
     validate.validate(state, settings=settings)
 
     generate_drafts = [draft for draft in all_drafts if draft.type == "generate"]
+    # 出图张数（image_count）可以小于 generate 图位数：只出前 N 个，其余图位留空给人工
+    if state.count and len(generate_drafts) > int(state.count):
+        generate_drafts = generate_drafts[: int(state.count)]
     static_drafts = [draft for draft in all_drafts if draft.type != "generate"]
     if not generate_drafts:
         raise ImageError("IMG_INPUT_INVALID",

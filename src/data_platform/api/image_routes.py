@@ -75,6 +75,7 @@ def product_context(product_id: str, request: Request):
         product_id=data["product_id"], title=data["title"], category=data["category"],
         attrs=data["attrs"],
         images=[isc.ProductImageOut(**item) for item in data["images"]],
+        skus=[isc.ProductSkuOut(**item) for item in data.get("skus") or []],
         sku_ids=data["sku_ids"],
     )
 

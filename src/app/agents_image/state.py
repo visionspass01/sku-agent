@@ -22,6 +22,8 @@ class RefImage(BaseModel):
     source: str = "mcp"          # 只可能是 mcp
     product_id: str = ""
     image_id: str = ""
+    color: str = ""
+    color_hex: str = ""
 
 
 class SlotPlan(BaseModel):

@@ -134,7 +134,9 @@ def test_slots_and_prompts_use_platform_presets(image_env, auth_headers):
 
 def test_task_payload_defaults_from_platform_policy(image_env, auth_headers):
     created = _create(image_env, auth_headers, ["P-2001"])
-    assert len(created["slots"]) == 6                    # plan_policy.default_count
+    # M3：图位数默认 9（中台模板），出图张数 = generate 图位数（6）
+    assert len(created["slots"]) == 9
+    assert created["image_count"] == 6
     assert created["limits"]["max_batch_products"] == 5
 
 

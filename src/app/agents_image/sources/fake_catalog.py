@@ -18,6 +18,7 @@ from app.agents_image.sources.product_source import (
     Preset,
     ProductData,
     ProductImage,
+    ProductSku,
     ProductSummary,
     SlotSpec,
 )
@@ -35,6 +36,7 @@ _PRODUCTS: dict[str, dict] = {
                   "must_not_change": ["颜色", "版型", "扣子数量", "刺绣文字", "袖口罗纹"],
                   "source": "platform", "confidence": 0.95},
         "images": 3,
+        "colors": [{"color": "米色", "color_hex": "#C8B7A6"}, {"color": "黑色", "color_hex": "#111111"}, {"color": "藏蓝", "color_hex": "#2C5D8F"}],
     },
     "P-1002": {
         "title": "男装·工装直筒裤", "category": "男装",
@@ -46,6 +48,7 @@ _PRODUCTS: dict[str, dict] = {
                   "must_not_change": ["颜色", "版型", "口袋位置", "裤脚结构"],
                   "source": "platform", "confidence": 0.93},
         "images": 2,
+        "colors": [{"color": "藏蓝", "color_hex": "#4A6B8A"}],
     },
     "P-2001": {
         "title": "童装·卫衣（加绒）", "category": "童装",
@@ -57,6 +60,7 @@ _PRODUCTS: dict[str, dict] = {
                   "must_not_change": ["颜色", "版型", "图案"],
                   "source": "platform", "confidence": 0.9},
         "images": 4,
+        "colors": [{"color": "草绿", "color_hex": "#3F7A5E"}],
     },
     "P-3001": {
         "title": "女装·半身裙（长款）", "category": "女装",
@@ -68,6 +72,7 @@ _PRODUCTS: dict[str, dict] = {
                   "must_not_change": ["颜色", "版型", "长度"],
                   "source": "platform", "confidence": 0.91},
         "images": 2,
+        "colors": [{"color": "黑色", "color_hex": "#111111"}],
     },
     "P-3002": {
         "title": "男装·冲锋衣（三合一）", "category": "男装",
@@ -79,6 +84,7 @@ _PRODUCTS: dict[str, dict] = {
                   "must_not_change": ["颜色", "版型", "拉链位置", "logo"],
                   "source": "platform", "confidence": 0.92},
         "images": 3,
+        "colors": [{"color": "正红", "color_hex": "#C0392B"}, {"color": "黑色", "color_hex": "#111111"}],
     },
     "P-3003": {
         "title": "童装·连衣裙", "category": "童装",
@@ -90,6 +96,7 @@ _PRODUCTS: dict[str, dict] = {
                   "must_not_change": ["颜色", "版型", "图案"],
                   "source": "platform", "confidence": 0.9},
         "images": 2,
+        "colors": [{"color": "雾蓝", "color_hex": "#2C5D8F"}],
     },
     "P-4001": {"title": "童装·背带裤", "category": "童装", "attrs": {}, "images": 0},   # 无图
     "P-4002": {"title": "女装·羽绒马甲", "category": "女装", "attrs": {"product_type": "羽绒马甲",
@@ -192,16 +199,28 @@ class FakeCatalog:
         if spec is None:
             raise_image("IMG_PRODUCT_NOT_FOUND", f"商品不存在：{product_id}")
         count = int(spec.get("images") or 0)
-        images = [
-            ProductImage(image_id=f"{product_id}-img-{i + 1}", mime="image/png",
-                         is_main=(i == 0), width=640, height=640,
-                         bytes_b64=base64.b64encode(
-                             placeholder_png(f"{product_id}:{i}", 640, 640)).decode("ascii"))
-            for i in range(count)
+        colors = list(spec.get("colors") or [])
+        # 颜色维度（M3）：第 1 张是"该颜色的主图"，其余按顺序挂到第一个颜色上做细节图
+        images = []
+        for index in range(count):
+            color = colors[index] if index < len(colors) else (colors[0] if colors else {})
+            images.append(ProductImage(
+                image_id=f"{product_id}-img-{index + 1}", mime="image/png",
+                is_main=(index < max(1, len(colors))), width=640, height=640,
+                color=color.get("color", ""), color_hex=color.get("color_hex", ""),
+                bytes_b64=base64.b64encode(
+                    placeholder_png(f"{product_id}:{index}", 640, 640)).decode("ascii"),
+            ))
+        skus = [
+            ProductSku(sku_id=f"{product_id}-{item['color']}" if item.get("color") else "",
+                       color=item.get("color", ""), color_hex=item.get("color_hex", ""),
+                       size=item.get("size", ""))
+            for item in colors
         ]
         return ProductData(product_id=product_id, title=spec["title"],
                            category=spec["category"], attrs=dict(spec.get("attrs") or {}),
-                           images=images)
+                           images=images, skus=skus,
+                           sku_ids=[sku.sku_id for sku in skus if sku.sku_id])
 
     async def list_compositions(self, *, category: str = "",
                                 platform: str = "") -> list[Preset]:

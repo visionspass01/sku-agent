@@ -128,7 +128,13 @@ def _dedupe(values: list[str]) -> list[str]:
 
 
 async def _resolve_request_parameters(catalog, body: dict, settings) -> dict:
-    """把请求参数对齐到中台：默认值、候选校验、labels 映射（全部来自 catalog）。"""
+    """把请求参数对齐到中台：默认值、候选校验、labels 映射（全部来自 catalog）。
+
+    M3 起**区分两个张数**：
+    - `slot_count`：图位数（默认取中台 `plan_policy` 的 9 图位模板，可 1..9）；
+    - `image_count`：真正出图的张数（只有 `type=generate` 的图位出图，默认=该平台 generate 图位数）。
+    旧字段 `n` 兼容映射到 `image_count`。
+    """
     platform = str(body.get("platform") or "淘系").strip()
     category = str(body.get("category") or "").strip()
     rules = await catalog.get_platform_rules(platform=platform)
@@ -148,11 +154,29 @@ async def _resolve_request_parameters(catalog, body: dict, settings) -> dict:
             raise ImageError("IMG_INPUT_INVALID", f"场景风格不在中台候选里：{item}")
 
     aspect = str(body.get("aspect") or rules.aspect or "1:1")
+    max_slots = min(int(policy.max_count or 9), settings.max_total_images, 9)
     try:
-        count = int(body.get("n") or policy.default_count or 1)
+        raw_n = body.get("n")
+        # 兼容：老调用方只传 n（=图位数=出图张数），新调用方用 slot_count / image_count
+        raw_slots = body.get("slot_count")
+        slot_count = int(raw_slots if raw_slots is not None else
+                         (raw_n if raw_n is not None else max_slots))
+        raw_images = body.get("image_count")
+        image_count = int(raw_images if raw_images is not None else
+                          (raw_n if raw_n is not None else 0) or 0)
     except (TypeError, ValueError) as exc:
         raise ImageError("IMG_INPUT_INVALID", "张数必须是整数") from exc
-    count = max(1, min(count, min(int(policy.max_count or 9), settings.max_total_images)))
+    slot_count = max(1, min(slot_count, max_slots))
+    generate_slots = sum(1 for item in policy.slots
+                         if int(item.slot) <= slot_count and (item.type or "generate") == "generate")
+    generate_slots = max(1, generate_slots)
+    if image_count <= 0:
+        image_count = generate_slots              # 默认按该平台 generate 图位数量
+    if image_count > generate_slots:
+        raise ImageError("IMG_INPUT_INVALID",
+                         f"出图张数 {image_count} 超过该平台可出图图位数 {generate_slots}"
+                         "（尺码对照/包装清单/售后排版不走出图通道）")
+    image_count = max(1, min(image_count, settings.max_total_images))
 
     return {
         "platform": platform,
@@ -160,7 +184,9 @@ async def _resolve_request_parameters(catalog, body: dict, settings) -> dict:
         "policy": policy,
         "rules": rules,
         "aspect": aspect,
-        "count": count,
+        "slot_count": slot_count,
+        "count": image_count,           # 兼容字段：v6 的 count 语义 = 出图张数
+        "image_count": image_count,
         "compositions": chosen_compositions,
         "scene_styles": chosen_styles,
         "labels": {
@@ -211,13 +237,13 @@ async def create_tasks(request: Request) -> JSONResponse:
 
         catalog = get_catalog()
         params = await _resolve_request_parameters(catalog, body, settings)
+        targets = await _resolve_targets(catalog, body, product_ids)
+        if len(targets) > settings.max_tasks_per_request:
+            raise ImageError("IMG_BATCH_TOO_LARGE",
+                             f"一次最多创建 {settings.max_tasks_per_request} 个任务，"
+                             f"当前颜色×平台×变体共 {len(targets)} 个")
 
-        planned_images = sum(1 for item in plan_slots.build_slots(
-            ImageTaskState(prompt=prompt, aspect=params["aspect"], count=params["count"],
-                           compositions=params["compositions"],
-                           scene_styles=params["scene_styles"]),
-            policy=params["policy"], labels=params["labels"])
-            if item["type"] == "generate") * len(product_ids)
+        planned_images = params["image_count"] * len(targets)
         with session_scope() as session:
             from app.agents_image.store import quota as quota_store
 
@@ -241,47 +267,55 @@ async def create_tasks(request: Request) -> JSONResponse:
                 reserved_user = user.username
 
             resolution = await refs_source.resolve_refs(
-                catalog, product_ids, session=session,
+                catalog, targets, session=session,
                 username=user.username, department=user.department,
-                max_refs=settings.max_refs,
+                refs_per_item=settings.refs_per_item, max_refs=settings.max_refs,
                 timeout_seconds=settings.mcp_timeout_seconds,
             )
             batch_id = new_batch_id()
             created: list[dict] = []
             first_slots: list[dict] = []
-            for product_id in product_ids:
+            for target in targets:
                 state = ImageTaskState(
-                    prompt=prompt, aspect=params["aspect"], count=params["count"],
+                    prompt=prompt, aspect=params["aspect"], count=params["image_count"],
                     compositions=params["compositions"], scene_styles=params["scene_styles"],
-                    refs=resolution.refs_of(product_id),
+                    refs=resolution.refs_of(target.color_key),
                 )
                 state.slots = [SlotPlan(**item) for item in plan_slots.build_slots(
-                    state, policy=params["policy"], labels=params["labels"])]
+                    state, policy=params["policy"], labels=params["labels"],
+                    slot_count=params["slot_count"])]
+                state.attrs = _attrs_for_target(
+                    resolution.products[target.product_id].attrs, target)
                 validate_node.validate(state, settings=settings)
-                planned_for_product = sum(1 for item in state.slots
-                                          if plan_slots.is_generatable(item))
+                planned_for_target = sum(1 for item in state.slots
+                                         if plan_slots.is_generatable(item))
                 task = task_store.create_task(
                     session, task_id=new_task_id(), username=user.username,
-                    department=user.department, batch_id=batch_id, product_id=product_id,
+                    department=user.department, batch_id=batch_id,
+                    product_id=target.product_id, color_key=target.color_key,
                     prompt=prompt, platform=params["platform"], aspect=params["aspect"],
-                    n=params["count"], ref_asset_ids=resolution.asset_ids_of(product_id),
+                    n=params["image_count"],
+                    ref_asset_ids=resolution.asset_ids_of(target.color_key),
                     compositions=params["compositions"], scene_styles=params["scene_styles"],
                     slots=[item.model_dump() for item in state.slots],
                     prompt_pack=[], request_id=idempotency_key,
-                    trace_id=trace,
-                    attrs=resolution.products[product_id].attrs,
-                    image_count=planned_for_product,
+                    trace_id=trace, attrs=state.attrs,
+                    image_count=min(planned_for_target, params["image_count"]),
                     slot_count=len(state.slots),
                 )
                 asset_store.bind_refs_to_task(session, task.ref_asset_ids, task.task_id)
-                created.append({"task_id": task.task_id, "product_id": product_id,
+                created.append({"task_id": task.task_id, "product_id": target.product_id,
+                                "color": target.color, "color_key": target.color_key,
                                 "status": task.status,
                                 "refs": len(task.ref_asset_ids),
-                                "image_count": planned_for_product})
+                                "image_count": task.image_count,
+                                "slot_count": task.slot_count})
                 first_slots = first_slots or [item.model_dump() for item in state.slots]
             payload = {
                 "batch_id": batch_id, "tasks": created, "slots": first_slots,
+                "slot_count": params["slot_count"], "image_count": params["image_count"],
                 "limits": {"max_refs": settings.max_refs,
+                           "refs_per_item": settings.refs_per_item,
                            "max_batch_products": settings.max_batch_products,
                            "refs_truncated": resolution.truncated},
                 "planned_images": planned_images,
@@ -318,6 +352,59 @@ def _release_reserve(username: str, images: int) -> None:
             quota_store.release(session, username, images)
     except Exception as exc:  # noqa: BLE001
         logger.warning("预留释放失败：user=%s n=%s %s", username, images, exc)
+
+
+async def _resolve_targets(catalog, body: dict, product_ids: list[str]) -> list[refs_source.RefTarget]:
+    """把「选中商品 + 颜色」展开成出图目标（M3：出图最小单位 = 商品 + 颜色）。
+
+    请求侧三种写法：
+    - `all_colors: true`：每个商品的全部颜色都出图；
+    - `product_colors: [{product_id, colors: ["米色", "黑色"]}]`：指定颜色；
+    - 都不传：每个商品只出「第一个颜色」（没有颜色维度时就是商品主图）。
+    """
+    requested: dict[str, list[str]] = {}
+    for item in body.get("product_colors") or []:
+        if not isinstance(item, dict):
+            continue
+        product_id = str(item.get("product_id") or "").strip()
+        if not product_id:
+            continue
+        requested[product_id] = _dedupe([str(x) for x in (item.get("colors") or [])])
+    all_colors = bool(body.get("all_colors"))
+
+    targets: list[refs_source.RefTarget] = []
+    for product_id in product_ids:
+        data = await catalog.get_product(product_id)
+        available = data.colors()
+        names = {item["color"] for item in available if item["color"]}
+        if product_id in requested and requested[product_id]:
+            unknown = [name for name in requested[product_id] if name not in names]
+            if unknown:
+                raise ImageError("IMG_INPUT_INVALID",
+                                 f"商品 {product_id} 没有这些颜色：{'、'.join(unknown)}"
+                                 f"（可选：{'、'.join(sorted(names)) or '无颜色维度'}）")
+            chosen = [item for item in available if item["color"] in requested[product_id]]
+        elif all_colors:
+            chosen = available
+        else:
+            chosen = available[:1]
+        for item in chosen:
+            targets.append(refs_source.RefTarget(
+                product_id=product_id, color=item.get("color", ""),
+                color_hex=item.get("color_hex", "")))
+    if not targets:
+        raise ImageError("IMG_INPUT_INVALID", "没有可出图的目标（商品没有颜色/参考图）")
+    return targets
+
+
+def _attrs_for_target(base_attrs: dict, target) -> dict:
+    """按颜色覆盖身份锁定字段：颜色必须锁到具体 hex，避免多色商品串色。"""
+    attrs = dict(base_attrs or {})
+    if target.color:
+        attrs["color_names"] = [target.color]
+        if target.color_hex:
+            attrs["color_hex"] = target.color_hex
+    return attrs
 
 
 def _registry():

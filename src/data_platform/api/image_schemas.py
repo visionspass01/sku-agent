@@ -1,4 +1,4 @@
-﻿"""中台 image 模块的请求/响应模型（`/api/v1/image/*`）。"""
+"""中台 image 模块的请求/响应模型（`/api/v1/image/*`）。"""
 
 from __future__ import annotations
 
@@ -28,6 +28,15 @@ class ProductImageOut(Envelope):
     is_main: bool = False
     width: int = 0
     height: int = 0
+    color: str = ""
+    color_hex: str = ""
+
+
+class ProductSkuOut(Envelope):
+    sku_id: str = ""
+    color: str = ""
+    color_hex: str = ""
+    size: str = ""
 
 
 class ProductContextOut(Envelope):
@@ -36,6 +45,7 @@ class ProductContextOut(Envelope):
     category: str = ""
     attrs: dict = Field(default_factory=dict)
     images: list[ProductImageOut] = Field(default_factory=list)
+    skus: list[ProductSkuOut] = Field(default_factory=list)
     sku_ids: list[str] = Field(default_factory=list)
 
 

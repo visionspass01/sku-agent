@@ -1,11 +1,12 @@
-"""把「选中商品」解析成参考图：经 catalog 取商品图 → 下载/解码 → 落本地 refs 资产。
+"""把「选中商品 + 颜色」解析成参考图：经 catalog 取图 → 下载/解码 → 落本地 refs 资产。
 
-规则（v6）：
-- 参考图**只能来自中台商品图**，用户不可上传；
-- 每商品至少 1 张（主图优先），整任务合计 ≤ `IMAGE_MAX_REFS`；
+规则（M3，按颜色粒度）：
+- 出图的最小业务单位是 **商品 + 颜色**：米色商品必须用米色的参考图，否则颜色会漂；
+- 每个「商品+颜色」至少 1 张（该颜色主图），尽量取到 `IMAGE_REFS_PER_ITEM`（默认 2：主图+细节）；
+- 预算不足（颜色数 × 2 > `IMAGE_MAX_REFS`）→ 明确报 `IMG_REFS_BUDGET`，让用户减少颜色/商品，
+  而不是悄悄少给参考图（少给参考图 = 身份锁定失效）；
 - 取不到字节（网络/坏图）→ `IMG_UPSTREAM_MCP_UNAVAILABLE`(503)；
-- 解析后某商品仍 0 张 → `IMG_REFERENCE_REQUIRED`(422)；
-- 落库 `kind="ref"`、`source="mcp"`、带 `product_id`，同账号重复取同图复用资产行。
+- 落库 `kind="ref"`、`source="mcp"`、带 `product_id` + `color_key`，同账号重复取同图复用资产行。
 """
 
 from __future__ import annotations
@@ -15,15 +16,28 @@ from dataclasses import dataclass, field
 
 import httpx
 
-from app.agents_image.sources.product_source import PlatformCatalog, ProductData
+from app.agents_image.sources.product_source import PlatformCatalog, ProductData, ProductImage
 from app.agents_image.state import RefImage
 from app.agents_image.store import assets as asset_store
 from app.core.errors import ImageError, raise_image
 
 
+@dataclass(frozen=True)
+class RefTarget:
+    """一个出图目标：商品 + 颜色（颜色为空表示该商品没有颜色维度）。"""
+
+    product_id: str
+    color: str = ""
+    color_hex: str = ""
+
+    @property
+    def color_key(self) -> str:
+        return f"{self.product_id}#{self.color}" if self.color else self.product_id
+
+
 @dataclass
 class RefResolution:
-    """一次批量解析的结果：refs 按商品分组，供建任务时逐个商品取用。"""
+    """一次批量解析的结果：refs 按 `color_key` 分组，供建任务时逐个目标取用。"""
 
     refs: dict[str, list[RefImage]] = field(default_factory=dict)
     products: dict[str, ProductData] = field(default_factory=dict)
@@ -33,18 +47,11 @@ class RefResolution:
     def total(self) -> int:
         return sum(len(items) for items in self.refs.values())
 
-    def refs_of(self, product_id: str) -> list[RefImage]:
-        return list(self.refs.get(product_id) or [])
+    def refs_of(self, color_key: str) -> list[RefImage]:
+        return list(self.refs.get(color_key) or [])
 
-    def asset_ids_of(self, product_id: str) -> list[str]:
-        return [item.asset_id for item in self.refs.get(product_id) or []]
-
-
-def _budget_per_product(total: int, count: int, max_refs: int) -> int:
-    """平均分额度，至少 1 张/商品（`max_refs >= count` 由调用方校验）。"""
-    if count <= 0:
-        return max_refs
-    return max(1, max_refs // count)
+    def asset_ids_of(self, color_key: str) -> list[str]:
+        return [item.asset_id for item in self.refs.get(color_key) or []]
 
 
 async def _fetch(image, *, timeout: float, catalog=None) -> bytes:
@@ -70,29 +77,52 @@ async def _fetch(image, *, timeout: float, catalog=None) -> bytes:
                          retryable=True) from exc
 
 
+def _pick_images(images: list[ProductImage], color: str) -> list[ProductImage]:
+    """优先取该颜色的图；没有颜色标注时退回全部图（再按主图优先排序）。"""
+    same = [image for image in images if (image.color or "") == (color or "")]
+    chosen = same or [image for image in images if not image.color] or list(images)
+    return sorted(chosen, key=lambda item: (not item.is_main, item.image_id))
+
+
 async def resolve_refs(
     catalog: PlatformCatalog,
-    product_ids: list[str],
+    targets: list[RefTarget],
     *,
     session,
     username: str,
     department: str | None,
-    max_refs: int,
+    refs_per_item: int = 2,
+    max_refs: int = 6,
     timeout_seconds: float = 5.0,
 ) -> RefResolution:
-    """批量解析：按商品取图并落库（成功时返回每个商品可用的 RefImage 列表）。"""
-    products: dict[str, ProductData] = {}
-    for product_id in product_ids:
-        products[product_id] = await catalog.get_product(product_id)
+    """批量解析：按「商品+颜色」取图并落库（成功时返回每个目标可用的 RefImage 列表）。"""
+    if not targets:
+        raise_image("IMG_REFERENCE_REQUIRED", "请至少选择一个商品")
+    unique_products: dict[str, ProductData] = {}
+    for target in targets:
+        if target.product_id not in unique_products:
+            unique_products[target.product_id] = await catalog.get_product(target.product_id)
 
-    budget = _budget_per_product(len(product_ids), len(products), max_refs)
-    result = RefResolution(products=products)
+    per_item = max(1, int(refs_per_item or 1))
+    # 预算校验：颜色数 × 基础张数不能超过上限，否则参考图会被静默截断（身份锁定失效）
+    if len(targets) > max_refs:
+        raise_image("IMG_REFS_BUDGET",
+                    f"参考图预算不足：{len(targets)} 个「商品+颜色」需要至少 {len(targets)} 张，"
+                    f"上限 {max_refs} 张；请减少商品/颜色数量或调大 IMAGE_MAX_REFS")
+    if len(targets) * per_item > max_refs:
+        raise_image("IMG_REFS_BUDGET",
+                    f"参考图预算不足：{len(targets)} 个目标 × 每目标 {per_item} 张 = "
+                    f"{len(targets) * per_item} 张，上限 {max_refs} 张；"
+                    "请减少颜色数量，或把 IMAGE_REFS_PER_ITEM 调到 1")
+
+    result = RefResolution(products=unique_products)
     used = 0
-    for product_id, data in products.items():
-        ordered = sorted(data.images, key=lambda item: (not item.is_main, item.image_id))
+    for target in targets:
+        data = unique_products[target.product_id]
+        ordered = _pick_images(data.images, target.color)
         picked = 0
         for image in ordered:
-            if picked >= budget or used >= max_refs:
+            if picked >= per_item or used >= max_refs:
                 result.truncated += max(0, len(ordered) - picked)
                 break
             if not image.has_payload:
@@ -101,19 +131,21 @@ async def resolve_refs(
             asset = asset_store.save_bytes(
                 session, raw, kind="ref", mime=image.mime or "image/png",
                 username=username, department=department,
-                product_id=product_id, source="mcp",
+                product_id=target.product_id, color_key=target.color_key, source="mcp",
             )
-            result.refs.setdefault(product_id, []).append(RefImage(
+            result.refs.setdefault(target.color_key, []).append(RefImage(
                 asset_id=asset.asset_id, sha256=asset.sha256, mime=asset.mime,
                 width=asset.width, height=asset.height, bytes=asset.bytes,
-                source="mcp", product_id=product_id, image_id=image.image_id,
+                source="mcp", product_id=target.product_id, image_id=image.image_id,
+                color=target.color, color_hex=target.color_hex or image.color_hex,
             ))
             picked += 1
             used += 1
-        if not result.refs.get(product_id):
+        if not result.refs.get(target.color_key):
             raise_image("IMG_REFERENCE_REQUIRED",
-                        f"所选商品没有可用参考图：{product_id}（{data.title or '-'}）")
+                        f"所选商品没有可用参考图：{target.product_id}"
+                        f"{('（颜色 ' + target.color + '）') if target.color else ''}")
     return result
 
 
-__all__ = ["RefResolution", "resolve_refs"]
+__all__ = ["RefTarget", "RefResolution", "resolve_refs"]
