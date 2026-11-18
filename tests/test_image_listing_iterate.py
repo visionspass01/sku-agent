@@ -179,3 +179,48 @@ def test_iterate_without_base_falls_back_to_standard(env):
                                   "mode": "iterate", "image_count": 1})
     assert detail["status"] == "done"
     assert detail["reused_images"] == 0
+
+
+# ---------------------------------------------------------------- W1：复用精确匹配 / 平台 / 计划张数
+def test_iterate_only_reuses_same_color_target(env):
+    """多色 iterate：只有与基础任务同 (颜色, 平台, 变体) 的目标复用，其它颜色必须正常出图。"""
+    headers = login(env)
+    base = _done(env, headers, {
+        "product_ids": ["P-1001"],
+        "product_colors": [{"product_id": "P-1001", "colors": ["米色"]}],
+        "prompt": "白底主图", "image_count": 3, "slot_count": 3,
+    })
+    assert base["status"] == "done"
+
+    created = env.post("/api/image/tasks", headers=headers, json={
+        "product_ids": ["P-1001"],
+        "product_colors": [{"product_id": "P-1001", "colors": ["米色", "黑色"]}],
+        "prompt": "主图点击率低，只改主图", "mode": "iterate",
+        "base_task_id": base["task_id"], "image_count": 3, "slot_count": 3,
+    })
+    assert created.status_code == 201, created.text
+    payload = created.json()
+    by_color = {item["color"]: item for item in payload["tasks"]}
+    # 米色：复用 slot2/3，只出新主图 1 张
+    assert by_color["米色"]["reused_images"] == 2
+    assert by_color["米色"]["image_count"] == 1
+    # 黑色：不能串米色的成品，正常出 3 张
+    assert by_color["黑色"]["reused_images"] == 0
+    assert by_color["黑色"]["image_count"] == 3
+    assert by_color["黑色"]["base_task_id"] is None
+    # 计划张数按复用扣减（1 + 3），不是 3×2
+    assert payload["planned_images"] == 4
+    assert payload["reused_images"] == 1
+
+
+def test_platform_variant_forces_both_platforms(env):
+    """`platform_variant` 语义固定为双平台：即使同时给了单平台，也要出淘系+抖系两套。"""
+    headers = login(env)
+    created = env.post("/api/image/tasks", headers=headers, json={
+        "product_ids": ["P-3001"], "prompt": "白底主图", "platform": "淘系",
+        "platform_variant": True, "image_count": 1,
+    })
+    assert created.status_code == 201, created.text
+    payload = created.json()
+    assert payload["platforms"] == ["淘系", "抖系"]
+    assert {item["platform"] for item in payload["tasks"]} == {"淘系", "抖系"}

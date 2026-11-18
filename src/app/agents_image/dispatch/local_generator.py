@@ -82,13 +82,40 @@ class LocalGenerator:
         return True
 
     async def resume_pending(self) -> list[str]:
-        """启动时续跑：queued 或超时 running 的任务重新提交。"""
-        timeout = self.settings.timeout_seconds
+        """续跑（启动时 + 看门狗周期调用）：只拾取 `queued` 或 **租约过期** 的任务。
+
+        重投次数封顶：`recoveries > IMAGE_MAX_RECOVERIES` 时直接判失败并释放预留额度，
+        避免"坏任务被无限重投、每次都产生真实成本"。
+        """
+        lease = int(getattr(self.settings, "task_lease_seconds", 300) or 300)
+        max_recoveries = int(getattr(self.settings, "max_recoveries", 3) or 3)
         with session_scope() as session:
-            rows = task_store.list_recoverable(session, timeout_seconds=timeout)
+            rows = task_store.list_recoverable(
+                session, timeout_seconds=self.settings.timeout_seconds,
+                lease_seconds=lease, max_recoveries=max_recoveries)
             ids = [row.task_id for row in rows]
+        resumed: list[str] = []
         for task_id in ids:
+            with session_scope() as session:
+                recoveries = task_store.bump_recoveries(session, task_id)
+                if recoveries > max_recoveries:
+                    task = task_store.get_task(session, task_id)
+                    username = getattr(task, "username", "") if task else ""
+                    planned = int(getattr(task, "image_count", 0) or 0) if task else 0
+                    task_store.mark_failed(
+                        session, task_id, code="IMG_RECOVERY_EXHAUSTED",
+                        detail=f"看门狗已重投 {recoveries} 次仍未完成，判失败（不再重投）")
+                    if username and planned:
+                        from app.agents_image.store import quota as quota_store
+
+                        try:
+                            quota_store.release(session, username, planned)
+                        except Exception:  # noqa: BLE001 —— 释放失败不影响判失败
+                            logger.warning("重投超限任务释放预留失败：%s", task_id)
+                    continue
             await self.submit(task_id)
+            resumed.append(task_id)
+        ids = resumed
         if ids:
             logger.info("生图任务续跑：%d 个（%s）", len(ids), ids[:5])
         return ids

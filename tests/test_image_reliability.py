@@ -145,6 +145,75 @@ def test_resume_picks_up_lease_expired_running(env, monkeypatch):
     assert "20261118000000dddd" in resumed
 
 
+def test_lease_expired_running_is_resumed_with_recoveries(env, monkeypatch):
+    """W1：租约过期的 running 会被重投，并累加 `recoveries`。"""
+    from app.agents_image.dispatch.local_generator import LocalGenerator
+
+    with session_scope() as session:
+        task_store.create_task(session, task_id="20261118000000aa11", username="admin",
+                               department=None, prompt="白底主图", platform="淘系",
+                               aspect="1:1", n=1, ref_asset_ids=[], product_id="P-1001",
+                               image_count=1)
+        task_store.update_task(session, "20261118000000aa11", status="running",
+                               started_at=dt.datetime.now() - dt.timedelta(hours=1),
+                               lease_until=dt.datetime.now() - dt.timedelta(seconds=30))
+    generator = LocalGenerator()
+    resumed = asyncio.run(generator.resume_pending())
+    assert "20261118000000aa11" in resumed
+    with session_scope() as session:
+        task = task_store.get_task(session, "20261118000000aa11")
+        assert task.recoveries == 1
+
+
+def test_live_lease_is_not_recovered(env):
+    """W1：租约未过期的在途任务**不能被**看门狗重投（否则同一任务跑两遍、成本翻倍）。"""
+    from app.agents_image.dispatch.local_generator import LocalGenerator
+
+    with session_scope() as session:
+        task_store.create_task(session, task_id="20261118000000aa22", username="admin",
+                               department=None, prompt="白底主图", platform="淘系",
+                               aspect="1:1", n=1, ref_asset_ids=[], product_id="P-1001",
+                               image_count=1)
+        # 启动时间很旧，但租约刚续过 → 仍在途
+        task_store.update_task(session, "20261118000000aa22", status="running",
+                               started_at=dt.datetime.now() - dt.timedelta(hours=2),
+                               lease_until=dt.datetime.now() + dt.timedelta(seconds=120))
+    generator = LocalGenerator()
+    resumed = asyncio.run(generator.resume_pending())
+    assert "20261118000000aa22" not in resumed
+    with session_scope() as session:
+        task = task_store.get_task(session, "20261118000000aa22")
+        assert task.recoveries == 0
+
+
+def test_recoveries_exhausted_marks_failed_and_releases_quota(env):
+    """W1：重投次数超限 → 判失败（IMG_RECOVERY_EXHAUSTED）并释放预留额度，不再无限重投。"""
+    from app.agents_image.dispatch.local_generator import LocalGenerator
+    from app.agents_image.store import quota as quota_store
+
+    with session_scope() as session:
+        quota_store.grant(session, "worker1", period_type="day", period_limit=10)
+        assert quota_store.reserve(session, "worker1", 2) is True
+        task_store.create_task(session, task_id="20261118000000aa33", username="worker1",
+                               department="男装", prompt="白底主图", platform="淘系",
+                               aspect="1:1", n=2, ref_asset_ids=[], product_id="P-1002",
+                               image_count=2)
+        task_store.update_task(session, "20261118000000aa33", status="running",
+                               started_at=dt.datetime.now() - dt.timedelta(hours=1),
+                               lease_until=dt.datetime.now() - dt.timedelta(seconds=30),
+                               recoveries=int(get_image_settings().max_recoveries))
+
+    generator = LocalGenerator()
+    assert asyncio.run(generator.resume_pending()) == []
+    with session_scope() as session:
+        task = task_store.get_task(session, "20261118000000aa33")
+        status, code = task.status, task.error_code
+        rows = {row["username"]: row for row in quota_store.list_quotas(session)}
+    assert status == "failed"
+    assert code == "IMG_RECOVERY_EXHAUSTED"
+    assert rows["worker1"]["reserved"] == 0     # 预留必须还回去
+
+
 # ---------------------------------------------------------------- P1-7 SSE / 并发
 def test_sse_poll_interval_is_three_seconds():
     from app.agents_image.api import stream_routes

@@ -277,3 +277,61 @@ def test_canceled_task_discards_outputs(_db, env):
         task = task_store.get_task(session, task_id)
         assert task.status == "canceled"
         assert asset_store.list_outputs(session, task_id) == []
+
+
+# ---------------------------------------------------------------- W1：幂等抢占 / 预留单次释放
+def test_pending_idempotency_row_returns_409(env):
+    """首个同 key 请求还在处理（已抢占 pending）→ 409 + Retry-After，不重复建任务。"""
+    from app.agents_image.store.models import ImageRequest
+
+    headers = login(env)
+    _set_quota("worker1", 20)
+    with session_scope() as session:
+        session.add(ImageRequest(request_id="idem-pending-1", status="pending",
+                                 batch_id="", username="worker1", response_json={}))
+    before = _count_tasks("worker1")
+    resp = env.post("/api/image/tasks",
+                    headers={**headers, "Idempotency-Key": "idem-pending-1"},
+                    json={"product_ids": ["P-1002"], "prompt": "白底主图", "image_count": 1})
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["error_code"] == "IMG_TASK_CONFLICT"
+    assert resp.headers.get("Retry-After") == "2"
+    assert _count_tasks("worker1") == before
+
+
+def test_failed_request_leaves_no_idempotency_row(env):
+    """失败的请求回滚掉 pending 行：同 key 可以重试成功（不会永久 409）。"""
+    from app.agents_image.store.models import ImageRequest
+
+    headers = login(env, "worker2", "hhw222")
+    _set_quota("worker2", 1)
+    failed = env.post("/api/image/tasks",
+                      headers={**headers, "Idempotency-Key": "idem-retry-1"},
+                      json={"product_ids": ["P-2001"], "prompt": "白底主图", "n": 6})
+    assert failed.status_code == 429
+    with session_scope() as session:
+        assert session.get(ImageRequest, "idem-retry-1") is None
+    ok = env.post("/api/image/tasks",
+                  headers={**headers, "Idempotency-Key": "idem-retry-1"},
+                  json={"product_ids": ["P-2001"], "prompt": "白底主图", "n": 1})
+    assert ok.status_code == 201, ok.text
+
+
+def test_reserved_quota_released_once_when_request_rolls_back(env):
+    """建任务事务中途失败（部门越权）→ 回滚撤销预留，预留不得泄漏也不得二次释放。"""
+    headers = login(env, "worker2", "hhw222")
+    _set_quota("worker2", 10)
+    before = _quota_row("worker2")
+    before_tasks = _count_tasks("worker2")
+    resp = env.post("/api/image/tasks", headers=headers,
+                    json={"product_ids": ["P-1001", "P-1002"], "prompt": "白底主图",
+                          "image_count": 1})
+    assert resp.status_code == 403, resp.text
+    after = _quota_row("worker2")
+    assert after["reserved"] == before.get("reserved", 0)
+    assert after["used"] == before.get("used", 0)
+    assert _count_tasks("worker2") == before_tasks
+    # 额度仍然可用（释放没有把别人的预留吃掉）
+    again = env.post("/api/image/tasks", headers=headers,
+                     json={"product_ids": ["P-1001"], "prompt": "白底主图", "image_count": 1})
+    assert again.status_code == 201, again.text

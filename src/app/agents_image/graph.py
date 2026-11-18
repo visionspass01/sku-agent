@@ -33,6 +33,16 @@ from app.db.engine import session_scope
 logger = logging.getLogger("sku-agent.image.graph")
 
 
+def _renew_lease(task_id: str, settings) -> None:
+    """执行期续约（W1）：每个阶段续一次，保证在途任务不会被看门狗重投。"""
+    seconds = int(getattr(settings, "task_lease_seconds", 300) or 300)
+    try:
+        with session_scope() as session:
+            task_store.renew_lease(session, task_id, seconds=seconds)
+    except Exception:  # noqa: BLE001 —— 续约失败不影响执行
+        logger.warning("任务续约失败：task=%s", task_id)
+
+
 def _load_refs(session, ref_ids: list[str]) -> list[dict]:
     storage = get_storage()
     refs: list[dict] = []
@@ -135,6 +145,7 @@ async def execute_task(task_id: str) -> ImageTaskState:
             or plan_slots.build_slots(ImageTaskState(count=task.n, aspect=task.aspect)),
         )
 
+    _renew_lease(task_id, settings)
     state.touch("understand")
     if not state.attrs:
         # 中台数据缺失只在"历史任务/异常任务"出现：退回启发式，但记一条 warning（可观测）
@@ -172,6 +183,7 @@ async def execute_task(task_id: str) -> ImageTaskState:
     attempted = 0
     for attempt in range(1, max_attempts + 1):
         state.attempt = attempt
+        _renew_lease(task_id, settings)
         state.touch("generate", attempt=attempt, slots=len(current))
         # provider 调用标记：取消 API 据此判断"能不能撤回"（P1-6）
         with session_scope() as session:
@@ -190,6 +202,7 @@ async def execute_task(task_id: str) -> ImageTaskState:
                        for slot in (result.get("slots") or [])]
         images = _collect_images(result)
         attempted += len(images)
+        _renew_lease(task_id, settings)
         state.touch("critic", attempt=attempt, images=len(images))
         critic = critic_mod.critique(state, current, images, settings=settings, rules=rules,
                                      manifest=registry.manifest)

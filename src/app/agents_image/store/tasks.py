@@ -125,11 +125,50 @@ def list_tasks(session, *, username: str | None = None, limit: int = 50,
     return list(session.execute(statement).scalars().all())
 
 
-def list_recoverable(session, *, timeout_seconds: int) -> list[ImageTask]:
-    """重启后需要续跑的任务：`queued`，或 `running` 但已超时（进程被杀时留下的）。"""
-    cutoff = dt.datetime.now() - dt.timedelta(seconds=timeout_seconds)
+def list_recoverable(session, *, timeout_seconds: int = 0,
+                     lease_seconds: int | None = None,
+                     max_recoveries: int = 3) -> list[ImageTask]:
+    """需要续跑的任务（W1）：`queued`，或 **租约已过期** 的 `running`。
+
+    只认租约（`lease_until`）而不是"启动超过 N 秒"：真实 provider 单任务可能跑几分钟，
+    用固定超时会把**在途正常任务**当成死任务重投 → 同一任务被执行两次、成本翻倍。
+    重投次数封顶由调用方处理（超限判失败），这里不再按 `recoveries` 过滤——
+    否则到了上限的任务会永远停在 `running`，既不重投也不失败。
+    # noqa: ARG002 —— `max_recoveries` 保留给调用方语义对齐
+    """
+    moment = dt.datetime.now()
+    span = lease_seconds if lease_seconds is not None else timeout_seconds
+    cutoff = moment - dt.timedelta(seconds=max(30, int(span or 300)))
     rows = session.execute(
         select(ImageTask).where(ImageTask.status.in_(("queued", "running")))
     ).scalars().all()
-    return [row for row in rows
-            if row.status == "queued" or (row.started_at is None or row.started_at < cutoff)]
+    out: list[ImageTask] = []
+    for row in rows:
+        if row.status == "queued":
+            out.append(row)
+            continue
+        lease = getattr(row, "lease_until", None)
+        if lease is None:
+            # 老任务没有租约：退回"启动时间 + 租约时长"判断
+            if (row.started_at or dt.datetime.min) < cutoff:
+                out.append(row)
+            continue
+        if lease < moment:
+            out.append(row)
+    return out
+
+
+def renew_lease(session, task_id: str, *, seconds: int) -> None:
+    """续约（执行期心跳）：避免看门狗把在途任务当成死任务重投。"""
+    update_task(session, task_id,
+                lease_until=dt.datetime.now() + dt.timedelta(seconds=max(30, int(seconds))))
+
+
+def bump_recoveries(session, task_id: str) -> int:
+    """被看门狗重投时累加计数，返回累加后的值（超限即判失败）。"""
+    task = session.get(ImageTask, task_id)
+    if task is None:
+        return 0
+    task.recoveries = int(task.recoveries or 0) + 1
+    session.flush()
+    return task.recoveries

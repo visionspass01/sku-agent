@@ -225,14 +225,12 @@ async def _resolve_request_parameters(catalog, body: dict, settings) -> dict:
 async def create_tasks(request: Request) -> JSONResponse:
     """批量建任务：`{request_id?, product_ids[1..5], prompt, compositions?, scene_styles?, slot_count?, image_count?, aspect?, platform?}`。
 
-    幂等：`Idempotency-Key` 头或 body `request_id` 相同 → 直接返回首次响应（不重复建任务/扣额度）。
-    配额：先在事务内**预留**本期额度，交付成功再结算、失败/取消回滚。
+    幂等（W1 改为**先抢占再落库**）：`Idempotency-Key` 头或 body `request_id` 相同 →
+    已完成的请求重放首次响应；仍在处理中的返回 409 + `Retry-After`（不再并发双建）。
+    配额：事务内**预留**实际要出的张数（复用图位不计），交付成功结算、失败/取消回滚。
     """
     trace = trace_id_of(request)
     settings = get_image_settings()
-    submitted: list[str] = []
-    reserved_images = 0
-    reserved_user = ""
     try:
         user = require_user(request)
         body = await request.json()
@@ -249,6 +247,9 @@ async def create_tasks(request: Request) -> JSONResponse:
             if replay:
                 replay.update({"idempotent": True, "trace_id": trace})
                 return JSONResponse(status_code=200, content=replay)
+            if row is not None:
+                # 同 key 的首次请求还在处理（已抢占、尚未提交响应）
+                return _idempotent_conflict(trace)
 
         product_ids = _dedupe([str(x) for x in (body.get("product_ids") or [])])
         if not product_ids:
@@ -277,7 +278,21 @@ async def create_tasks(request: Request) -> JSONResponse:
                              f"当前颜色×平台×变体共 {len(matrix)} 个")
 
         base_params = params_by_platform[platforms[0]]
-        planned_images = base_params["image_count"] * len(matrix)
+
+        # 复用计划（只读、在建任务之前）：决定"实际要出多少张"，配额/成本按它算
+        with session_scope() as session:
+            reuse_plan = await _reuse_plan(session, user, body, targets, catalog)
+
+        def _reuse_of(target, platform: str, variant: dict) -> dict[str, str]:
+            if not reuse_plan:
+                return {}
+            key = (target.color_key, platform, str(variant.get("id", "") or ""))
+            return dict(reuse_plan["reuse_map"]) if key == reuse_plan["key"] else {}
+
+        plan_by_task = [1 if _reuse_of(target, platform, variant)
+                        else int(params_by_platform[platform]["image_count"])
+                        for target, platform, variant in matrix]
+        planned_images = sum(plan_by_task)
         with session_scope() as session:
             from app.agents_image.store import quota as quota_store
 
@@ -297,18 +312,30 @@ async def create_tasks(request: Request) -> JSONResponse:
                              "请减少张数/颜色，或调大 IMAGE_COST_BUDGET_CNY", retryable=False)
 
         with session_scope() as session:
+            from sqlalchemy.exc import IntegrityError
+
             from app.agents_image.store import quota as quota_store
 
-            # 预留：占住本次计划张数，防止并发下超发（交付成功转 used，失败/取消释放）
+            # 幂等抢占：先插 pending 行；并发同 key 的第二个请求会撞主键 → 409
+            if idempotency_key:
+                from app.agents_image.store.models import ImageRequest
+
+                session.add(ImageRequest(request_id=idempotency_key, status="pending",
+                                         batch_id="", username=user.username,
+                                         response_json={}))
+                try:
+                    session.flush()
+                except IntegrityError:
+                    session.rollback()
+                    return _idempotent_conflict(trace)
+
+            # 预留：占住本次计划张数，防止并发下超发（交付成功转 used，失败/取消由事务回滚/结算释放）
             if not user.is_admin:
                 if not quota_store.reserve(session, user.username, planned_images):
                     raise ImageError("IMG_QUOTA_EXCEEDED",
                                      f"配额不足：本期剩余 {quota['remaining']} 张，"
                                      f"本次需要 {planned_images} 张", retryable=False)
-                reserved_images = planned_images
-                reserved_user = user.username
 
-            reuse_plan = await _reuse_plan(session, user, body, targets, catalog)
             resolution = await refs_source.resolve_refs(
                 catalog, targets, session=session,
                 username=user.username, department=user.department,
@@ -318,7 +345,7 @@ async def create_tasks(request: Request) -> JSONResponse:
             batch_id = new_batch_id()
             created: list[dict] = []
             first_slots: list[dict] = []
-            for target, platform, variant in matrix:
+            for index, (target, platform, variant) in enumerate(matrix):
                 params = params_by_platform[platform]
                 state = ImageTaskState(
                     prompt=prompt, aspect=params["aspect"], count=params["image_count"],
@@ -336,7 +363,7 @@ async def create_tasks(request: Request) -> JSONResponse:
                 validate_node.validate(state, settings=settings)
                 planned_for_target = sum(1 for item in state.slots
                                          if plan_slots.is_generatable(item))
-                reuse_map = (reuse_plan or {}).get("reuse_map") or {}
+                reuse_map = _reuse_of(target, platform, variant)
                 task = task_store.create_task(
                     session, task_id=new_task_id(), username=user.username,
                     department=user.department, batch_id=batch_id,
@@ -352,7 +379,7 @@ async def create_tasks(request: Request) -> JSONResponse:
                     image_count=(1 if reuse_map else min(planned_for_target,
                                                          params["image_count"])),
                     slot_count=len(state.slots),
-                    base_task_id=(reuse_plan or {}).get("base_task_id"),
+                    base_task_id=(reuse_plan or {}).get("base_task_id") if reuse_map else None,
                     reuse_asset_ids=reuse_map,
                     reused_images=len(reuse_map),
                 )
@@ -380,39 +407,48 @@ async def create_tasks(request: Request) -> JSONResponse:
                            "max_tasks_per_request": settings.max_tasks_per_request,
                            "refs_truncated": resolution.truncated},
                 "planned_images": planned_images,
+                "reused_images": sum(1 for target, platform, variant in matrix
+                                     if _reuse_of(target, platform, variant)),
                 "trace_id": trace, "idempotent": False,
             }
             if idempotency_key:
                 from app.agents_image.store.models import ImageRequest
 
-                session.add(ImageRequest(request_id=idempotency_key, batch_id=batch_id,
-                                         username=user.username, response_json=payload))
+                row = session.get(ImageRequest, idempotency_key)
+                if row is None:
+                    session.add(ImageRequest(request_id=idempotency_key, status="done",
+                                             batch_id=batch_id, username=user.username,
+                                             response_json=payload))
+                else:
+                    row.batch_id = batch_id
+                    row.response_json = payload
+                    row.status = "done"
                 session.flush()
+        # 事务已提交：任务与预留都落库。派发失败不算建任务失败（任务保持 queued，看门狗会补投）
         for item in created:
-            await get_dispatcher().submit(item["task_id"])
-            submitted.append(item["task_id"])
+            try:
+                await get_dispatcher().submit(item["task_id"])
+            except Exception:  # noqa: BLE001
+                logger.warning("任务派发失败（保留 queued，由看门狗补投）：%s", item["task_id"])
         metrics.record_task_created(len(created))
     except ImageError as exc:
-        if reserved_images and reserved_user:
-            _release_reserve(reserved_user, reserved_images)
+        # 事务回滚已撤销预留 → 这里**不再显式释放**（否则会把别人的预留吃掉）
         return error_response(exc, trace)
     except Exception as exc:  # noqa: BLE001
         logger.exception("创建生图任务失败")
-        if reserved_images and reserved_user:
-            _release_reserve(reserved_user, reserved_images)
         return error_response(exc, trace)
     return JSONResponse(status_code=201, content=payload)
 
 
-def _release_reserve(username: str, images: int) -> None:
-    """建任务失败时把预留还回去（失败释放不影响用户额度）。"""
-    try:
-        from app.agents_image.store import quota as quota_store
-
-        with session_scope() as session:
-            quota_store.release(session, username, images)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("预留释放失败：user=%s n=%s %s", username, images, exc)
+def _idempotent_conflict(trace: str) -> JSONResponse:
+    """同 key 的首个请求还在处理中：让客户端 2 秒后重试（拿到首次响应）。"""
+    return JSONResponse(
+        status_code=409,
+        content={"detail": "相同 request_id 的请求正在处理中，请稍后重试",
+                 "error_code": "IMG_TASK_CONFLICT", "retryable": True, "trace_id": trace},
+        headers={"Retry-After": "2", "X-Error-Code": "IMG_TASK_CONFLICT",
+                 "X-Trace-Id": trace},
+    )
 
 
 async def _resolve_targets(catalog, body: dict, product_ids: list[str]) -> list[refs_source.RefTarget]:
@@ -465,12 +501,13 @@ def _platform_list(body: dict) -> list[str]:
     """
     explicit = [str(item).strip() for item in (body.get("platforms") or []) if str(item).strip()]
     single = str(body.get("platform") or "").strip()
-    if explicit:
+    if body.get("platform_variant"):
+        # W1：`platform_variant` 语义固定为"淘系+抖系双套"，不再被单平台字段降级成一套
+        chosen = ["淘系", "抖系"]
+    elif explicit:
         chosen = _dedupe(explicit)
     elif single:
         chosen = [single]
-    elif body.get("platform_variant"):
-        chosen = ["淘系", "抖系"]
     else:
         chosen = ["淘系"]
     allowed = {"淘系", "抖系"}
@@ -551,7 +588,10 @@ async def _reuse_plan(session, user, body: dict, targets, catalog) -> dict | Non
     if not reuse_map:
         raise ImageError("IMG_INPUT_INVALID",
                          "基础任务没有可复用的其它图位成品（只有主图）；请改用 standard 模式")
-    return {"base_task_id": base_task_id, "reuse_map": reuse_map,
+    # 复用只对"同一 (颜色, 平台, 变体)"的目标生效：否则多色/双平台 iterate 会串色串平台
+    key = (base.color_key or "", base.platform or "",
+           str(getattr(base, "variant_id", "") or ""))
+    return {"base_task_id": base_task_id, "key": key, "reuse_map": reuse_map,
             "reused_images": len(reuse_map)}
 
 

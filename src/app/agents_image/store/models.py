@@ -67,6 +67,9 @@ class ImageTask(Base):
 
     provider_started_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
     cancel_requested: Mapped[bool] = mapped_column(default=False)
+    # 租约与重投次数（W1）：执行期续约，看门狗只拾取租约过期的 running
+    lease_until: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    recoveries: Mapped[int] = mapped_column(Integer, default=0)
 
     trace_id: Mapped[str] = mapped_column(String(32), default="")
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=dt.datetime.now)
@@ -185,6 +188,7 @@ class ImageRequest(Base):
     __tablename__ = "image_request"
 
     request_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    status: Mapped[str] = mapped_column(String(16), default="pending")  # pending|done
     batch_id: Mapped[str] = mapped_column(String(32), default="", index=True)
     username: Mapped[str] = mapped_column(String(32), default="", index=True)
     response_json: Mapped[dict] = mapped_column(JSON, default=dict)

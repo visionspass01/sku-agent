@@ -183,7 +183,8 @@ def list_quotas(session) -> list[dict]:
     rows = session.execute(select(ImageQuota).order_by(ImageQuota.username)).scalars().all()
     return [{"username": row.username, "period_type": row.period_type,
              "period_limit": int(row.period_limit or 0), "period_key": row.period_key,
-             "used": int(row.used or 0), "remaining": remaining(row),
+             "used": int(row.used or 0), "reserved": int(row.reserved or 0),
+             "remaining": remaining(row),
              "granted_by": row.granted_by} for row in rows]
 
 

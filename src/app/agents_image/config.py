@@ -42,7 +42,10 @@ class ImageSettings(BaseSettings):
     concurrency: int = Field(default=8, ge=1, le=32)          # 本机任务并发
     provider_concurrency: int = Field(default=10, ge=1, le=64)  # 调第三方生图 API 的并发上限
     timeout_seconds: int = Field(default=60, ge=5, le=600)
-    recovery_interval_seconds: int = Field(default=60, ge=0, le=3600)  # 看门狗扫描间隔（0=关）
+    recovery_interval_seconds: int = Field(default=30, ge=0, le=3600)  # 看门狗扫描间隔（0=关）
+    # 任务租约（W1）：执行期每阶段续约；只有租约过期才允许看门狗重投
+    task_lease_seconds: int = Field(default=300, ge=30, le=3600)
+    max_recoveries: int = Field(default=3, ge=1, le=10)  # 同一任务最多被重投几次
 
     # ---- 本地存储与清理（测试环境图片保留 24h）----
     images_root: str = ""             # 空 = data/images；测试/多实例时显式覆盖
