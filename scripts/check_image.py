@@ -31,7 +31,9 @@ from app.agents_image.storage.image_storage import image_size  # noqa: E402
 # 平台阈值（生产以中台 `platform_rules` 为准；这里给脚本一份可执行的默认值）
 PLATFORM_RULES = {
     "淘系": {"aspect": 1.0, "min_px": 800, "max_mb": 3.0, "white_ratio": 0.55,
-             "subject_min": 0.05, "subject_max": 0.95, "margin_min": 0.15},
+             "subject_min": 0.15, "subject_max": 0.90, "margin_min": 0.15},
+    "抖系": {"aspect": 1.0, "min_px": 800, "max_mb": 3.0, "white_ratio": 0.45,
+             "subject_min": 0.15, "subject_max": 0.95, "margin_min": 0.10},
     "通用": {"aspect": 1.0, "min_px": 800, "max_mb": 5.0, "white_ratio": 0.35,
              "subject_min": 0.03, "subject_max": 0.97, "margin_min": 0.08},
 }

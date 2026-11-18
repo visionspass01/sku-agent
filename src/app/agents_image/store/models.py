@@ -43,6 +43,10 @@ class ImageTask(Base):
     scene_styles: Mapped[list] = mapped_column(JSON, default=list)
     attrs_json: Mapped[dict] = mapped_column(JSON, default=dict)   # 中台商品身份锁定字段快照
     copy_json: Mapped[dict] = mapped_column(JSON, default=dict)    # 图内文案（按平台策略）
+    # C2：iterate 复用的历史成品（{slot: asset_id}）与来源任务
+    base_task_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    reuse_asset_ids: Mapped[dict] = mapped_column(JSON, default=dict)
+    reused_images: Mapped[int] = mapped_column(Integer, default=0)
     slots_json: Mapped[list] = mapped_column(JSON, default=list)
     prompt_pack_json: Mapped[list] = mapped_column(JSON, default=list)
 
@@ -56,6 +60,10 @@ class ImageTask(Base):
     error_detail: Mapped[str] = mapped_column(Text, default="")
     mcp_degraded: Mapped[bool] = mapped_column(default=False)   # 仅历史兼容，v6 起恒为 False
     backfill_status: Mapped[str] = mapped_column(String(16), default="pending")  # pending/sent/failed
+    # B2：上架标记（轻量）。上架动作发生在商家后台，Agent 只记录状态与链接，不冒充"已上架"
+    listing_status: Mapped[str] = mapped_column(String(16), default="not_listed")
+    listing_url: Mapped[str] = mapped_column(Text, default="")
+    listed_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
 
     provider_started_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
     cancel_requested: Mapped[bool] = mapped_column(default=False)

@@ -88,7 +88,26 @@ def _cards(session, *, runtime: dict) -> dict:
         "tasks_done": done_total,
         "tasks_failed": failed_total,
         "cost_cny": round(cost_sum, 4),
+        "listing_rate": _listing_rate(session),
     }
+
+
+def _listing_rate(session) -> float:
+    """上架率（B2）：采纳过的任务里，有多少被运营标记为已上架。"""
+    from sqlalchemy import select
+
+    from app.agents_image.store.models import ImageFeedback, ImageTask
+
+    adopted_tasks = {row[0] for row in session.execute(
+        select(ImageFeedback.task_id).where(ImageFeedback.verdict == "adopted")).all()}
+    if not adopted_tasks:
+        return 0.0
+    listed = session.execute(
+        select(ImageTask.task_id).where(
+            ImageTask.task_id.in_(list(adopted_tasks)),
+            ImageTask.listing_status == "listed")
+    ).scalars().all()
+    return round(len(listed) / len(adopted_tasks), 4)
 
 
 @router.get("/admin/metrics")
@@ -134,6 +153,7 @@ def admin_tasks(request: Request) -> JSONResponse:
                         "attempted_images": row.attempted_images,
                         "delivered_images": row.delivered_images,
                         "backfill_status": row.backfill_status,
+                "listing_status": row.listing_status,
                         "error_code": row.error_code,
                         "created_at": row.created_at.isoformat() if row.created_at else ""}
                        for row in rows]
@@ -166,6 +186,8 @@ def admin_task_detail(task_id: str, request: Request) -> JSONResponse:
                 "delivered_images": task.delivered_images, "cost_cny": task.cost_cny,
                 "error_code": task.error_code, "error_detail": task.error_detail,
                 "backfill_status": task.backfill_status,
+                "listing_status": task.listing_status,
+                "listing_url": task.listing_url,
                 "slots": list(task.slots_json or []), "prompt_pack": list(task.prompt_pack_json or []),
                 "refs": refs, "assets": outputs,
                 "created_at": task.created_at.isoformat() if task.created_at else "",

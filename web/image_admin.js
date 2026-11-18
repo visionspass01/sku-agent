@@ -65,6 +65,8 @@ const ImageAdmin = (() => {
         hint: `任务 ${fmt(data.tasks_done)} 完成 · ${fmt(data.tasks_failed)} 失败` },
       { label: "首轮通过率", value: `${fmt((data.first_pass_rate || 0) * 100, 1)}%`,
         hint: `成本 ¥${fmt(data.cost_cny, 2)} · 回写待重放 ${fmt(outbox.pending)}` },
+      { label: "上架率（采纳→上架）", value: `${fmt((data.listing_rate || 0) * 100, 1)}%`,
+        hint: `采纳 ${fmt(data.adopted)} / 驳回 ${fmt(data.rejected)}` },
     ];
     container.innerHTML = items.map((item) => `
       <div class="card">
@@ -205,6 +207,7 @@ const ImageAdmin = (() => {
         <td>${esc(task.attempts)}</td>
         <td>${esc(task.delivered_images)}</td>
         <td>${esc(task.backfill_status || "-")}</td>
+        <td>${esc(task.listing_status || "not_listed")}</td>
       </tr>
     `).join("");
   }

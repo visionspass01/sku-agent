@@ -129,6 +129,7 @@ async def execute_task(task_id: str) -> ImageTaskState:
                            product_id=str(task.product_id or ""),
                            source=task.ref_source or "mcp") for item in refs],
             attrs=dict(task.attrs_json or {}),
+            reuse_asset_ids=dict(getattr(task, "reuse_asset_ids", {}) or {}),
             # 图位模板与 label 在建任务时已按中台 plan_policy 解析并落库：执行期不再回调中台
             slots=[SlotPlan(**item) for item in (task.slots_json or [])]
             or plan_slots.build_slots(ImageTaskState(count=task.n, aspect=task.aspect)),
@@ -151,6 +152,10 @@ async def execute_task(task_id: str) -> ImageTaskState:
     validate.validate(state, settings=settings)
 
     generate_drafts = [draft for draft in all_drafts if draft.type == "generate"]
+    # C2：iterate 复用 base 任务成品 —— 被复用的图位不再调用生图模型
+    reuse_map = {int(slot): asset_id for slot, asset_id in (state.reuse_asset_ids or {}).items()}
+    if reuse_map:
+        generate_drafts = [draft for draft in generate_drafts if draft.slot not in reuse_map]
     # 出图张数（image_count）可以小于 generate 图位数：只出前 N 个，其余图位留空给人工
     if state.count and len(generate_drafts) > int(state.count):
         generate_drafts = generate_drafts[: int(state.count)]
@@ -263,6 +268,32 @@ async def execute_task(task_id: str) -> ImageTaskState:
                     "storage": asset.storage, "key": asset.key,
                     "gate_fixed": bool(verdict.fixed),
                 })
+        # C2：被复用的图位把历史成品挂到本任务（不重复生成、不重复计费）
+        reused = 0
+        for slot, asset_id in (reuse_map or {}).items():
+            base_asset = asset_store.get_asset(session, asset_id)
+            if base_asset is None:
+                continue
+            try:
+                data = asset_store.read_asset_bytes(base_asset)
+            except Exception as exc:  # noqa: BLE001 —— 历史成品已被 24h 清理
+                state.warnings.append(
+                    f"IMG_REUSE_EXPIRED: 图位 {slot} 的历史成品已过保留期，已跳过复用"
+                    f"（{type(exc).__name__}）")
+                continue
+            asset = asset_store.save_bytes(
+                session, data, kind="output", mime=base_asset.mime,
+                task_id=task_id, slot=slot, username=task.username,
+                department=task.department, source="reuse",
+            )
+            outputs.append({
+                "slot": slot, "mime": asset.mime, "sha256": asset.sha256,
+                "width": asset.width, "height": asset.height, "bytes": asset.bytes,
+                "storage": asset.storage, "key": asset.key, "reused": True,
+            })
+            reused += 1
+        if reused:
+            task_store.update_task(session, task_id, reused_images=reused)
         if blocked and delivered == 0:
             reasons = "；".join(
                 f"图位 {item['slot']}：{'、'.join(item['reasons'])}" for item in blocked[:2])

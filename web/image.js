@@ -363,6 +363,43 @@ async function openStream(taskId, handlers) {
   return controller;
 }
 
+/* B2：上架标记（轻量）——只记录运营填报的状态与链接，不作为上架凭证 */
+async function markListing(taskId, status) {
+  let listingUrl = "";
+  if (status === "listed") {
+    listingUrl = (window.prompt("填商品链接（必填）") || "").trim();
+    if (!listingUrl) {
+      setText("create-hint", "标记已上架必须填商品链接");
+      return;
+    }
+  }
+  try {
+    await api(`/api/image/tasks/${taskId}/listing`, { json: { status, listing_url: listingUrl } });
+    setText("create-hint", status === "listed" ? "已标记上架" : "已更新上架状态");
+  } catch (err) {
+    setText("create-hint", err.message);
+  }
+}
+
+
+function attachListingButtons(taskId, row) {
+  if (row.querySelector(".pi-listing")) return;
+  const box = document.createElement("span");
+  box.className = "pi-listing";
+  const listed = document.createElement("button");
+  listed.className = "mini-btn secondary";
+  listed.textContent = "标记已上架";
+  listed.addEventListener("click", () => markListing(taskId, "listed"));
+  const pending = document.createElement("button");
+  pending.className = "mini-btn secondary";
+  pending.textContent = "待上架";
+  pending.addEventListener("click", () => markListing(taskId, "pending"));
+  box.appendChild(listed);
+  box.appendChild(pending);
+  row.appendChild(box);
+}
+
+
 function watchTask(taskId, productId) {
   if (state.streams.has(taskId)) return;
   const container = $("progress");
@@ -395,6 +432,7 @@ function watchTask(taskId, productId) {
         statusEl.textContent = data.status + (data.timed_out ? "（等待超时）" : "");
         row.className = "progress-item " + data.status;
         if (data.error_code) nameEl.textContent = data.error_code;
+        if (data.status === "done") attachListingButtons(taskId, row);
         loadGallery(taskId);
         loadQuota();
       } else if (event === "fatal") {
@@ -423,7 +461,8 @@ function appendGallery(taskId, asset) {
   card.dataset.asset = asset.asset_id;
   card.dataset.task = taskId;
   card.innerHTML = [
-    `<div class="gc-head"><span>slot ${esc(asset.slot)}</span><span class="muted">${esc(asset.kind)}</span></div>`,
+    `<div class="gc-head"><span>slot ${esc(asset.slot)}</span><span class="muted">` +
+      `${asset.reused ? "复用历史成品" : esc(asset.kind)}${asset.adopt_status && asset.adopt_status !== "pending" ? " · " + esc(asset.adopt_status) : ""}</span></div>`,
     `<img loading="lazy" alt="slot ${esc(asset.slot)}" src="${esc(asset.signed_url || asset.url)}" />`,
     `<figcaption class="gc-foot"><span>${esc(asset.width)}×${esc(asset.height)} · ${esc(asset.mime)}</span>`,
     `<code>${esc(asset.sha256 ? asset.sha256.slice(0, 16) : "")}…</code></figcaption>`,

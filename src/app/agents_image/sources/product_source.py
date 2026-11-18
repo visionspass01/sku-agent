@@ -162,6 +162,16 @@ class PlatformRules(BaseModel):
         return int((self.copy_policy or {}).get("max_subhead_words", 7) or 7)
 
     @property
+    def badge_allowed(self) -> bool:
+        """平台是否允许纯数字角标（A2：抖系允许角标、禁止营销文字）。"""
+        return bool((self.copy_policy or {}).get("badge_allowed", True))
+
+    @property
+    def brand_only(self) -> bool:
+        """平台是否只允许品牌标识（A2：抖系 True）。"""
+        return bool((self.copy_policy or {}).get("brand_only", False))
+
+    @property
     def max_text_area_pct(self) -> int:
         return int((self.copy_policy or {}).get("max_area_pct", 20) or 20)
 

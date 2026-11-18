@@ -99,6 +99,7 @@ class ImageTaskState(BaseModel):
 
     refs: list[RefImage] = Field(default_factory=list)
     attrs: dict[str, Any] = Field(default_factory=dict)
+    reuse_asset_ids: dict[str, str] = Field(default_factory=dict)  # C2：slot→历史成品
     intent: dict[str, Any] = Field(default_factory=dict)
     slots: list[SlotPlan] = Field(default_factory=list)
     prompt_pack: list[PromptDraft] = Field(default_factory=list)

@@ -19,7 +19,9 @@ def create_task(session, *, task_id: str, username: str, department: str | None,
                 ref_source: str = "mcp", attrs: dict | None = None,
                 color_key: str = "", variant_id: str = "",
                 image_count: int | None = None, slot_count: int | None = None,
-                copy: dict | None = None) -> ImageTask:
+                copy: dict | None = None, base_task_id: str | None = None,
+                reuse_asset_ids: dict | None = None,
+                reused_images: int = 0) -> ImageTask:
     task = ImageTask(
         task_id=task_id, request_id=request_id, batch_id=(batch_id or None),
         username=username, department=department, product_id=product_id,
@@ -29,6 +31,9 @@ def create_task(session, *, task_id: str, username: str, department: str | None,
         color_key=color_key or "", variant_id=variant_id or "",
         compositions=list(compositions or []), scene_styles=list(scene_styles or []),
         attrs_json=dict(attrs or {}), copy_json=dict(copy or {}),
+        base_task_id=base_task_id or None,
+        reuse_asset_ids=dict(reuse_asset_ids or {}),
+        reused_images=int(reused_images or 0),
         slot_count=int(slot_count if slot_count is not None else len(slots or [])),
         image_count=int(image_count if image_count is not None else n),
         slots_json=list(slots or []), prompt_pack_json=list(prompt_pack or []),
@@ -74,6 +79,24 @@ def mark_done(session, task_id: str, *, attempted: int, delivered: int, cost: fl
     if attempts is not None:
         fields["attempts"] = int(attempts)
     update_task(session, task_id, **fields)
+
+
+LISTING_STATUSES = ("not_listed", "pending", "listed", "failed")
+
+
+def update_listing(session, task_id: str, *, status: str, url: str = "") -> ImageTask | None:
+    """记录上架状态（B2）：`listed` 时写 `listed_at`，回到 `not_listed` 时清空。"""
+    if status not in LISTING_STATUSES:
+        from app.core.errors import raise_image
+
+        raise_image("IMG_INPUT_INVALID",
+                    f"不支持的上架状态：{status}（可选 {'、'.join(LISTING_STATUSES)}）")
+    fields: dict = {"listing_status": status, "listing_url": (url or "").strip()[:500]}
+    if status == "listed":
+        fields["listed_at"] = dt.datetime.now()
+    elif status == "not_listed":
+        fields["listed_at"] = None
+    return update_task(session, task_id, **fields)
 
 
 def mark_backfill(session, task_id: str, status: str) -> None:

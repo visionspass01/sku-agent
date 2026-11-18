@@ -74,16 +74,19 @@ def build_copy(attrs: ClothingAttrs, role: str, *, platform_rules=None,
     role_limit = table.get(role) or {}
     max_headline = int(role_limit.get("max_headline_words", 4) or 4)
     max_subhead = int(role_limit.get("max_subhead_words", 7) or 7)
+    badge_allowed = True
+    brand_only = False
     if platform_rules is not None:
         max_headline = min(max_headline, int(getattr(platform_rules, "max_headline_words", 4)))
         max_subhead = min(max_subhead, int(getattr(platform_rules, "max_subhead_words", 7)))
-        if not getattr(platform_rules, "headline_allowed", True):
-            return SlotCopy(allowed=False, limit=0, source="platform",
-                            notes="平台规则禁止主图营销文字（如抖系），本图不生成文字")
+        badge_allowed = bool(getattr(platform_rules, "badge_allowed", True))
+        brand_only = bool(getattr(platform_rules, "brand_only", False))
+
 
     features = [_clean(item) for item in (attrs.key_features or []) if _clean(item)]
+    headline_allowed = bool(getattr(platform_rules, "headline_allowed", True)) and not brand_only
     headline_source = direction or (features[0] if features else "")
-    headline = _clip_words(headline_source, max_headline)
+    headline = _clip_words(headline_source, max_headline) if headline_allowed else ""
     sub_parts = [part for part in (
         _clean("/".join(attrs.color_names)),
         _clean(attrs.materials),
@@ -97,6 +100,16 @@ def build_copy(attrs: ClothingAttrs, role: str, *, platform_rules=None,
         if match:
             badge = match.group(0)
             break
+    if not headline_allowed:
+        # A2：抖系这类平台「仅品牌 + 数字角标」——只保留数字角标，其余文案一律不生成
+        if badge_allowed and badge:
+            return SlotCopy(allowed=True, headline="", subhead="", badge=badge,
+                            char_count=len(badge), limit=max(4, len(badge)), source="platform",
+                            notes="平台仅允许品牌标识与纯数字角标（禁营销文字）")
+        return SlotCopy(allowed=False, limit=0, source="platform",
+                        notes="平台规则禁止主图营销文字（如抖系），本图不生成文字")
+    if not subhead:
+        subhead = ""
     if not headline and not subhead:
         return SlotCopy(allowed=False, limit=0, source="auto",
                         notes="商品数据不足，无法生成可读文案 → 降级为无字")

@@ -308,6 +308,7 @@ async def create_tasks(request: Request) -> JSONResponse:
                 reserved_images = planned_images
                 reserved_user = user.username
 
+            reuse_plan = await _reuse_plan(session, user, body, targets, catalog)
             resolution = await refs_source.resolve_refs(
                 catalog, targets, session=session,
                 username=user.username, department=user.department,
@@ -335,6 +336,7 @@ async def create_tasks(request: Request) -> JSONResponse:
                 validate_node.validate(state, settings=settings)
                 planned_for_target = sum(1 for item in state.slots
                                          if plan_slots.is_generatable(item))
+                reuse_map = (reuse_plan or {}).get("reuse_map") or {}
                 task = task_store.create_task(
                     session, task_id=new_task_id(), username=user.username,
                     department=user.department, batch_id=batch_id,
@@ -347,8 +349,12 @@ async def create_tasks(request: Request) -> JSONResponse:
                     slots=[item.model_dump() for item in state.slots],
                     prompt_pack=[], request_id=idempotency_key,
                     trace_id=trace, attrs=state.attrs,
-                    image_count=min(planned_for_target, params["image_count"]),
+                    image_count=(1 if reuse_map else min(planned_for_target,
+                                                         params["image_count"])),
                     slot_count=len(state.slots),
+                    base_task_id=(reuse_plan or {}).get("base_task_id"),
+                    reuse_asset_ids=reuse_map,
+                    reused_images=len(reuse_map),
                 )
                 asset_store.bind_refs_to_task(session, task.ref_asset_ids, task.task_id)
                 created.append({"task_id": task.task_id, "product_id": target.product_id,
@@ -358,7 +364,9 @@ async def create_tasks(request: Request) -> JSONResponse:
                                 "status": task.status,
                                 "refs": len(task.ref_asset_ids),
                                 "image_count": task.image_count,
-                                "slot_count": task.slot_count})
+                                "slot_count": task.slot_count,
+                                "base_task_id": task.base_task_id,
+                                "reused_images": task.reused_images})
                 first_slots = first_slots or [item.model_dump() for item in state.slots]
             payload = {
                 "batch_id": batch_id, "tasks": created, "slots": first_slots,
@@ -515,6 +523,38 @@ def _ensure_department(product, user) -> None:
                          f"无权操作 {department} 部门的商品（当前账号：{user.department}）")
 
 
+async def _reuse_plan(session, user, body: dict, targets, catalog) -> dict | None:
+    """C2：`mode=iterate` + `base_task_id` → 只重做主图，其余 generate 图位复用历史成品。"""
+    mode = str(body.get("mode") or "standard").strip().lower()
+    base_task_id = str(body.get("base_task_id") or "").strip()
+    if mode != "iterate" or not base_task_id:
+        return None
+    base = task_store.get_task(session, base_task_id)
+    if base is None:
+        raise ImageError("IMG_TASK_NOT_FOUND", f"基础任务不存在：{base_task_id}")
+    if not user.is_admin and base.username != user.username:
+        raise ImageError("IMG_FORBIDDEN", "无权复用他人的任务")
+    if base.status not in {"done"}:
+        raise ImageError("IMG_TASK_CONFLICT",
+                         f"基础任务未完成（{base.status}），不能复用它的成品")
+    # 复用目标必须与基础任务一致（同一商品/颜色），否则会串商品
+    expected = {target.color_key for target in targets}
+    if (base.color_key or "") not in expected:
+        raise ImageError("IMG_INPUT_INVALID",
+                         f"基础任务的颜色（{base.color_key or '无'}）不在本次出图目标里")
+    reuse_map: dict[str, str] = {}
+    outputs = asset_store.list_outputs(session, base_task_id)
+    for asset in outputs:
+        if int(asset.slot) == 1:
+            continue                      # 主图要重做
+        reuse_map[str(asset.slot)] = asset.asset_id
+    if not reuse_map:
+        raise ImageError("IMG_INPUT_INVALID",
+                         "基础任务没有可复用的其它图位成品（只有主图）；请改用 standard 模式")
+    return {"base_task_id": base_task_id, "reuse_map": reuse_map,
+            "reused_images": len(reuse_map)}
+
+
 def _attrs_for_target(base_attrs: dict, target) -> dict:
     """按颜色覆盖身份锁定字段：颜色必须锁到具体 hex，避免多色商品串色。"""
     attrs = dict(base_attrs or {})
@@ -634,6 +674,33 @@ def unblock_asset(task_id: str, asset_id: str, request: Request) -> JSONResponse
                                                   "trace_id": trace})
 
 
+@router.post("/tasks/{task_id}/listing")
+async def update_listing(task_id: str, request: Request) -> JSONResponse:
+    """标记上架（B2，轻量）：`{status: not_listed|pending|listed|failed, listing_url?}`。
+
+    注意：上架动作发生在商家后台，这里只记录"运营填报的状态与链接"，不作为上架凭证。
+    """
+    trace = trace_id_of(request)
+    try:
+        user = require_user(request)
+        body = await request.json()
+        body = body if isinstance(body, dict) else {}
+        status = str(body.get("status") or "").strip().lower()
+        url = str(body.get("listing_url") or "").strip()
+        with session_scope() as session:
+            task = task_store.get_task(session, task_id)
+            if task is None:
+                raise ImageError("IMG_TASK_NOT_FOUND", f"任务不存在：{task_id}")
+            _ensure_owner(task.username, user, "任务")
+            if status == "listed" and not url:
+                raise ImageError("IMG_INPUT_INVALID", "标记已上架时必须填 listing_url（商品链接）")
+            task_store.update_listing(session, task_id, status=status, url=url)
+            payload = {"task_id": task_id, "status": status, "listing_url": url}
+    except ImageError as exc:
+        return error_response(exc, trace)
+    return JSONResponse(status_code=200, content={**payload, "trace_id": trace})
+
+
 @router.get("/tasks/{task_id}")
 def get_task(task_id: str, request: Request) -> JSONResponse:
     trace = trace_id_of(request)
@@ -652,6 +719,8 @@ def get_task(task_id: str, request: Request) -> JSONResponse:
                 "platform": task.platform, "variant_id": task.variant_id,
                 "color_key": getattr(task, "color_key", "") or "",
                 "slot_count": task.slot_count, "image_count": task.image_count,
+                "base_task_id": task.base_task_id,
+                "reused_images": task.reused_images,
                 "status": task.status, "username": task.username, "prompt": task.prompt,
                 "prompt_final": task.prompt_final, "aspect": task.aspect, "n": task.n,
                 "attempts": task.attempts,
@@ -660,6 +729,9 @@ def get_task(task_id: str, request: Request) -> JSONResponse:
                 "cost_cny": task.cost_cny, "error_code": task.error_code,
                 "error_detail": task.error_detail, "trace_id": task.trace_id,
                 "backfill_status": task.backfill_status,
+                "listing_status": task.listing_status,
+                "listing_url": task.listing_url,
+                "listed_at": task.listed_at.isoformat() if task.listed_at else "",
                 "slots": list(task.slots_json or []),
                 "refs": [asset_payload(asset) for asset in refs],
                 "assets": [asset_payload(asset) for asset in outputs],

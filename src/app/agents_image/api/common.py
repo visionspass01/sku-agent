@@ -55,6 +55,7 @@ def asset_payload(asset) -> dict:
             "url": f"/api/image/assets/{asset.asset_id}",
             "signed_url": signed_asset_url(asset.asset_id),
             "adopt_status": getattr(asset, "adopt_status", "pending"),
+            "reused": getattr(asset, "source", "") == "reuse",
             "blocked_reason": getattr(asset, "blocked_reason", ""),
             "purged": bool(getattr(asset, "purged_at", None))}
 

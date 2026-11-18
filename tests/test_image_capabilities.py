@@ -57,8 +57,10 @@ def test_copy_respects_platform_policy():
     assert taoxi.char_count <= taoxi.limit
 
     douxi = copywriter.build_copy(attrs, "上装卖点", platform_rules=_RULES["抖系"])
-    assert douxi.allowed is False
-    assert "禁止" in douxi.notes or "不生成文字" in douxi.notes
+    # A2：抖系只允许品牌 + 纯数字角标，不允许主标语/副文案
+    assert douxi.headline == "" and douxi.subhead == ""
+    assert douxi.badge == "30" or douxi.badge == ""      # 来自「羊毛混纺 30%」的数字
+    assert douxi.allowed is bool(douxi.badge)
 
 
 def test_copy_is_numeric_and_avoids_banned_words():
@@ -117,7 +119,9 @@ def test_douxi_prompts_have_no_copy_text(env):
     assert detail["status"] == "done", detail
     for draft in detail["prompt_pack"]:
         if draft.get("type") == "generate":
-            assert draft["copy_spec"]["allowed"] is False
+            spec = draft["copy_spec"]
+            # A2：抖系可以留数字角标，但绝不能有主标语/副文案
+            assert spec["headline"] == "" and spec["subhead"] == ""
 
 
 # ---------------------------------------------------------------- variant
