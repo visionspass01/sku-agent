@@ -247,17 +247,19 @@ def test_graph_fails_after_max_rounds_and_archives_memory(tmp_path, monkeypatch,
     from app.agents_image.dispatch.local_generator import LocalGenerator
 
     generator = LocalGenerator()
-    asyncio.run(generator.submit(task_id))
-    deadline = __import__("time").time() + 20
-    status = None
-    while __import__("time").time() < deadline:
-        with session_scope() as session:
-            task = task_store.get_task(session, task_id)
-            status = task.status
-            if status in {"failed", "done"}:
-                break
-        __import__("time").sleep(0.05)
-    assert status == "failed"
+
+    async def run_until_settled():
+        # 同一个事件循环里等它落库：asyncio.run(submit(...)) 返回会关闭循环、取消后台任务
+        await generator.submit(task_id)
+        for _ in range(400):
+            with session_scope() as session:
+                task = task_store.get_task(session, task_id)
+                if task is not None and task.status in {"failed", "done"}:
+                    return task.status
+            await asyncio.sleep(0.05)
+        return None
+
+    assert asyncio.run(run_until_settled()) == "failed"
     with session_scope() as session:
         task = task_store.get_task(session, task_id)
         assert task.error_code == "IMG_CRITIC_FAILED"

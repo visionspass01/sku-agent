@@ -42,6 +42,10 @@ class ImageSettings(BaseSettings):
     concurrency: int = Field(default=8, ge=1, le=32)          # 本机任务并发
     provider_concurrency: int = Field(default=10, ge=1, le=64)  # 调第三方生图 API 的并发上限
     timeout_seconds: int = Field(default=60, ge=5, le=600)
+    # 第三方生图 API 的重试（W4）：只对限流/超时/5xx 重试；每次重试都计一次「发起量」
+    provider_retries: int = Field(default=2, ge=0, le=5)
+    provider_retry_backoff_seconds: float = Field(default=0.2, ge=0.0, le=10.0)
+    max_task_retries: int = Field(default=3, ge=0, le=10)  # 失败任务可被人工重试的次数上限
     # 商品上下文批量取数（W2）：同一 3 秒窗口内的请求合并成一次 MCP 调用
     context_batch_window_seconds: float = Field(default=3.0, ge=0.0, le=30.0)
     context_batch_max_ids: int = Field(default=50, ge=1, le=200)

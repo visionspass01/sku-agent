@@ -55,6 +55,47 @@ def reset_provider_semaphore() -> None:
     _semaphore_loop = None
 
 
+_RETRYABLE_CODES = {"IMG_PROVIDER_RATE_LIMITED", "IMG_PROVIDER_UNAVAILABLE",
+                    "IMG_TIMEOUT", "IMG_UPSTREAM_MCP_UNAVAILABLE"}
+
+
+def _retryable(exc: BaseException) -> bool:
+    """只有限流/超时/上游不可用值得重试；内容违规、参数错重试只会更糟。"""
+    if isinstance(exc, ImageError):
+        return bool(getattr(exc, "retryable", False)) or exc.code in _RETRYABLE_CODES
+    return False
+
+
+async def _generate_with_retry(provider, request) -> tuple[Any, int]:
+    """调一次 provider；限流/超时/5xx 按 `IMAGE_PROVIDER_RETRIES` 退避重试。
+
+    返回 `(result, provider_calls)`：`provider_calls` 是**真实发起次数**（含重试），
+    对应「发起量」口径；使用量（成功张数）仍只看最终结果。
+    """
+    from app.agents_image.config import get_image_settings
+
+    settings = get_image_settings()
+    attempts = max(1, int(getattr(settings, "provider_retries", 2) or 0) + 1)
+    backoff = max(0.0, float(getattr(settings, "provider_retry_backoff_seconds", 0.2) or 0.0))
+    last_exc: BaseException | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return await provider.generate(request), attempt
+        except ImageError as exc:
+            last_exc = exc
+            if attempt >= attempts or not _retryable(exc):
+                raise
+            logger.warning("生图调用失败（第 %d/%d 次，可重试）：%s", attempt, attempts,
+                           exc.code)
+        except Exception as exc:  # noqa: BLE001 —— 未分类异常一律不重试（避免放大故障）
+            raise ImageError("IMG_PROVIDER_UNAVAILABLE",
+                             f"生图调用异常：{type(exc).__name__}: {exc}") from exc
+        if backoff > 0:
+            await asyncio.sleep(backoff * attempt)
+    raise last_exc if last_exc is not None else ImageError("IMG_PROVIDER_UNAVAILABLE",
+                                                          "生图调用失败")
+
+
 async def run(payload: dict[str, Any]) -> dict[str, Any]:
     """payload 见 `local_generator._payload_for_task()`；返回 {slots: [...], provider, model}。"""
     provider = get_provider(payload.get("provider") or None)
@@ -80,9 +121,10 @@ async def run(payload: dict[str, Any]) -> dict[str, Any]:
             preserve=list(payload.get("preserve") or []),
         )
         async with _provider_semaphore():
-            result = await provider.generate(request)
+            result, provider_calls = await _generate_with_retry(provider, request)
         results.append({
             "slot": int(slot.get("slot") or 1),
+            "provider_calls": int(provider_calls),
             "images": result.images,
             "mime": result.mime,
             "provider": result.provider,
@@ -92,4 +134,5 @@ async def run(payload: dict[str, Any]) -> dict[str, Any]:
             "meta": result.meta,
         })
     return {"slots": results, "provider": provider.name,
+            "provider_calls": sum(int(item.get("provider_calls") or 0) for item in results),
             "model": results[0]["model"] if results else ""}

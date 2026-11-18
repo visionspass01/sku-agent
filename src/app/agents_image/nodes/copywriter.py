@@ -85,7 +85,9 @@ def build_copy(attrs: ClothingAttrs, role: str, *, platform_rules=None,
 
     features = [_clean(item) for item in (attrs.key_features or []) if _clean(item)]
     headline_allowed = bool(getattr(platform_rules, "headline_allowed", True)) and not brand_only
-    headline_source = direction or (features[0] if features else "")
+    # W4：变体方向（"版型优先/面料优先"）是**出图侧重**，只进 Prompt 的场景块，
+    # 绝不能变成图内主标语——否则 A/B 两套的差异只剩一行字，且把内部提示语印在图上。
+    headline_source = features[0] if features else ""
     headline = _clip_words(headline_source, max_headline) if headline_allowed else ""
     sub_parts = [part for part in (
         _clean("/".join(attrs.color_names)),
@@ -122,10 +124,12 @@ def build_copy(attrs: ClothingAttrs, role: str, *, platform_rules=None,
         headline = _clip_words(headline, max_headline)
         subhead = _clip_words(subhead, max_subhead)
         char_count = len(headline) + len(subhead) + len(badge)
+    notes = f"{role}：主标语 ≤{max_headline} 词 / 副文案 ≤{max_subhead} 词 / 角标仅数字"
+    if direction:
+        notes += f"；出图侧重「{direction}」只体现在画面，不写入图内文字"
     return SlotCopy(allowed=True, headline=headline, subhead=subhead, badge=badge,
                     char_count=char_count, limit=limit, source="auto",
-                    notes=f"{role}：主标语 ≤{max_headline} 词 / 副文案 ≤{max_subhead} 词 / 角标仅数字",
-                    warnings=warnings)
+                    notes=notes, warnings=warnings)
 
 
 def describe(copy: SlotCopy) -> str:

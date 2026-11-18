@@ -70,6 +70,8 @@ class ImageTask(Base):
     # 租约与重投次数（W1）：执行期续约，看门狗只拾取租约过期的 running
     lease_until: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
     recoveries: Mapped[int] = mapped_column(Integer, default=0)
+    retries: Mapped[int] = mapped_column(Integer, default=0)   # 人工重试次数（W4）
+    provider_calls: Mapped[int] = mapped_column(Integer, default=0)  # 发起量（含重试）
 
     trace_id: Mapped[str] = mapped_column(String(32), default="")
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=dt.datetime.now)
@@ -211,7 +213,9 @@ class ImageUsage(Base):
     period_key: Mapped[str] = mapped_column(String(20), default="")   # 2026-11-18T15（Asia/Shanghai）
     granularity: Mapped[str] = mapped_column(String(8), default="hour")
     images: Mapped[int] = mapped_column(Integer, default=0)            # 成功出图张数（计费口径）
-    images_attempted: Mapped[int] = mapped_column(Integer, default=0)  # 尝试张数
+    images_attempted: Mapped[int] = mapped_column(Integer, default=0)
+    # 发起量（W4）：第三方 API 真实发起次数（含限流重试），用于算 API 可用性
+    provider_calls: Mapped[int] = mapped_column(Integer, default=0)  # 尝试张数
     adopted: Mapped[int] = mapped_column(Integer, default=0)           # 采纳张数（正样本）
     rejected: Mapped[int] = mapped_column(Integer, default=0)          # 驳回张数（负样本）
     tasks: Mapped[int] = mapped_column(Integer, default=0)

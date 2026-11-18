@@ -309,15 +309,60 @@ async def create_tasks(request: Request) -> JSONResponse:
         with session_scope() as session:
             reuse_plan = await _reuse_plan(session, user, body, targets, catalog)
 
+        def _reuse_targets(target, platform: str, variant: dict) -> bool:
+            """该目标是否与基础任务同 (颜色, 平台, 变体)：决定是否记录 base_task_id 血统。"""
+            if not reuse_plan:
+                return False
+            key = (target.color_key, platform, str(variant.get("id", "") or ""))
+            return key == reuse_plan["key"]
+
         def _reuse_of(target, platform: str, variant: dict) -> dict[str, str]:
             if not reuse_plan:
                 return {}
             key = (target.color_key, platform, str(variant.get("id", "") or ""))
             return dict(reuse_plan["reuse_map"]) if key == reuse_plan["key"] else {}
+        # 预演（W4）：每个任务实际要出的张数 = 目标图位数 - 可复用的图位数（iterate 差额补齐），
+        # 配额/成本/结算都用同一个数，避免"预留 1 张、实际出 6 张"的账实不符。
+        def _plan_of(target, platform: str, variant: dict) -> ImageTaskState:
+            params = params_by_platform[platform]
+            state = ImageTaskState(
+                prompt=prompt, aspect=params["aspect"], count=params["image_count"],
+                compositions=params["compositions"], scene_styles=params["scene_styles"],
+                platform=platform, variant_id=variant.get("id", ""),
+                variant_direction=variant.get("hint", "") or variant.get("label", ""),
+                refs=[],
+            )
+            state.slots = [SlotPlan(**item) for item in plan_slots.build_slots(
+                state, policy=params["policy"], labels=params["labels"],
+                slot_count=params["slot_count"])]
+            state.attrs = _attrs_for_target(products[target.product_id].attrs, target)
+            # 参考图相关的校验要等解析完参考图再做（事务内），这里只预演图位与身份锁定
+            return state
 
-        plan_by_task = [1 if _reuse_of(target, platform, variant)
-                        else int(params_by_platform[platform]["image_count"])
-                        for target, platform, variant in matrix]
+        planned_states = [
+            (target, platform, variant, _plan_of(target, platform, variant))
+            for target, platform, variant in matrix
+        ]
+
+        def _gap_of(item) -> int:
+            target, platform, variant, state = item
+            params = params_by_platform[platform]
+            reuse_map = _reuse_of(target, platform, variant)
+            generatable = [slot for slot in state.slots if plan_slots.is_generatable(slot)]
+            if not reuse_map:
+                return min(len(generatable), int(params["image_count"]))
+            reused_here = [slot for slot in generatable
+                           if int(slot.slot) in {int(key) for key in reuse_map}]
+            gap = min(int(params["image_count"]),
+                      max(0, len(generatable) - len(reused_here)))
+            if gap <= 0:
+                raise ImageError(
+                    "IMG_INPUT_INVALID",
+                    f"{target.color_key}（{platform}）的图位全部可复用，没有需要重做的图位；"
+                    "请改用 standard 模式或增加图位数")
+            return gap
+
+        plan_by_task = [_gap_of(item) for item in planned_states]
         planned_images = sum(plan_by_task)
         with session_scope() as session:
             from app.agents_image.store import quota as quota_store
@@ -390,24 +435,11 @@ async def create_tasks(request: Request) -> JSONResponse:
             batch_id = new_batch_id()
             created: list[dict] = []
             first_slots: list[dict] = []
-            for index, (target, platform, variant) in enumerate(matrix):
+            for index, (target, platform, variant, state) in enumerate(planned_states):
                 params = params_by_platform[platform]
-                state = ImageTaskState(
-                    prompt=prompt, aspect=params["aspect"], count=params["image_count"],
-                    compositions=params["compositions"], scene_styles=params["scene_styles"],
-                    platform=platform, variant_id=variant.get("id", ""),
-                    variant_direction=variant.get("hint", "") or variant.get("label", ""),
-                    refs=resolution.refs_of(target.color_key),
-                )
-                state.slots = [SlotPlan(**item) for item in plan_slots.build_slots(
-                    state, policy=params["policy"], labels=params["labels"],
-                    slot_count=params["slot_count"])]
-                # 部门校验已在下载参考图之前做过（W2），这里不再重复
-                state.attrs = _attrs_for_target(
-                    resolution.products[target.product_id].attrs, target)
+                # 参考图在事务内落库后再绑定到 state（复用预演出来的图位与身份锁定）
+                state.refs = resolution.refs_of(target.color_key)
                 validate_node.validate(state, settings=settings)
-                planned_for_target = sum(1 for item in state.slots
-                                         if plan_slots.is_generatable(item))
                 reuse_map = _reuse_of(target, platform, variant)
                 task = task_store.create_task(
                     session, task_id=new_task_id(), username=user.username,
@@ -422,10 +454,12 @@ async def create_tasks(request: Request) -> JSONResponse:
                     prompt_pack=[], request_id=idempotency_key,
                     ref_source=ref_source,
                     trace_id=trace, attrs=state.attrs,
-                    image_count=(1 if reuse_map else min(planned_for_target,
-                                                         params["image_count"])),
+                    image_count=plan_by_task[index],
                     slot_count=len(state.slots),
-                    base_task_id=(reuse_plan or {}).get("base_task_id") if reuse_map else None,
+                    # 血统只记"同一 (颜色, 平台, 变体) 的 iterate 目标"（即便没有可复用图位）
+                    base_task_id=(reuse_plan or {}).get("base_task_id")
+                    if (reuse_plan and _reuse_targets(target, platform, variant))
+                    else None,
                     reuse_asset_ids=reuse_map,
                     reused_images=len(reuse_map),
                 )
@@ -617,7 +651,11 @@ def _ensure_department(product, user) -> None:
 
 
 async def _reuse_plan(session, user, body: dict, targets, catalog) -> dict | None:
-    """C2：`mode=iterate` + `base_task_id` → 只重做主图，其余 generate 图位复用历史成品。"""
+    """C2/W4：`mode=iterate` + `base_task_id` → 主图重做，其余 generate 图位能复用就复用。
+
+    基础任务缺图位（比如只出了主图）时**不再报错**：可复用集合为空，剩下的图位按
+    `image_count` 差额补齐（W4），并只按实际要出的张数占额度。
+    """
     mode = str(body.get("mode") or "standard").strip().lower()
     base_task_id = str(body.get("base_task_id") or "").strip()
     if mode != "iterate" or not base_task_id:
@@ -641,9 +679,6 @@ async def _reuse_plan(session, user, body: dict, targets, catalog) -> dict | Non
         if int(asset.slot) == 1:
             continue                      # 主图要重做
         reuse_map[str(asset.slot)] = asset.asset_id
-    if not reuse_map:
-        raise ImageError("IMG_INPUT_INVALID",
-                         "基础任务没有可复用的其它图位成品（只有主图）；请改用 standard 模式")
     # 复用只对"同一 (颜色, 平台, 变体)"的目标生效：否则多色/双平台 iterate 会串色串平台
     key = (base.color_key or "", base.platform or "",
            str(getattr(base, "variant_id", "") or ""))
@@ -810,6 +845,63 @@ async def update_listing(task_id: str, request: Request) -> JSONResponse:
     return JSONResponse(status_code=200, content={**payload, "trace_id": trace})
 
 
+@router.post("/tasks/{task_id}/retry")
+async def retry_task(task_id: str, request: Request) -> JSONResponse:
+    """人工重试失败/已取消的任务（功能6）：重新排队再跑一次。
+
+    - 只允许 `failed` / `canceled`；每个任务最多 `IMAGE_MAX_TASK_RETRIES` 次（默认 3）；
+    - 重新**预留**额度（失败时已释放），交付成功再结算——和新建任务同一套账；
+    - 参考图沿用任务上已绑定的资产；若已过保留期被清理，执行期会按 `IMG_REFERENCE_REQUIRED` 失败。
+    """
+    trace = trace_id_of(request)
+    try:
+        user = require_user(request)
+        settings = get_image_settings()
+        with session_scope() as session:
+            task = task_store.get_task(session, task_id)
+            if task is None:
+                raise ImageError("IMG_TASK_NOT_FOUND", f"任务不存在：{task_id}")
+            _ensure_owner(task.username, user, "任务")
+            if task.status not in {"failed", "canceled"}:
+                raise ImageError("IMG_TASK_CONFLICT",
+                                 f"只有 failed / canceled 的任务可以重试（当前 {task.status}）")
+            retries = int(getattr(task, "retries", 0) or 0)
+            if retries >= int(settings.max_task_retries):
+                raise ImageError("IMG_TASK_CONFLICT",
+                                 f"该任务已重试 {retries} 次，达到上限 "
+                                 f"{settings.max_task_retries}；请调整需求后新建任务")
+            planned = int(task.image_count or 0)
+            username = task.username
+            department = task.department
+        with session_scope() as session:
+            from app.agents_image.store import quota as quota_store
+
+            if not user.is_admin and planned:
+                if not quota_store.reserve(session, username, planned):
+                    quota = quota_store.check(session, username, planned)
+                    raise ImageError(
+                        "IMG_QUOTA_EXCEEDED",
+                        f"配额不足：本期剩余 {quota['remaining']} 张，重试需要 {planned} 张",
+                        retryable=False)
+            task_store.update_task(
+                session, task_id, status="queued", retries=retries + 1,
+                error_code="", error_detail="", finished_at=None,
+                attempts=0, attempted_images=0, delivered_images=0,
+                provider_started_at=None, cancel_requested=False, lease_until=None,
+                department=department)
+        try:
+            await get_dispatcher().submit(task_id)
+        except Exception:  # noqa: BLE001 —— 已入库，看门狗会补投
+            logger.warning("重试任务派发失败（保留 queued，由看门狗补投）：%s", task_id)
+        payload = {"task_id": task_id, "status": "queued", "retries": retries + 1}
+    except ImageError as exc:
+        return error_response(exc, trace)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("任务重试失败")
+        return error_response(exc, trace)
+    return JSONResponse(status_code=200, content={**payload, "trace_id": trace})
+
+
 @router.get("/tasks/{task_id}")
 def get_task(task_id: str, request: Request) -> JSONResponse:
     trace = trace_id_of(request)
@@ -830,6 +922,8 @@ def get_task(task_id: str, request: Request) -> JSONResponse:
                 "slot_count": task.slot_count, "image_count": task.image_count,
                 "base_task_id": task.base_task_id,
                 "reused_images": task.reused_images,
+                "retries": int(getattr(task, "retries", 0) or 0),
+                "provider_calls": int(getattr(task, "provider_calls", 0) or 0),
                 "status": task.status, "username": task.username, "prompt": task.prompt,
                 "prompt_final": task.prompt_final, "aspect": task.aspect, "n": task.n,
                 "attempts": task.attempts,

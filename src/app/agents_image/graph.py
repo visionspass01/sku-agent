@@ -140,6 +140,7 @@ async def execute_task(task_id: str) -> ImageTaskState:
                            source=task.ref_source or "mcp") for item in refs],
             attrs=dict(task.attrs_json or {}),
             reuse_asset_ids=dict(getattr(task, "reuse_asset_ids", {}) or {}),
+            ref_source=task.ref_source or "mcp",
             # 图位模板与 label 在建任务时已按中台 plan_policy 解析并落库：执行期不再回调中台
             slots=[SlotPlan(**item) for item in (task.slots_json or [])]
             or plan_slots.build_slots(ImageTaskState(count=task.n, aspect=task.aspect)),
@@ -181,6 +182,7 @@ async def execute_task(task_id: str) -> ImageTaskState:
     image_costs: list[float] = []
     critic = CriticResult()
     attempted = 0
+    provider_calls = 0
     for attempt in range(1, max_attempts + 1):
         state.attempt = attempt
         _renew_lease(task_id, settings)
@@ -201,6 +203,7 @@ async def execute_task(task_id: str) -> ImageTaskState:
         image_costs = [float(slot.get("cost_cny") or 0.0)
                        for slot in (result.get("slots") or [])]
         images = _collect_images(result)
+        provider_calls += int(result.get("provider_calls") or len(images))
         attempted += len(images)
         _renew_lease(task_id, settings)
         state.touch("critic", attempt=attempt, images=len(images))
@@ -241,7 +244,8 @@ async def execute_task(task_id: str) -> ImageTaskState:
                                    attempted_images=attempted,
                                    error_code="IMG_TASK_CONFLICT",
                                    error_detail="已提交生图模型，结果被丢弃（用户取消）")
-            _cancel_settle(session, state, attempted=attempted)
+            _cancel_settle(session, state, attempted=attempted,
+                           provider_calls=provider_calls)
             metrics.record_task_failed()
             state.touch("canceled", attempted=attempted)
             return state
@@ -315,13 +319,17 @@ async def execute_task(task_id: str) -> ImageTaskState:
         for item in image_costs:
             external_cost += float(item or 0.0)
         cost = external_cost
+        copy_json = _copy_contract(state)
         task_store.mark_done(session, task_id, attempted=attempted, delivered=delivered,
                              cost=cost, prompt_final=state.prompt_final,
                              prompt_pack=[draft.model_dump() for draft in state.prompt_pack],
                              attempts=state.attempt, external_cost=external_cost,
                              slots=[slot.model_dump() if hasattr(slot, "model_dump") else dict(slot)
                                     for slot in (state.slots or [])])
-        _settle(session, state, delivered=delivered, attempted=attempted, cost=cost)
+        task_store.update_task(session, task_id, copy_json=copy_json,
+                               provider_calls=provider_calls)
+        _settle(session, state, delivered=delivered, attempted=attempted, cost=cost,
+                provider_calls=provider_calls)
     metrics.record_task_done(delivered=delivered, attempted=attempted)
     state.attempted_images = attempted
     state.delivered_images = delivered
@@ -333,7 +341,10 @@ async def execute_task(task_id: str) -> ImageTaskState:
 
 def _archive_failure(state: ImageTaskState, critic: CriticResult, signature: str,
                      attempted: int) -> None:
-    """失败归档：任务 attempts 落库 + 失败签名写进 `image_memory`（下次同因优先复用修复）。`r`n`r`n    同时释放预留给本次任务的额度（Critic 超限 = 一张都没交付）。`r`n    """
+    """失败归档：任务 attempts 落库 + 失败签名写进 `image_memory`（下次同因优先复用修复）。
+
+    同时记一次失败使用量（Critic 超限 = 一张都没交付，额度由调度器释放）。
+    """
     patch = "；".join(critic.issues[:3]) or "未知原因"
     try:
         with session_scope() as session:
@@ -350,8 +361,21 @@ def _archive_failure(state: ImageTaskState, critic: CriticResult, signature: str
         logger.warning("失败归档写入出错：task=%s", state.task_id)
 
 
+def _copy_contract(state: ImageTaskState) -> dict:
+    """图内文案契约（W4）：任务详情与中台回写都用这一份，避免两边字段漂移。"""
+    slots = []
+    for draft in state.prompt_pack or []:
+        spec = dict(getattr(draft, "copy_spec", None) or {})
+        if not spec:
+            continue
+        slots.append({"slot": int(draft.slot or 0), "role": draft.role or "",
+                      **spec})
+    return {"platform": state.platform, "variant_id": state.variant_id,
+            "variant_direction": state.variant_direction, "slots": slots}
+
+
 def _settle(session, state: ImageTaskState, *, delivered: int, attempted: int,
-            cost: float) -> None:
+            cost: float, provider_calls: int = 0) -> None:
     """结算：把预留转成已用（只算成功出图张数），多预留的部分释放；再记使用量流水。"""
     from app.agents_image.store import quota as quota_store
     from app.agents_image.store import usage as usage_store
@@ -368,10 +392,12 @@ def _settle(session, state: ImageTaskState, *, delivered: int, attempted: int,
         quota_store.commit_reserve(session, state.username, min(delivered, planned))
         quota_store.release(session, state.username, max(0, planned - delivered))
     usage_store.record(session, username=state.username, department=state.department,
-                       delivered=delivered, attempted=attempted, tasks=1, cost=cost)
+                       delivered=delivered, attempted=attempted, tasks=1, cost=cost,
+                       provider_calls=provider_calls)
 
 
-def _cancel_settle(session, state: ImageTaskState, *, attempted: int) -> None:
+def _cancel_settle(session, state: ImageTaskState, *, attempted: int,
+                   provider_calls: int = 0) -> None:
     """取消/失败结算：预留全部释放，尝试张数照记（成本已在 provider 侧发生）。"""
     from app.agents_image.store import quota as quota_store
     from app.agents_image.store import usage as usage_store
@@ -386,7 +412,8 @@ def _cancel_settle(session, state: ImageTaskState, *, attempted: int) -> None:
     if not is_admin and planned:
         quota_store.release(session, state.username, planned)
     usage_store.record(session, username=state.username, department=state.department,
-                       failed=1, tasks=1, attempted=attempted)
+                       failed=1, tasks=1, attempted=attempted,
+                       provider_calls=provider_calls)
 
 
 def _planned_of(session, task_id: str) -> int:
@@ -422,6 +449,8 @@ async def _backfill(state: ImageTaskState, *, outputs_by_slot: list[dict]) -> st
         "prompt_final": state.prompt_final,
         "prompt_pack": [draft.model_dump() for draft in state.prompt_pack],
         "prompt_pack_yaml": pack_yaml(state, generate_drafts),
+        "copy_json": _copy_contract(state),
+        "ref_source": state.ref_source if hasattr(state, "ref_source") else "",
         "params": {"provider": get_image_settings().provider,
                    "attempts": state.attempt, "attempted": state.attempted_images,
                    "delivered": state.delivered_images,
@@ -441,6 +470,8 @@ async def _backfill(state: ImageTaskState, *, outputs_by_slot: list[dict]) -> st
             "storage_key": item.get("key", ""),
             "critic_score": state.critic.score,
             "cost_cny": round(state.cost_cny / max(1, len(outputs_by_slot)), 6) if outputs_by_slot else 0.0,
+            "reused": bool(item.get("reused")),
+            "copy_json": _slot_copy_of(state, item["slot"]),
             "status": "done",
         } for item in outputs_by_slot if item],
     }
@@ -479,6 +510,13 @@ def _role_of(state: ImageTaskState, slot: int) -> str:
         if int(getattr(item, "slot", 0) or 0) == slot:
             return getattr(item, "role", "") or ""
     return ""
+
+
+def _slot_copy_of(state: ImageTaskState, slot: int) -> dict:
+    for draft in state.prompt_pack or []:
+        if int(draft.slot or 0) == int(slot):
+            return dict(getattr(draft, "copy_spec", None) or {})
+    return {}
 
 
 def _prompt_of(state: ImageTaskState, slot: int) -> str:

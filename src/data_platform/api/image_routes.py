@@ -220,6 +220,11 @@ def save_results(payload: isc.ResultsIn, request: Request):
                 bytes=item.bytes, storage=item.storage, storage_key=item.storage_key,
                 critic_score=item.critic_score, critic_issues=list(item.critic_issues or []),
                 cost_cny=item.cost_cny, elapsed_ms=item.elapsed_ms, status=item.status,
+                copy_json=dict(item.copy_json or payload.copy_json or {}),
+                reused=1 if item.reused else 0,
+                variant_id=str(getattr(payload, "variant_id", "") or ""),
+                variant_direction=str(getattr(payload, "variant_direction", "") or ""),
+                ref_source=str(getattr(payload, "ref_source", "") or "mcp"),
                 trace_id=payload.trace_id, created_at=now,
             ))
             saved += 1
@@ -246,6 +251,8 @@ def list_results(product_id: str = Query(default=""),
             mime=row.mime, width=row.width, height=row.height, bytes=row.bytes,
             storage=row.storage, storage_key=row.storage_key, critic_score=row.critic_score,
             cost_cny=row.cost_cny, status=row.status,
+            reused=bool(row.reused), copy_json=dict(row.copy_json or {}),
+            variant_id=row.variant_id, ref_source=row.ref_source,
             created_at=row.created_at.isoformat() if row.created_at else "",
         ) for row in rows]
     return isc.ResultListOut(product_id=product_id, items=items, count=len(items))

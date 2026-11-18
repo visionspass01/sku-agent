@@ -130,6 +130,8 @@ class PlatformRulesOut(Envelope):
 class ImageResultIn(Envelope):
     slot: int
     role: str = ""
+    reused: bool = False
+    copy_json: dict = Field(default_factory=dict)
     prompt: str = ""
     negative_prompt: str = ""
     model: str = ""
@@ -161,6 +163,10 @@ class ResultsIn(Envelope):
     scene_styles: list[str] = Field(default_factory=list)
     prompt_final: str = ""
     prompt_pack: list[dict] = Field(default_factory=list)
+    copy_json: dict = Field(default_factory=dict)
+    ref_source: str = "mcp"
+    variant_id: str = ""
+    variant_direction: str = ""
     params: dict = Field(default_factory=dict)
     requester: str = ""
     trace_id: str = ""
@@ -191,6 +197,10 @@ class ResultRowOut(Envelope):
     critic_score: int = 0
     cost_cny: float = 0.0
     status: str = "done"
+    reused: bool = False
+    copy_json: dict = Field(default_factory=dict)
+    variant_id: str = ""
+    ref_source: str = "mcp"
     created_at: str = ""
 
 

@@ -33,6 +33,7 @@ def record(session, *, username: str, department: str | None = None,
     increments = {
         "images": max(0, int(delivered)),
         "images_attempted": max(0, int(attempted)),
+        "provider_calls": max(0, int(kwargs.pop("provider_calls", 0) or 0)),
         "tasks": max(0, int(tasks)),
         "failed": max(0, int(failed)),
         "tokens": max(0, int(tokens)),

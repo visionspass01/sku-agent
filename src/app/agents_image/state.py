@@ -92,6 +92,7 @@ class ImageTaskState(BaseModel):
     platform: str = "淘系"
     variant_id: str = ""          # A/B（同款多店铺差异化）
     variant_direction: str = ""   # 该变体的主图方向（如"版型优先"）
+    ref_source: str = "mcp"       # 参考图来源（mcp / library / pailitao，W3）
     aspect: str = "1:1"
     count: int = 1
     compositions: list[str] = Field(default_factory=list)

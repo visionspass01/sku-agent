@@ -580,6 +580,12 @@ class ImageResult(Base):
     storage_url_expire_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
     critic_score: Mapped[int] = mapped_column(Integer, default=0)
     critic_issues: Mapped[list] = mapped_column(JSON, default=list)
+    # W4：图内文案契约（逐图位）、是否复用历史成品、变体与参考图来源
+    copy_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    reused: Mapped[int] = mapped_column(Integer, default=0)
+    variant_id: Mapped[str] = mapped_column(String(8), default="")
+    variant_direction: Mapped[str] = mapped_column(String(64), default="")
+    ref_source: Mapped[str] = mapped_column(String(16), default="mcp")
     cost_cny: Mapped[float] = mapped_column(Float, default=0.0)
     elapsed_ms: Mapped[int] = mapped_column(Integer, default=0)
     status: Mapped[str] = mapped_column(String(16), default="done")

@@ -94,17 +94,20 @@ def test_provider_failure_marks_task_failed(image_db, monkeypatch):
     from app.db.engine import session_scope
 
     generator = LocalGenerator()
-    asyncio.run(generator.submit(task_id))
-    deadline = __import__("time").time() + 10
-    status = None
-    while __import__("time").time() < deadline:
-        with session_scope() as session:
-            task = task_store.get_task(session, task_id)
-            status = task.status
-            if status in {"failed", "done"}:
-                break
-        __import__("time").sleep(0.05)
-    assert status == "failed"
+
+    async def run_until_settled():
+        # 必须**在同一个事件循环里**等它落库：`asyncio.run(submit(...))` 返回后会立刻关闭
+        # 循环，后台任务被取消——只是以前这条路没有 await 点才"看起来"跑完了。
+        await generator.submit(task_id)
+        for _ in range(400):
+            with session_scope() as session:
+                task = task_store.get_task(session, task_id)
+                if task is not None and task.status in {"failed", "done"}:
+                    return task.status
+            await asyncio.sleep(0.05)
+        return None
+
+    assert asyncio.run(run_until_settled()) == "failed"
 
 
 def test_recovery_requeues_stale_task(image_db):
