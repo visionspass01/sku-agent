@@ -243,12 +243,12 @@ def test_cancel_after_provider_started_is_not_rollbackable(env):
 def test_canceled_task_discards_outputs(_db, env):
     """provider 已返回但 cancel_requested=True → 不交付，任务置 canceled。"""
     from app.agents_image import graph
+    from app.agents_image.ids import new_task_id
     from app.agents_image.nodes import plan_slots
+    from app.agents_image.png import placeholder_png
     from app.agents_image.sources.fake_catalog import _PRODUCTS
     from app.agents_image.state import ImageTaskState, RefImage, SlotPlan
     from app.agents_image.store import assets as asset_store
-    from app.agents_image.ids import new_task_id
-    from app.agents_image.png import placeholder_png
 
     ensure_image_schema()
     task_id = new_task_id()
