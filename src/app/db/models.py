@@ -578,3 +578,23 @@ class RevokedToken(Base):
     token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
     exp: Mapped[dt.datetime] = mapped_column(DateTime)
     revoked_at: Mapped[dt.datetime] = mapped_column(DateTime)
+
+
+class AppUser(Base):
+    """**共享人员账号表**：SKU 监管 Agent 与生图 Agent 共用同一套人账号（表名 `user`）。
+
+    背景：数据中台只有机器令牌（scope + 部门），没有人员账号；过去两套人账号分别在
+    `app/auth.py`（硬编码常量）与 `image_user` 表。统一到这张表后，改密码/停用一次即两边生效。
+    """
+
+    __tablename__ = "user"
+
+    username: Mapped[str] = mapped_column(String(32), primary_key=True)
+    display_name: Mapped[str] = mapped_column(String(64), default="")
+    role: Mapped[str] = mapped_column(String(16), default="user")      # user | admin
+    department: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    password_salt: Mapped[str] = mapped_column(String(32), default="")
+    password_hash: Mapped[str] = mapped_column(String(64), default="")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=dt.datetime.now)
+    last_login_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)

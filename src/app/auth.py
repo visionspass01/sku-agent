@@ -60,14 +60,24 @@ class AuthUser:
 
 
 def authenticate(username: str, password: str) -> AuthUser | None:
-    expected = _PASSWORD_HASHES.get(username)
-    if not expected:
+    """统一鉴权入口：查共享 `user` 表（与生图 Agent 同一套账号）。
+
+    兼容策略：`ACCOUNTS_SOURCE=legacy` 时退回旧的常量账号，供故障回滚；
+    老库里还没有 `user` 表时用常量账号校验并顺手入库（一次性平滑升级）。
+    """
+    from app.core import accounts
+
+    try:
+        from app.db.engine import session_scope
+
+        with session_scope() as session:
+            account = accounts.authenticate(session, username, password)
+    except Exception:  # noqa: BLE001 —— 数据库不可用时不能把登录一起拖死
+        account = accounts._legacy_authenticate(username, password)  # noqa: SLF001
+    if account is None:
         return None
-    actual = hashlib.sha256((_PASSWORD_SALT + password).encode("utf-8")).hexdigest()
-    if not hmac.compare_digest(expected, actual):
-        return None
-    spec = DEMO_ACCOUNTS[username]
-    return AuthUser(username=username, role=spec["role"], department=spec["department"])
+    return AuthUser(username=account.username, role=account.role,
+                    department=account.department)
 
 
 # ---------------------------------------------------------------- Token

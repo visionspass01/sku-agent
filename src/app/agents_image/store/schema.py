@@ -18,8 +18,10 @@ def _tables() -> list:
         from app.agents_image.store import models  # noqa: F401 —— 导入即注册到 Base.metadata
     except ImportError:  # pragma: no cover —— D1 阶段还没有 models 模块
         return []
+    # `user` 是**共享人员账号表**（SKU 与生图共用，见 app.core.accounts）：
+    # image-only 模式也要能独立建它，否则登录找不到账号。
     names = (
-        "image_user", "image_task", "image_asset", "image_memory",
+        "user", "image_task", "image_asset", "image_memory",
         "image_quota", "image_usage", "image_outbox", "image_token_blacklist",
     )
     tables = []

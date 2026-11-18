@@ -90,23 +90,8 @@ class ImageAsset(Base):
     )
 
 
-class ImageUser(Base):
-    """生图 Agent 的独立账号（不依赖 SKU 的 users 表，关掉 SKU 也能用）。
-
-    口令只存 `sha256(salt + plain)`，不落明文；不开放自助注册，账号由种子/管理员建。
-    """
-
-    __tablename__ = "image_user"
-
-    username: Mapped[str] = mapped_column(String(32), primary_key=True)
-    display_name: Mapped[str] = mapped_column(String(64), default="")
-    department: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    role: Mapped[str] = mapped_column(String(16), default="user")      # user | admin
-    password_salt: Mapped[str] = mapped_column(String(32), default="")
-    password_hash: Mapped[str] = mapped_column(String(64), default="")
-    enabled: Mapped[bool] = mapped_column(default=True)
-    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=dt.datetime.now)
-    last_login_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+# 说明：人员账号已统一到共享表 user（app.core.accounts + app.db.models.AppUser），
+# 旧的 image_user 表只做一次性迁移读取（见 store/users.py::migrate_legacy_users）。
 
 
 class ImageTokenBlacklist(Base):

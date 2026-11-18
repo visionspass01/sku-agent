@@ -1,7 +1,8 @@
-"""独立账号的密码与令牌实现（复刻 SKU 的语义，但**不 import 它的 auth 模块**）。
+"""生图 Agent 的令牌与口令实现（**账号本身在共享 `user` 表**，见 `app.core.accounts`）。
 
-- 密码：`sha256(随机盐 + 明文)`，每用户独立盐；
+- 密码：统一走共享层（`sha256(随机盐 + 明文)`，与 SKU 同一套算法、同一份账号）；
 - 令牌：`base64url(payload).base64url(hmac_sha256(payload))`，payload = {sub, role, dept, exp, jti}；
+  生图侧用自己的 `IMAGE_AUTH_SECRET` 签名，因此 SKU 令牌不能直接调生图接口（刻意的隔离）；
 - 登录限流：进程内滑动窗口（用户名 + IP 维度），与 SKU 同思路（重启即清零，演示够用）。
 """
 
@@ -19,22 +20,24 @@ from dataclasses import dataclass, field
 from app.agents_image.config import get_image_settings
 from app.core.errors import ImageError, raise_image
 
-_SALT_BYTES = 16
-
 
 def new_salt() -> str:
-    return secrets.token_hex(_SALT_BYTES)
+    from app.core import accounts
+
+    return accounts.new_salt()
 
 
 def hash_password(password: str, salt: str | None = None) -> tuple[str, str]:
-    salt = salt or new_salt()
-    digest = hashlib.sha256((salt + (password or "")).encode("utf-8")).hexdigest()
-    return digest, salt
+    """口令哈希统一走共享层（改算法只改一处，两个 Agent 同步生效）。"""
+    from app.core import accounts
+
+    return accounts.hash_password(password, salt)
 
 
 def verify_password(password: str, password_hash: str, salt: str) -> bool:
-    digest, _ = hash_password(password, salt)
-    return hmac.compare_digest(digest, password_hash or "")
+    from app.core import accounts
+
+    return accounts.verify_password(password, password_hash, salt)
 
 
 @dataclass
