@@ -175,9 +175,11 @@ def admin_tasks(request: Request) -> JSONResponse:
         require_admin(request)
         username = (request.query_params.get("username") or "").strip() or None
         status = (request.query_params.get("status") or "").strip() or None
+        department = (request.query_params.get("department") or "").strip() or None
         limit = int(request.query_params.get("limit") or 50)
         with session_scope() as session:
-            rows = task_store.list_tasks(session, username=username, status=status, limit=limit)
+            rows = task_store.list_tasks(session, username=username, status=status,
+                                         department=department, limit=limit)
             payload = [{"task_id": row.task_id, "batch_id": row.batch_id,
                         "username": row.username, "department": row.department,
                         "product_id": row.product_id, "status": row.status,

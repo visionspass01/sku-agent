@@ -116,8 +116,12 @@
       <div class="row">
         <button id="btn-create">开始生成</button>
         <button class="mini-btn secondary" id="btn-clear">清空选择</button>
+        <button class="mini-btn secondary" id="btn-batch-summary">批次汇总</button>
+        <button class="mini-btn secondary" id="btn-cancel-batch">整批取消</button>
+        <button class="mini-btn secondary" id="btn-retry-batch">整体重试失败</button>
         <span class="muted" id="create-hint"></span>
       </div>
+      <p class="muted" id="batch-hint"></p>
 
       <div class="image-progress" id="progress"></div>
       <div class="image-gallery" id="gallery"></div>
@@ -134,6 +138,11 @@
           <option value="month">按月</option>
         </select>
         <input id="metric-username" placeholder="账户（留空 = 全员）" />
+        <select id="admin-department">
+          <option value="">全部部门</option>
+          <option value="男装">男装</option>
+          <option value="女装">女装（含童装）</option>
+        </select>
         <button class="mini-btn secondary" id="btn-metrics">刷新指标</button>
         <button class="mini-btn secondary" id="btn-replay-outbox">重放回写</button>
       </div>

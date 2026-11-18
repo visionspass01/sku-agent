@@ -359,6 +359,66 @@ async function uploadLibraryImage() {
   }
 }
 
+/* ---------------------------------------------------------------- 批次操作（功能12） */
+function currentBatchId() {
+  const text = ($("batch-badge").textContent || "").replace("batch:", "").trim();
+  return text === "-" ? "" : text;
+}
+
+async function showBatchSummary() {
+  const batchId = currentBatchId();
+  if (!batchId) {
+    setText("batch-hint", "还没有批次：先创建一批任务");
+    return;
+  }
+  try {
+    const body = await api(`/api/image/batches/${batchId}`);
+    const status = Object.entries(body.statuses || {})
+      .map(([key, value]) => `${key} ${value}`).join(" / ") || "-";
+    setText("batch-hint",
+      `批次 ${body.batch_id}：${body.count} 个任务（${status}）· 交付 ${body.delivered_images} / ` +
+      `尝试 ${body.attempted_images} · 复用 ${body.reused_images} · 成本 ¥${body.cost_cny} · ` +
+      `参考图 ${body.ref_source}`);
+  } catch (err) {
+    setText("batch-hint", `批次汇总失败：${err.message}`);
+  }
+}
+
+async function cancelBatch() {
+  const batchId = currentBatchId();
+  if (!batchId) {
+    setText("batch-hint", "还没有批次：先创建一批任务");
+    return;
+  }
+  try {
+    const body = await api("/api/image/tasks/cancel-batch", { json: { batch_id: batchId } });
+    setText("batch-hint",
+      `整批取消：已取消 ${body.canceled} 个，已提交模型无法撤回 ${body.discarded} 个，` +
+      `跳过 ${body.skipped} 个`);
+    loadQuota();
+  } catch (err) {
+    setText("batch-hint", `整批取消失败：${err.message}`);
+  }
+}
+
+async function retryBatch() {
+  const batchId = currentBatchId();
+  if (!batchId) {
+    setText("batch-hint", "还没有批次：先创建一批任务");
+    return;
+  }
+  try {
+    const body = await api("/api/image/tasks/retry-batch", { json: { batch_id: batchId } });
+    setText("batch-hint", `整批重试：重新排队 ${body.retried} 个，跳过 ${body.skipped} 个`);
+    (body.results || []).forEach((item) => {
+      if (item.retried) watchTask(item.task_id, "");
+    });
+    loadQuota();
+  } catch (err) {
+    setText("batch-hint", `整批重试失败：${err.message}`);
+  }
+}
+
 /* ---------------------------------------------------------------- 建任务 + SSE */
 async function createTasks() {
   const productIds = Array.from(state.selected);
@@ -575,11 +635,54 @@ function watchTask(taskId, productId) {
   state.streams.set(taskId, controller);
 }
 
-/* ---------------------------------------------------------------- 画廊 */
-function appendGallery(taskId, asset) {
+/* ---------------------------------------------------------------- 画廊（懒加载 + 分页） */
+const GALLERY_PAGE = 20;
+state.galleryQueue = [];
+state.galleryRendered = 0;
+
+function takeGalleryPage() {
+  const gallery = $("gallery");
+  if (!gallery) return;
+  const slice = state.galleryQueue.splice(0, GALLERY_PAGE);
+  slice.forEach(({ taskId, asset }) => renderGalleryCard(gallery, taskId, asset));
+  state.galleryRendered += slice.length;
+  ensureGallerySentinel();
+}
+
+function ensureGallerySentinel() {
+  const gallery = $("gallery");
+  if (!gallery) return;
+  const existing = document.getElementById("gallery-sentinel");
+  if (existing) existing.remove();
+  if (!state.galleryQueue.length) return;
+  const sentinel = document.createElement("div");
+  sentinel.id = "gallery-sentinel";
+  sentinel.className = "gallery-sentinel";
+  sentinel.textContent = `继续下滑加载剩余 ${state.galleryQueue.length} 张…`;
+  gallery.appendChild(sentinel);
+  // 首屏慢的根因：一次渲染几十张图。这里用 IntersectionObserver 按页追加，
+  // 老浏览器没有它就直接再加载一页（退化但不报错）。
+  if (typeof IntersectionObserver === "function") {
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach((entry) => {
+        if (!entry.isIntersecting) return;
+        observer.disconnect();
+        sentinel.remove();
+        takeGalleryPage();
+      });
+    }, { rootMargin: "200px" });
+    observer.observe(sentinel);
+  } else {
+    sentinel.addEventListener("click", () => {
+      sentinel.remove();
+      takeGalleryPage();
+    });
+  }
+}
+
+function renderGalleryCard(gallery, taskId, asset) {
   let card = document.querySelector(`.gallery-card[data-asset="${asset.asset_id}"]`);
   if (card) return;
-  const gallery = $("gallery");
   card = document.createElement("figure");
   card.className = "gallery-card";
   card.dataset.asset = asset.asset_id;
@@ -587,7 +690,7 @@ function appendGallery(taskId, asset) {
   card.innerHTML = [
     `<div class="gc-head"><span>slot ${esc(asset.slot)}</span><span class="muted">` +
       `${asset.reused ? "复用历史成品" : esc(asset.kind)}${asset.adopt_status && asset.adopt_status !== "pending" ? " · " + esc(asset.adopt_status) : ""}</span></div>`,
-    `<img loading="lazy" alt="slot ${esc(asset.slot)}" src="${esc(asset.signed_url || asset.url)}" />`,
+    `<img loading="lazy" decoding="async" alt="slot ${esc(asset.slot)}" src="${esc(asset.signed_url || asset.url)}" />`,
     `<figcaption class="gc-foot"><span>${esc(asset.width)}×${esc(asset.height)} · ${esc(asset.mime)}</span>`,
     `<code>${esc(asset.sha256 ? asset.sha256.slice(0, 16) : "")}…</code></figcaption>`,
   ].join("");
@@ -601,6 +704,20 @@ function appendGallery(taskId, asset) {
       .catch(() => { /* 保留占位 alt */ });
   });
   gallery.appendChild(card);
+}
+
+function appendGallery(taskId, asset) {
+  const gallery = $("gallery");
+  if (!gallery) return;
+  if (document.querySelector(`.gallery-card[data-asset="${asset.asset_id}"]`)) return;
+  const queued = state.galleryQueue.some((item) => item.asset.asset_id === asset.asset_id);
+  if (queued) return;
+  state.galleryQueue.push({ taskId, asset });
+  if (state.galleryRendered < GALLERY_PAGE) {
+    takeGalleryPage();
+  } else {
+    ensureGallerySentinel();
+  }
 }
 
 async function loadGallery(taskId) {
@@ -660,6 +777,18 @@ function bindEvents() {
   $("btn-create").addEventListener("click", createTasks);
   const refSelect = $("ref-source-select");
   if (refSelect) refSelect.addEventListener("change", updateRefSourceUi);
+  const summaryButton = $("btn-batch-summary");
+  if (summaryButton) summaryButton.addEventListener("click", showBatchSummary);
+  const cancelBatchButton = $("btn-cancel-batch");
+  if (cancelBatchButton) cancelBatchButton.addEventListener("click", cancelBatch);
+  const retryBatchButton = $("btn-retry-batch");
+  if (retryBatchButton) retryBatchButton.addEventListener("click", retryBatch);
+  const adminDepartment = $("admin-department");
+  if (adminDepartment) {
+    adminDepartment.addEventListener("change", () => {
+      if (window.ImageAdmin) window.ImageAdmin.refresh(state);
+    });
+  }
   const uploadButton = $("btn-library-upload");
   if (uploadButton) uploadButton.addEventListener("click", uploadLibraryImage);
   const refreshButton = $("btn-library-refresh");

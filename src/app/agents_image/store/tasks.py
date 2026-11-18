@@ -111,8 +111,8 @@ def mark_failed(session, task_id: str, *, code: str, detail: str = "") -> None:
 
 def list_tasks(session, *, username: str | None = None, limit: int = 50,
                status: str | None = None, batch_id: str | None = None,
-               offset: int = 0) -> list[ImageTask]:
-    """按创建时间倒序列任务；`username=None` 表示不限（管理员视角），`batch_id` 可选过滤。"""
+               offset: int = 0, department: str | None = None) -> list[ImageTask]:
+    """按创建时间倒序列任务；`username=None` 不限（管理员视角），可按批次/部门过滤。"""
     statement = select(ImageTask)
     if username:
         statement = statement.where(ImageTask.username == username)
@@ -120,6 +120,8 @@ def list_tasks(session, *, username: str | None = None, limit: int = 50,
         statement = statement.where(ImageTask.status == status)
     if batch_id:
         statement = statement.where(ImageTask.batch_id == batch_id)
+    if department:
+        statement = statement.where(ImageTask.department == department)
     statement = statement.order_by(ImageTask.created_at.desc())
     statement = statement.limit(max(1, int(limit))).offset(max(0, int(offset)))
     return list(session.execute(statement).scalars().all())

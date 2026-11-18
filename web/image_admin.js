@@ -241,14 +241,18 @@ const ImageAdmin = (() => {
   async function refresh(state) {
     const granularity = (document.getElementById("metric-granularity") || {}).value || "day";
     const username = ((document.getElementById("metric-username") || {}).value || "").trim();
+    const department = ((document.getElementById("admin-department") || {}).value || "").trim();
     const query = `granularity=${granularity}&count=30${username ? `&username=${encodeURIComponent(username)}` : ""}`;
 
     const metrics = await api(`/api/image/admin/metrics?${query}`);
     renderCards(document.getElementById("metric-cards"), metrics.cards, metrics);
     renderChart(document.getElementById("image-chart"), metrics);
 
-    const taskQuery = username ? `?username=${encodeURIComponent(username)}&limit=30` : "?limit=30";
-    const tasks = await api(`/api/image/admin/tasks${taskQuery}`);
+    // 部门筛选（功能12）：管理员按部门看任务，避免"全员混在一起看不出谁的问题"
+    const params = ["limit=30"];
+    if (username) params.push(`username=${encodeURIComponent(username)}`);
+    if (department) params.push(`department=${encodeURIComponent(department)}`);
+    const tasks = await api(`/api/image/admin/tasks?${params.join("&")}`);
     renderTasks(document.getElementById("admin-task-rows"), tasks.tasks);
 
     const quota = await api("/api/image/admin/quota");

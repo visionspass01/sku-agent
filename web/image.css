@@ -282,3 +282,12 @@
   font-size: 11.5px;
   color: var(--muted);
 }
+
+/* 画廊懒加载分页哨兵（功能13） */
+.gallery-sentinel {
+  grid-column: 1 / -1;
+  padding: 10px 4px;
+  color: var(--muted);
+  font-size: 12.5px;
+  text-align: center;
+}

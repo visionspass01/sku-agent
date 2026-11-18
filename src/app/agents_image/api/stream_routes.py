@@ -13,8 +13,10 @@ import time
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
+from app.agents_image.api.batch_routes import cancel_one
 from app.agents_image.api.common import asset_payload, error_response
 from app.agents_image.api.deps import require_user, trace_id_of
+from app.agents_image.dispatch.task_dispatcher import get_dispatcher
 from app.agents_image.store import assets as asset_store
 from app.agents_image.store import quota as quota_store
 from app.agents_image.store import tasks as task_store
@@ -110,34 +112,19 @@ async def cancel_task(task_id: str, request: Request) -> JSONResponse:
     - **未调用生图模型** → 真正取消，消息 `未调用生图模型的任务请求已取消。`
     - **已调用生图模型** → 无法撤回（第三方请求已发出、钱已花），置 `cancel_requested`，
       本次结果返回后直接丢弃；消息说明"无法撤回、结果将被丢弃"。
+
+    判定逻辑与批次取消共用 `batch_routes.cancel_one`，避免两处语义漂移。
     """
     trace = trace_id_of(request)
     try:
         user = require_user(request)
-        with session_scope() as session:
-            task = task_store.get_task(session, task_id)
-            if task is None:
-                raise ImageError("IMG_TASK_NOT_FOUND", f"任务不存在：{task_id}")
-            if not user.is_admin and task.username != user.username:
-                raise ImageError("IMG_FORBIDDEN", "无权取消他人的任务")
-            if task.status in _TERMINAL:
-                raise ImageError("IMG_TASK_CONFLICT",
-                                 f"任务已结束（{task.status}），不能取消")
-            provider_started = task.provider_started_at is not None
-            if provider_started:
-                task_store.update_task(session, task_id, cancel_requested=True)
-
-        if provider_started:
-            # 已提交模型：不打断在途调用（打断也省不下钱），结果是丢弃
+        outcome = cancel_one(user, task_id)
+        if not outcome.get("needs_dispatch"):
             return JSONResponse(status_code=409, content={
                 "ok": False, "canceled": False, "provider_in_flight": True,
-                "task_id": task_id,
-                "message": "已提交生图模型，无法撤回；本次结果将被丢弃（成本已发生）",
+                "task_id": task_id, "message": outcome.get("message", ""),
                 "trace_id": trace,
             })
-
-        from app.agents_image.dispatch.task_dispatcher import get_dispatcher
-
         canceled = await get_dispatcher().cancel(task_id)
         if not canceled:
             raise ImageError("IMG_TASK_CONFLICT", "任务已结束，不能取消")

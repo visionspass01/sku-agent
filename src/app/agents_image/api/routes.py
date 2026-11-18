@@ -20,6 +20,7 @@ from fastapi.responses import JSONResponse, Response
 from app.agents_image import metrics
 from app.agents_image.api.admin_routes import router as admin_router
 from app.agents_image.api.auth_routes import router as auth_router
+from app.agents_image.api.batch_routes import router as batch_router
 from app.agents_image.api.common import (
     asset_payload,
     error_response,
@@ -53,6 +54,7 @@ router.include_router(auth_router)
 router.include_router(stream_router)
 router.include_router(admin_router)
 router.include_router(library_router)
+router.include_router(batch_router)
 
 
 @router.get("/health")

@@ -48,8 +48,12 @@ def login(client, username="admin", password="hhw123") -> dict:
 
 
 def _set_quota(username: str, limit: int) -> None:
+    """设置配额并把 used/reserved 归零：随机用例顺序下不能依赖"这个账号今天还没用过"。"""
     with session_scope() as session:
-        quota_store.grant(session, username, period_type="day", period_limit=limit)
+        row = quota_store.grant(session, username, period_type="day", period_limit=limit)
+        row.used = 0
+        row.reserved = 0
+        session.flush()
 
 
 def _quota_row(username: str) -> dict:
@@ -122,12 +126,13 @@ def test_reserve_then_commit_on_success(env):
 def test_reserve_blocks_over_quota_before_creating_tasks(env):
     headers = login(env, "worker2", "hhw222")
     _set_quota("worker2", 1)
+    before_tasks = _count_tasks("worker2")
     resp = env.post("/api/image/tasks", headers=headers,
                     json={"product_ids": ["P-2001"], "prompt": "白底主图", "n": 6})
     assert resp.status_code == 429
     assert resp.json()["error_code"] == "IMG_QUOTA_EXCEEDED"
     # 失败不残留任务、不残留预留
-    assert _count_tasks("worker2") == 0
+    assert _count_tasks("worker2") == before_tasks
     assert _quota_row("worker2")["used"] == 0
 
 
