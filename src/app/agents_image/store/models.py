@@ -21,21 +21,28 @@ class ImageTask(Base):
 
     task_id: Mapped[str] = mapped_column(String(32), primary_key=True)
     request_id: Mapped[str] = mapped_column(String(64), default="")
-    batch_id: Mapped[str] = mapped_column(String(32), default="", index=True)
+    # 可空：手工/测试任务没有 batch。NULL 在 SQLite 与 MySQL 的唯一索引里互不相等，
+    # 所以 `uq_image_task_batch_target` 只在「真实批次内」生效，不会拦住无批次的任务。
+    batch_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     username: Mapped[str] = mapped_column(String(32), default="anonymous", index=True)
     department: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     product_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    color_key: Mapped[str] = mapped_column(String(64), default="", index=True)   # 商品+颜色维度
+    variant_id: Mapped[str] = mapped_column(String(8), default="")               # A/B（差异化）
     ref_source: Mapped[str] = mapped_column(String(16), default="mcp")   # mcp（唯一来源）
     ref_asset_ids: Mapped[list] = mapped_column(JSON, default=list)
     prompt: Mapped[str] = mapped_column(Text, default="")
     prompt_final: Mapped[str] = mapped_column(Text, default="")
     platform: Mapped[str] = mapped_column(String(16), default="淘系")
     aspect: Mapped[str] = mapped_column(String(8), default="1:1")
-    n: Mapped[int] = mapped_column(Integer, default=1)
+    n: Mapped[int] = mapped_column(Integer, default=1)          # 出图张数（= image_count）
+    slot_count: Mapped[int] = mapped_column(Integer, default=9)  # 图位数
+    image_count: Mapped[int] = mapped_column(Integer, default=6)  # 出图张数（generate 图位）
     compositions: Mapped[list] = mapped_column(JSON, default=list)
     scene_styles: Mapped[list] = mapped_column(JSON, default=list)
     attrs_json: Mapped[dict] = mapped_column(JSON, default=dict)   # 中台商品身份锁定字段快照
+    copy_json: Mapped[dict] = mapped_column(JSON, default=dict)    # 图内文案（按平台策略）
     slots_json: Mapped[list] = mapped_column(JSON, default=list)
     prompt_pack_json: Mapped[list] = mapped_column(JSON, default=list)
 
@@ -44,10 +51,14 @@ class ImageTask(Base):
     attempted_images: Mapped[int] = mapped_column(Integer, default=0)
     delivered_images: Mapped[int] = mapped_column(Integer, default=0)
     cost_cny: Mapped[float] = mapped_column(default=0.0)
+    external_cost_cny: Mapped[float] = mapped_column(default=0.0)  # 第三方 API 真实计费累计
     error_code: Mapped[str] = mapped_column(String(48), default="")
     error_detail: Mapped[str] = mapped_column(Text, default="")
     mcp_degraded: Mapped[bool] = mapped_column(default=False)   # 仅历史兼容，v6 起恒为 False
     backfill_status: Mapped[str] = mapped_column(String(16), default="pending")  # pending/sent/failed
+
+    provider_started_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    cancel_requested: Mapped[bool] = mapped_column(default=False)
 
     trace_id: Mapped[str] = mapped_column(String(32), default="")
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=dt.datetime.now)
@@ -57,6 +68,9 @@ class ImageTask(Base):
     __table_args__ = (
         Index("idx_image_task_user_created", "username", "created_at"),
         Index("idx_image_task_status", "status"),
+        # 同一批里「商品+颜色+变体+平台」只允许一个任务：重复提交被唯一约束拦住
+        Index("uq_image_task_batch_target", "batch_id", "product_id", "color_key",
+              "variant_id", "platform", unique=True),
     )
 
 
@@ -129,16 +143,30 @@ class ImageQuota(Base):
     period_limit: Mapped[int] = mapped_column(Integer, default=50)
     period_key: Mapped[str] = mapped_column(String(16), default="")
     used: Mapped[int] = mapped_column(Integer, default=0)
+    reserved: Mapped[int] = mapped_column(Integer, default=0)   # 创建任务时预留，成功后转 used
     granted_by: Mapped[str] = mapped_column(String(32), default="")
     updated_at: Mapped[dt.datetime] = mapped_column(DateTime, default=dt.datetime.now)
 
 
+class ImageRequest(Base):
+    """请求幂等记录：同一 `request_id` 只创建一批任务（重复提交返回首次响应）。"""
+
+    __tablename__ = "image_request"
+
+    request_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    batch_id: Mapped[str] = mapped_column(String(32), default="", index=True)
+    username: Mapped[str] = mapped_column(String(32), default="", index=True)
+    response_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=dt.datetime.now)
+
+
 class ImageUsage(Base):
-    """使用量流水（按小时粒度落，面板按周期聚合；交付与尝试分开记）。"""
+    """使用量流水（按小时粒度落，面板按周期聚合；成功出图/尝试/采纳/驳回分开记）。"""
 
     __tablename__ = "image_usage"
     __table_args__ = (
-        Index("idx_image_usage_user_period", "username", "period_key"),
+        Index("uq_image_usage_user_period", "username", "period_key", "granularity",
+              unique=True),
         Index("idx_image_usage_period", "period_key"),
     )
 
@@ -147,8 +175,10 @@ class ImageUsage(Base):
     department: Mapped[str | None] = mapped_column(String(32), nullable=True)
     period_key: Mapped[str] = mapped_column(String(20), default="")   # 2026-11-18T15（Asia/Shanghai）
     granularity: Mapped[str] = mapped_column(String(8), default="hour")
-    images: Mapped[int] = mapped_column(Integer, default=0)            # 交付张数
+    images: Mapped[int] = mapped_column(Integer, default=0)            # 成功出图张数（计费口径）
     images_attempted: Mapped[int] = mapped_column(Integer, default=0)  # 尝试张数
+    adopted: Mapped[int] = mapped_column(Integer, default=0)           # 采纳张数（正样本）
+    rejected: Mapped[int] = mapped_column(Integer, default=0)          # 驳回张数（负样本）
     tasks: Mapped[int] = mapped_column(Integer, default=0)
     failed: Mapped[int] = mapped_column(Integer, default=0)
     tokens: Mapped[int] = mapped_column(Integer, default=0)

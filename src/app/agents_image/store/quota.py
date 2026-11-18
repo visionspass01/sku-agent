@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import datetime as dt
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 
 from app.agents_image.store.models import ImageQuota
 
@@ -73,7 +73,7 @@ def _rollover(session, row: ImageQuota) -> ImageQuota:
 def remaining(row: ImageQuota) -> int:
     if row.period_type == "unlimited":
         return 10 ** 9
-    return max(0, int(row.period_limit or 0) - int(row.used or 0))
+    return max(0, int(row.period_limit or 0) - int(row.used or 0) - int(row.reserved or 0))
 
 
 def check(session, username: str, need: int = 1, *, is_admin: bool = False) -> dict:
@@ -88,8 +88,12 @@ def check(session, username: str, need: int = 1, *, is_admin: bool = False) -> d
             "period_key": row.period_key}
 
 
-def consume(session, username: str, images: int) -> bool:
-    """条件更新占额度：并发下不会超发；返回 False 表示额度不足（调用方应回滚）。"""
+def reserve(session, username: str, images: int) -> bool:
+    """**预留**额度（创建任务时调用）：`used + reserved + n <= limit` 才成功。
+
+    与"事后扣"不同：预留后就无法被其它并发请求抢走，交付成功再转成 used，
+    失败/取消则 `release` 回滚——保证"计划多少张就占多少张"。
+    """
     count = max(0, int(images or 0))
     if count == 0:
         return True
@@ -100,7 +104,61 @@ def consume(session, username: str, images: int) -> bool:
         update(ImageQuota)
         .where(ImageQuota.username == username,
                ImageQuota.period_key == row.period_key,
-               ImageQuota.used + count <= ImageQuota.period_limit)
+               ImageQuota.used + ImageQuota.reserved + count <= ImageQuota.period_limit)
+        .values(reserved=ImageQuota.reserved + count, updated_at=dt.datetime.now())
+    )
+    return bool(result.rowcount)
+
+
+def commit_reserve(session, username: str, images: int) -> bool:
+    """交付结算：把 `images` 张预留转成 used，其余预留释放（少出的张数不占额度）。"""
+    row = _rollover(session, get_or_create(session, username))
+    if row.period_type == "unlimited":
+        return True
+    count = max(0, int(images or 0))
+    result = session.execute(
+        update(ImageQuota)
+        .where(ImageQuota.username == username,
+               ImageQuota.period_key == row.period_key,
+               ImageQuota.reserved >= count)
+        .values(used=ImageQuota.used + count,
+                reserved=ImageQuota.reserved - count,
+                updated_at=dt.datetime.now())
+    )
+    return bool(result.rowcount)
+
+
+def release(session, username: str, images: int) -> bool:
+    """释放预留（失败/取消）：预留不足时清零，不会把 used 变成负数。"""
+    row = _rollover(session, get_or_create(session, username))
+    if row.period_type == "unlimited":
+        return True
+    count = max(0, int(images or 0))
+    if count == 0:
+        return True
+    result = session.execute(
+        update(ImageQuota)
+        .where(ImageQuota.username == username,
+               ImageQuota.period_key == row.period_key)
+        .values(reserved=func.max(ImageQuota.reserved - count, 0),
+                updated_at=dt.datetime.now())
+    )
+    return bool(result.rowcount)
+
+
+def consume(session, username: str, images: int) -> bool:
+    """直接占用额度（不带预留，历史接口保留）：条件更新防超发。"""
+    count = max(0, int(images or 0))
+    if count == 0:
+        return True
+    row = _rollover(session, get_or_create(session, username))
+    if row.period_type == "unlimited":
+        return True
+    result = session.execute(
+        update(ImageQuota)
+        .where(ImageQuota.username == username,
+               ImageQuota.period_key == row.period_key,
+               ImageQuota.used + ImageQuota.reserved + count <= ImageQuota.period_limit)
         .values(used=ImageQuota.used + count, updated_at=dt.datetime.now())
     )
     return bool(result.rowcount)
@@ -129,5 +187,5 @@ def list_quotas(session) -> list[dict]:
              "granted_by": row.granted_by} for row in rows]
 
 
-__all__ = ["now_local", "period_key", "get_or_create", "remaining", "check", "consume",
-           "grant", "list_quotas"]
+__all__ = ["now_local", "period_key", "get_or_create", "remaining", "check",
+           "reserve", "commit_reserve", "release", "consume", "grant", "list_quotas"]

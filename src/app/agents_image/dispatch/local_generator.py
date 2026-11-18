@@ -56,6 +56,16 @@ class LocalGenerator:
                 err = normalize(exc)
                 with session_scope() as session:
                     task_store.mark_failed(session, task_id, code=err.code, detail=err.detail)
+                    # 失败要释放创建任务时预留的额度（否则额度会被永久占住）
+                    try:
+                        from app.agents_image.store import quota as quota_store
+
+                        task = task_store.get_task(session, task_id)
+                        planned = int(getattr(task, "image_count", 0) or 0) if task else 0
+                        if planned:
+                            quota_store.release(session, task.username, planned)
+                    except Exception:  # noqa: BLE001 —— 释放失败不影响失败落库
+                        logger.warning("失败任务释放预留额度出错：%s", task_id)
             finally:
                 self._in_flight -= 1
                 self._tasks.pop(task_id, None)

@@ -172,15 +172,33 @@ async def _resolve_request_parameters(catalog, body: dict, settings) -> dict:
 
 @router.post("/tasks")
 async def create_tasks(request: Request) -> JSONResponse:
-    """批量建任务：`{request_id?, product_ids[1..5], prompt, compositions?, scene_styles?, n?, aspect?, platform?}`."""
+    """批量建任务：`{request_id?, product_ids[1..5], prompt, compositions?, scene_styles?, slot_count?, image_count?, aspect?, platform?}`。
+
+    幂等：`Idempotency-Key` 头或 body `request_id` 相同 → 直接返回首次响应（不重复建任务/扣额度）。
+    配额：先在事务内**预留**本期额度，交付成功再结算、失败/取消回滚。
+    """
     trace = trace_id_of(request)
     settings = get_image_settings()
     submitted: list[str] = []
+    reserved_images = 0
+    reserved_user = ""
     try:
         user = require_user(request)
         body = await request.json()
         if not isinstance(body, dict):
             raise ImageError("IMG_INPUT_INVALID", "请求体必须是 JSON 对象")
+        idempotency_key = (request.headers.get("Idempotency-Key")
+                           or body.get("request_id") or "").strip()
+        if idempotency_key:
+            with session_scope() as session:
+                from app.agents_image.store.models import ImageRequest
+
+                row = session.get(ImageRequest, idempotency_key)
+                replay = dict(row.response_json or {}) if row is not None else None
+            if replay:
+                replay.update({"idempotent": True, "trace_id": trace})
+                return JSONResponse(status_code=200, content=replay)
+
         product_ids = _dedupe([str(x) for x in (body.get("product_ids") or [])])
         if not product_ids:
             raise ImageError("IMG_INPUT_INVALID", "请至少选择一个商品（product_ids 不能为空）")
@@ -211,6 +229,17 @@ async def create_tasks(request: Request) -> JSONResponse:
                              f"本次需要 {planned_images} 张", retryable=False)
 
         with session_scope() as session:
+            from app.agents_image.store import quota as quota_store
+
+            # 预留：占住本次计划张数，防止并发下超发（交付成功转 used，失败/取消释放）
+            if not user.is_admin:
+                if not quota_store.reserve(session, user.username, planned_images):
+                    raise ImageError("IMG_QUOTA_EXCEEDED",
+                                     f"配额不足：本期剩余 {quota['remaining']} 张，"
+                                     f"本次需要 {planned_images} 张", retryable=False)
+                reserved_images = planned_images
+                reserved_user = user.username
+
             resolution = await refs_source.resolve_refs(
                 catalog, product_ids, session=session,
                 username=user.username, department=user.department,
@@ -229,6 +258,8 @@ async def create_tasks(request: Request) -> JSONResponse:
                 state.slots = [SlotPlan(**item) for item in plan_slots.build_slots(
                     state, policy=params["policy"], labels=params["labels"])]
                 validate_node.validate(state, settings=settings)
+                planned_for_product = sum(1 for item in state.slots
+                                          if plan_slots.is_generatable(item))
                 task = task_store.create_task(
                     session, task_id=new_task_id(), username=user.username,
                     department=user.department, batch_id=batch_id, product_id=product_id,
@@ -236,32 +267,57 @@ async def create_tasks(request: Request) -> JSONResponse:
                     n=params["count"], ref_asset_ids=resolution.asset_ids_of(product_id),
                     compositions=params["compositions"], scene_styles=params["scene_styles"],
                     slots=[item.model_dump() for item in state.slots],
-                    prompt_pack=[], request_id=str(body.get("request_id") or ""),
+                    prompt_pack=[], request_id=idempotency_key,
                     trace_id=trace,
                     attrs=resolution.products[product_id].attrs,
+                    image_count=planned_for_product,
+                    slot_count=len(state.slots),
                 )
                 asset_store.bind_refs_to_task(session, task.ref_asset_ids, task.task_id)
                 created.append({"task_id": task.task_id, "product_id": product_id,
                                 "status": task.status,
-                                "refs": len(task.ref_asset_ids)})
+                                "refs": len(task.ref_asset_ids),
+                                "image_count": planned_for_product})
                 first_slots = first_slots or [item.model_dump() for item in state.slots]
+            payload = {
+                "batch_id": batch_id, "tasks": created, "slots": first_slots,
+                "limits": {"max_refs": settings.max_refs,
+                           "max_batch_products": settings.max_batch_products,
+                           "refs_truncated": resolution.truncated},
+                "planned_images": planned_images,
+                "trace_id": trace, "idempotent": False,
+            }
+            if idempotency_key:
+                from app.agents_image.store.models import ImageRequest
+
+                session.add(ImageRequest(request_id=idempotency_key, batch_id=batch_id,
+                                         username=user.username, response_json=payload))
+                session.flush()
         for item in created:
             await get_dispatcher().submit(item["task_id"])
             submitted.append(item["task_id"])
         metrics.record_task_created(len(created))
-        payload = {
-            "batch_id": batch_id, "tasks": created, "slots": first_slots,
-            "limits": {"max_refs": settings.max_refs,
-                       "max_batch_products": settings.max_batch_products,
-                       "refs_truncated": resolution.truncated},
-            "trace_id": trace,
-        }
     except ImageError as exc:
+        if reserved_images and reserved_user:
+            _release_reserve(reserved_user, reserved_images)
         return error_response(exc, trace)
     except Exception as exc:  # noqa: BLE001
         logger.exception("创建生图任务失败")
+        if reserved_images and reserved_user:
+            _release_reserve(reserved_user, reserved_images)
         return error_response(exc, trace)
     return JSONResponse(status_code=201, content=payload)
+
+
+def _release_reserve(username: str, images: int) -> None:
+    """建任务失败时把预留还回去（失败释放不影响用户额度）。"""
+    try:
+        from app.agents_image.store import quota as quota_store
+
+        with session_scope() as session:
+            quota_store.release(session, username, images)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("预留释放失败：user=%s n=%s %s", username, images, exc)
 
 
 def _registry():

@@ -16,15 +16,21 @@ def create_task(session, *, task_id: str, username: str, department: str | None,
                 scene_styles: list[str] | None = None, slots: list[dict] | None = None,
                 prompt_pack: list[dict] | None = None, request_id: str = "",
                 trace_id: str = "", batch_id: str = "", product_id: str | None = None,
-                ref_source: str = "mcp", attrs: dict | None = None) -> ImageTask:
+                ref_source: str = "mcp", attrs: dict | None = None,
+                color_key: str = "", variant_id: str = "",
+                image_count: int | None = None, slot_count: int | None = None,
+                copy: dict | None = None) -> ImageTask:
     task = ImageTask(
-        task_id=task_id, request_id=request_id, batch_id=batch_id,
+        task_id=task_id, request_id=request_id, batch_id=(batch_id or None),
         username=username, department=department, product_id=product_id,
         ref_source=ref_source,
         prompt=prompt, platform=platform, aspect=aspect, n=n,
         ref_asset_ids=list(ref_asset_ids or []),
+        color_key=color_key or "", variant_id=variant_id or "",
         compositions=list(compositions or []), scene_styles=list(scene_styles or []),
-        attrs_json=dict(attrs or {}),
+        attrs_json=dict(attrs or {}), copy_json=dict(copy or {}),
+        slot_count=int(slot_count if slot_count is not None else len(slots or [])),
+        image_count=int(image_count if image_count is not None else n),
         slots_json=list(slots or []), prompt_pack_json=list(prompt_pack or []),
         status="queued", trace_id=trace_id,
     )
@@ -55,12 +61,14 @@ def mark_running(session, task_id: str) -> None:
 def mark_done(session, task_id: str, *, attempted: int, delivered: int, cost: float,
               prompt_final: str = "", prompt_pack: list[dict] | None = None,
               slots: list[dict] | None = None, backfill_status: str | None = None,
-              attempts: int | None = None) -> None:
+              attempts: int | None = None, external_cost: float | None = None) -> None:
     fields: dict = dict(status="done", finished_at=dt.datetime.now(),
                         attempted_images=attempted, delivered_images=delivered, cost_cny=cost,
                         prompt_final=prompt_final,
                         prompt_pack_json=list(prompt_pack or []),
                         slots_json=list(slots or []))
+    if external_cost is not None:
+        fields["external_cost_cny"] = float(external_cost)
     if backfill_status:
         fields["backfill_status"] = backfill_status
     if attempts is not None:

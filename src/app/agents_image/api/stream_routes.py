@@ -103,6 +103,12 @@ async def stream_task(task_id: str, request: Request):
 
 @router.post("/tasks/{task_id}/cancel")
 async def cancel_task(task_id: str, request: Request) -> JSONResponse:
+    """取消任务（P1-6：区分"还没调模型"与"模型已提交"两种语义）。
+
+    - **未调用生图模型** → 真正取消，消息 `未调用生图模型的任务请求已取消。`
+    - **已调用生图模型** → 无法撤回（第三方请求已发出、钱已花），置 `cancel_requested`，
+      本次结果返回后直接丢弃；消息说明"无法撤回、结果将被丢弃"。
+    """
     trace = trace_id_of(request)
     try:
         user = require_user(request)
@@ -115,13 +121,30 @@ async def cancel_task(task_id: str, request: Request) -> JSONResponse:
             if task.status in _TERMINAL:
                 raise ImageError("IMG_TASK_CONFLICT",
                                  f"任务已结束（{task.status}），不能取消")
+            provider_started = task.provider_started_at is not None
+            if provider_started:
+                task_store.update_task(session, task_id, cancel_requested=True)
+
+        if provider_started:
+            # 已提交模型：不打断在途调用（打断也省不下钱），结果是丢弃
+            return JSONResponse(status_code=409, content={
+                "ok": False, "canceled": False, "provider_in_flight": True,
+                "task_id": task_id,
+                "message": "已提交生图模型，无法撤回；本次结果将被丢弃（成本已发生）",
+                "trace_id": trace,
+            })
+
         from app.agents_image.dispatch.task_dispatcher import get_dispatcher
 
         canceled = await get_dispatcher().cancel(task_id)
+        if not canceled:
+            raise ImageError("IMG_TASK_CONFLICT", "任务已结束，不能取消")
     except ImageError as exc:
         return error_response(exc, trace)
-    return JSONResponse(status_code=200 if canceled else 409,
-                        content={"ok": bool(canceled), "task_id": task_id, "trace_id": trace})
+    return JSONResponse(status_code=200, content={
+        "ok": True, "canceled": True, "provider_in_flight": False,
+        "task_id": task_id, "message": "未调用生图模型的任务请求已取消。", "trace_id": trace,
+    })
 
 
 @router.get("/quota")
