@@ -161,14 +161,38 @@ _SLOTS = (
 )
 
 _RULES = {
-    "淘系": PlatformRules(platform="淘系", aspect="1:1", min_px=800, max_mb=3.0,
-                         background="纯白", text_allowed=True,
-                         forbidden_words=["全网最低价", "国家级", "绝对"],
-                         notes="主图 1:1 白底，不得拼接与水印"),
-    "通用": PlatformRules(platform="通用", aspect="1:1", min_px=800, max_mb=5.0,
-                         background="纯白或浅色", text_allowed=True,
-                         forbidden_words=["伪造", "官方认证"],
-                         notes="通用电商主图规范"),
+    "淘系": PlatformRules(
+        platform="淘系", aspect="1:1", min_px=800, max_mb=3.0,
+        background="纯白", text_allowed=True,
+        forbidden_words=["全网最低价", "国家级", "绝对"],
+        notes="主图 1:1 白底；允许主图叠卖点文字（主标语 ≤4 词、总面积 ≤20%）",
+        copy_policy={"headline_allowed": True, "max_headline_words": 4,
+                     "max_subhead_words": 7, "max_area_pct": 20,
+                     "badge_numeric_only": True, "min_font_ratio": 0.04},
+        compliance={"white_ratio": 0.55, "subject_min": 0.05, "subject_max": 0.95,
+                    "margin_min": 0.15, "aspect_tolerance": 0.04},
+    ),
+    "抖系": PlatformRules(
+        platform="抖系", aspect="1:1", min_px=800, max_mb=3.0,
+        background="纯白或浅色", text_allowed=False,
+        forbidden_words=["全网最低价", "国家级", "绝对", "秒杀", "清仓"],
+        notes="抖系商城主图禁营销文字（仅品牌与规格数字），与淘系主图硬冲突",
+        copy_policy={"headline_allowed": False, "max_headline_words": 0,
+                     "max_subhead_words": 0, "max_area_pct": 0,
+                     "badge_numeric_only": True, "min_font_ratio": 0.04},
+        compliance={"white_ratio": 0.45, "subject_min": 0.05, "subject_max": 0.97,
+                    "margin_min": 0.10, "aspect_tolerance": 0.04},
+    ),
+    "通用": PlatformRules(
+        platform="通用", aspect="1:1", min_px=800, max_mb=5.0,
+        background="纯白或浅色", text_allowed=True,
+        forbidden_words=["伪造", "官方认证"],
+        notes="通用电商主图规范",
+        copy_policy={"headline_allowed": True, "max_headline_words": 4,
+                     "max_subhead_words": 7, "max_area_pct": 20},
+        compliance={"white_ratio": 0.35, "subject_min": 0.03, "subject_max": 0.97,
+                    "margin_min": 0.08, "aspect_tolerance": 0.04},
+    ),
 }
 
 _SEED_IMAGES = {"P-1001": 3, "P-1002": 2, "P-2001": 4, "P-3001": 2}

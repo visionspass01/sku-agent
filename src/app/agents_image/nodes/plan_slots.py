@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+from app.agents_image.nodes import copywriter
 from app.agents_image.schemas import attrs_of, mask_banned, merge_preserve
 from app.agents_image.state import ImageTaskState, PromptDraft
 
@@ -100,10 +101,11 @@ def slot_rule(slot, role: str, manifest: dict | None = None) -> dict:
     return rule
 
 
-def compose(state: ImageTaskState, registry, *, rules=None,
+def compose(state: ImageTaskState, registry, *, rules=None, policy=None,
             fragments: list[str] | dict[int, list[str]] | None = None) -> list[PromptDraft]:
     """把「身份锁定 + 图位 + 构图/场景（中台 label）+ 平台规则 + RAG 片段」套进五槽位模板。"""
-    attrs = attrs_of(state.attrs)
+    attrs_models = attrs_of(state.attrs)
+    attrs = attrs_models
     must_not_change = list(attrs.must_not_change)
     product_block = attrs.prompt_block()
     manifest = registry.manifest or {}
@@ -125,7 +127,16 @@ def compose(state: ImageTaskState, registry, *, rules=None,
         text_key = rule.get("text", "none")
         if not text_allowed:
             text_key = "none"
-        text_block = _TEXT_BLOCK.get(text_key, _TEXT_BLOCK["none"])
+        # M5：图内文案按平台 copy_policy + 字数表生成（抖系主图直接无字）
+        slot_copy = copywriter.build_copy(
+            attrs_models, role,
+            platform_rules=platform_rules,
+            copy_table=(policy.copy_table if policy is not None else None) or (manifest or {}).get("copy_table"),
+            direction=state.variant_direction,
+        )
+        text_block = (copywriter.describe(slot_copy) if text_key != "none"
+                      else _TEXT_BLOCK.get("none"))
+        copy_warnings = list(slot_copy.warnings)
         background = ("纯白" if ("白底" in scene_style or "白底" in background_rule)
                       else (background_rule or "与场景风格一致"))
         reserve_block = ("左上角约 8% 面积留白，不放置任何关键信息（留给平台角标；主图硬性要求）"
@@ -170,7 +181,11 @@ def compose(state: ImageTaskState, registry, *, rules=None,
             type=_field(item, "type", "generate"),
             fill_percent=int(rule["fill"]), margin_percent=int(rule["margin"]),
             text_policy=text_key, fragments=list(rag_items),
+            copy_spec=slot_copy.as_dict(),
         ))
+        if copy_warnings:
+            state.warnings.extend(copy_warnings)
+            drafts[-1].copy_spec = {**slot_copy.as_dict(), "warnings": copy_warnings}
     return drafts
 
 

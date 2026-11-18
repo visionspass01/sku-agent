@@ -247,14 +247,23 @@ async def create_tasks(request: Request) -> JSONResponse:
             raise ImageError("IMG_INPUT_INVALID", "需求描述不能为空")
 
         catalog = get_catalog()
-        params = await _resolve_request_parameters(catalog, body, settings)
         targets = await _resolve_targets(catalog, body, product_ids)
-        if len(targets) > settings.max_tasks_per_request:
+        platforms = _platform_list(body)
+        params_by_platform = {
+            platform: await _resolve_request_parameters(
+                catalog, {**body, "platform": platform}, settings)
+            for platform in platforms
+        }
+        variants = _variant_matrix(params_by_platform[platforms[0]]["policy"], body)
+        matrix = [(target, platform, variant)
+                  for target in targets for platform in platforms for variant in variants]
+        if len(matrix) > settings.max_tasks_per_request:
             raise ImageError("IMG_BATCH_TOO_LARGE",
                              f"一次最多创建 {settings.max_tasks_per_request} 个任务，"
-                             f"当前颜色×平台×变体共 {len(targets)} 个")
+                             f"当前颜色×平台×变体共 {len(matrix)} 个")
 
-        planned_images = params["image_count"] * len(targets)
+        base_params = params_by_platform[platforms[0]]
+        planned_images = base_params["image_count"] * len(matrix)
         with session_scope() as session:
             from app.agents_image.store import quota as quota_store
 
@@ -294,10 +303,13 @@ async def create_tasks(request: Request) -> JSONResponse:
             batch_id = new_batch_id()
             created: list[dict] = []
             first_slots: list[dict] = []
-            for target in targets:
+            for target, platform, variant in matrix:
+                params = params_by_platform[platform]
                 state = ImageTaskState(
                     prompt=prompt, aspect=params["aspect"], count=params["image_count"],
                     compositions=params["compositions"], scene_styles=params["scene_styles"],
+                    platform=platform, variant_id=variant.get("id", ""),
+                    variant_direction=variant.get("hint", "") or variant.get("label", ""),
                     refs=resolution.refs_of(target.color_key),
                 )
                 state.slots = [SlotPlan(**item) for item in plan_slots.build_slots(
@@ -312,7 +324,8 @@ async def create_tasks(request: Request) -> JSONResponse:
                     session, task_id=new_task_id(), username=user.username,
                     department=user.department, batch_id=batch_id,
                     product_id=target.product_id, color_key=target.color_key,
-                    prompt=prompt, platform=params["platform"], aspect=params["aspect"],
+                    variant_id=state.variant_id,
+                    prompt=prompt, platform=platform, aspect=params["aspect"],
                     n=params["image_count"],
                     ref_asset_ids=resolution.asset_ids_of(target.color_key),
                     compositions=params["compositions"], scene_styles=params["scene_styles"],
@@ -325,6 +338,8 @@ async def create_tasks(request: Request) -> JSONResponse:
                 asset_store.bind_refs_to_task(session, task.ref_asset_ids, task.task_id)
                 created.append({"task_id": task.task_id, "product_id": target.product_id,
                                 "color": target.color, "color_key": target.color_key,
+                                "platform": platform, "variant_id": state.variant_id,
+                                "variant_direction": state.variant_direction,
                                 "status": task.status,
                                 "refs": len(task.ref_asset_ids),
                                 "image_count": task.image_count,
@@ -332,10 +347,14 @@ async def create_tasks(request: Request) -> JSONResponse:
                 first_slots = first_slots or [item.model_dump() for item in state.slots]
             payload = {
                 "batch_id": batch_id, "tasks": created, "slots": first_slots,
-                "slot_count": params["slot_count"], "image_count": params["image_count"],
+                "platforms": platforms,
+                "variants": [item.get("id", "") for item in variants],
+                "slot_count": base_params["slot_count"],
+                "image_count": base_params["image_count"],
                 "limits": {"max_refs": settings.max_refs,
                            "refs_per_item": settings.refs_per_item,
                            "max_batch_products": settings.max_batch_products,
+                           "max_tasks_per_request": settings.max_tasks_per_request,
                            "refs_truncated": resolution.truncated},
                 "planned_images": planned_images,
                 "trace_id": trace, "idempotent": False,
@@ -414,6 +433,53 @@ async def _resolve_targets(catalog, body: dict, product_ids: list[str]) -> list[
     if not targets:
         raise ImageError("IMG_INPUT_INVALID", "没有可出图的目标（商品没有颜色/参考图）")
     return targets
+
+
+def _platform_list(body: dict) -> list[str]:
+    """平台列表（M5）：单平台、多平台双套（platforms）或 platform_variant 开关。
+
+    平台标识统一用 `淘系` / `抖系`；`通用` 只作为中台兜底规则，不作为出图平台。
+    """
+    explicit = [str(item).strip() for item in (body.get("platforms") or []) if str(item).strip()]
+    single = str(body.get("platform") or "").strip()
+    if explicit:
+        chosen = _dedupe(explicit)
+    elif single:
+        chosen = [single]
+    elif body.get("platform_variant"):
+        chosen = ["淘系", "抖系"]
+    else:
+        chosen = ["淘系"]
+    allowed = {"淘系", "抖系"}
+    unknown = [item for item in chosen if item not in allowed]
+    if unknown:
+        raise ImageError(
+            "IMG_INPUT_INVALID",
+            "不支持的平台：" + "、".join(unknown) + "（可选：" + "、".join(sorted(allowed)) + "）")
+    return chosen
+
+
+def _variant_matrix(policy, body: dict) -> list[dict]:
+    """mode=standard/variant/iterate → 变体列表（variant 输出 A/B 两套差异化方案）。"""
+    mode = str(body.get("mode") or "standard").strip().lower()
+    if mode not in {"standard", "variant", "iterate"}:
+        raise ImageError(
+            "IMG_INPUT_INVALID",
+            "不支持的 mode：" + mode + "（可选 standard / variant / iterate）")
+    if mode == "iterate":
+        return [{"id": "", "label": "只改主图", "hint": "只重做主图，其余图位沿用历史成品"}]
+    if mode != "variant":
+        return [{"id": "", "label": "", "hint": ""}]
+    directions = list(getattr(policy, "variant_directions", []) or [])
+    if not directions:
+        directions = [
+            {"id": "A", "label": "版型优先", "hint": "主图突出版型与轮廓"},
+            {"id": "B", "label": "面料优先", "hint": "主图突出面料质感与细节"},
+        ]
+    return [{"id": str(item.get("id") or ("V" + str(index + 1))),
+             "label": str(item.get("label") or ""),
+             "hint": str(item.get("hint") or "")}
+            for index, item in enumerate(directions[:2])]
 
 
 def _attrs_for_target(base_attrs: dict, target) -> dict:

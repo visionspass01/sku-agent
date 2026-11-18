@@ -114,7 +114,7 @@ class SlotSpec(BaseModel):
 
 
 class PlanPolicy(BaseModel):
-    """9 图位框架 + 默认张数 + 默认构图/场景风格（全部来自中台）。"""
+    """9 图位框架 + 默认张数 + 默认构图/场景风格 + 差异化方向（全部来自中台）。"""
 
     model_config = ConfigDict(extra="ignore")
 
@@ -125,9 +125,15 @@ class PlanPolicy(BaseModel):
     default_scene_style_id: str = ""
     default_composition_label: str = ""
     default_scene_style_label: str = ""
+    # M5：variant 差异化方向（同款多店铺/多链接测试用），A/B 两套主图方向不同
+    variant_directions: list[dict] = Field(default_factory=list)
+    # M5：图内文案表（按图位/角色给字数上限；平台是否允许文字由 PlatformRules.copy_policy 决定）
+    copy_table: dict = Field(default_factory=dict)
 
 
 class PlatformRules(BaseModel):
+    """平台规则卡：尺寸/背景/禁用词，以及 **copy_policy（图内文字）** 与质量阈值。"""
+
     model_config = ConfigDict(extra="ignore")
 
     platform: str = "淘系"
@@ -138,6 +144,26 @@ class PlatformRules(BaseModel):
     text_allowed: bool = True
     forbidden_words: list[str] = Field(default_factory=list)
     notes: str = ""
+    # 图内文案策略（M5）：淘系允许主图叠字，抖系主图禁营销文字——这是硬冲突，不是偏好
+    copy_policy: dict = Field(default_factory=dict)
+    # 像素门禁阈值（M5）：与 scripts/check_image.py 的平台阈值保持同源
+    compliance: dict = Field(default_factory=dict)
+
+    @property
+    def headline_allowed(self) -> bool:
+        return bool((self.copy_policy or {}).get("headline_allowed", self.text_allowed))
+
+    @property
+    def max_headline_words(self) -> int:
+        return int((self.copy_policy or {}).get("max_headline_words", 4) or 4)
+
+    @property
+    def max_subhead_words(self) -> int:
+        return int((self.copy_policy or {}).get("max_subhead_words", 7) or 7)
+
+    @property
+    def max_text_area_pct(self) -> int:
+        return int((self.copy_policy or {}).get("max_area_pct", 20) or 20)
 
 
 @runtime_checkable

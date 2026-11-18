@@ -18,7 +18,8 @@ from app.core.errors import raise_image
 
 _EXT = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}
 # kind → 子目录名（与 settings.*_dir 保持一致：refs / outputs / thumbnails）
-_KIND_DIR = {"ref": "refs", "output": "outputs", "thumb": "thumbnails"}
+_KIND_DIR = {"ref": "refs", "output": "outputs", "thumb": "thumbnails",
+             "blocked": "blocked"}   # blocked：门禁不过的图（留档排查/人工放行）
 
 
 class LocalStore:

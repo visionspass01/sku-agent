@@ -19,8 +19,8 @@ from app.agents_image import metrics
 from app.agents_image import registry as reg_mod
 from app.agents_image.config import get_image_settings
 from app.agents_image.generator import handler as generator_handler
+from app.agents_image.nodes import compliance, plan_slots, reflexion, understand, validate
 from app.agents_image.nodes import critic as critic_mod
-from app.agents_image.nodes import plan_slots, reflexion, understand, validate
 from app.agents_image.state import CriticResult, ImageTaskState, RefImage, SlotPlan
 from app.agents_image.storage.image_storage import get_storage
 from app.agents_image.store import assets as asset_store
@@ -141,9 +141,11 @@ async def execute_task(task_id: str) -> ImageTaskState:
         state.warnings.append("IMG_SCHEMA_INVALID: 任务缺少中台商品属性，已退回启发式抽取")
 
     rules = await _platform_rules(state)
+    policy = await _plan_policy(state)
     state.touch("compose_prompt")
     fragments = _recall_for_slots(state, settings)
-    all_drafts = plan_slots.compose(state, registry, rules=rules, fragments=fragments)
+    all_drafts = plan_slots.compose(state, registry, rules=rules, policy=policy,
+                                    fragments=fragments)
     state.touch("validate")
     validate.degrade_note(state)
     validate.validate(state, settings=settings)
@@ -225,9 +227,29 @@ async def execute_task(task_id: str) -> ImageTaskState:
             metrics.record_task_failed()
             state.touch("canceled", attempted=attempted)
             return state
+        blocked: list[dict] = []
         for image in images:
+            role = _role_of(state, image.slot)
+            # M5：交付前像素门禁（主图 blocking；autofix 先归白/裁方再复检）
+            verdict = compliance.gate(
+                image.data, slot=image.slot, role=role, platform_rules=rules,
+                gate_mode=str(getattr(settings, "compliance_gate", "main") or "main"),
+                autofix=bool(getattr(settings, "compliance_autofix", True)),
+            )
+            if not verdict.passed:
+                asset_store.save_bytes(
+                    session, verdict.data, kind="blocked", mime=image.mime or "image/png",
+                    task_id=task_id, slot=image.slot,
+                    username=task.username, department=task.department,
+                    blocked_reason=("; ".join(verdict.reasons))[:60],
+                )
+                blocked.append({"slot": image.slot, "reasons": list(verdict.reasons)})
+                state.warnings.append(
+                    "IMG_CONTENT_BLOCKED: 图位 "
+                    f"{image.slot}（{role or '-'}）像素门禁未通过：" + "; ".join(verdict.reasons))
+                continue
             asset = asset_store.save_bytes(
-                session, image.data, kind="output", mime=image.mime or "image/png",
+                session, verdict.data, kind="output", mime=image.mime or "image/png",
                 task_id=task_id, slot=image.slot,
                 username=task.username, department=task.department,
             )
@@ -239,7 +261,12 @@ async def execute_task(task_id: str) -> ImageTaskState:
                     "sha256": asset.sha256, "width": asset.width,
                     "height": asset.height, "bytes": asset.bytes,
                     "storage": asset.storage, "key": asset.key,
+                    "gate_fixed": bool(verdict.fixed),
                 })
+        if blocked and delivered == 0:
+            reasons = "；".join(
+                f"图位 {item['slot']}：{'、'.join(item['reasons'])}" for item in blocked[:2])
+            raise ImageError("IMG_CONTENT_BLOCKED", f"所有出图都未通过平台像素门禁：{reasons}")
         # 成本口径（P0-5）：一律用 **provider 返回的真实计费**，不再用配置单价估
         for item in image_costs:
             external_cost += float(item or 0.0)
@@ -323,6 +350,13 @@ def _planned_of(session, task_id: str) -> int:
     if task is None:
         return 0
     return int(getattr(task, "image_count", 0) or getattr(task, "n", 0) or 0)
+
+
+async def _plan_policy(state: ImageTaskState):
+    """取中台图位策略（含 copy_table / variant_directions）；不可用同样直接失败（P1-1）。"""
+    from app.agents_image.sources.product_source import get_catalog
+
+    return await get_catalog().get_plan_policy(platform=state.platform)
 
 
 async def _backfill(state: ImageTaskState, *, outputs_by_slot: list[dict]) -> str:

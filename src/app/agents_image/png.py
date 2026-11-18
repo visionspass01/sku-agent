@@ -46,4 +46,27 @@ def placeholder_png(seed: str, width: int = 512, height: int = 512, *,
     return encode_png(width, height, bytes(rows))
 
 
-__all__ = ["encode_png", "placeholder_png"]
+def placeholder_compliant_png(seed: str, width: int = 1024, height: int = 1024) -> bytes:
+    """**合规的**占位图：纯白背景 + 居中主体矩形（占画面 ~60%）+ 四周留白。
+
+    FakeProvider 用它出图，这样「交付前像素门禁」也能在离线环境被真实走到：
+    白底纯度、主体占比、留白都在平台阈值内；真实 provider 出图后再由门禁判真假。
+    """
+    digest = hashlib.sha256(seed.encode("utf-8")).digest()
+    subject = (digest[0] % 96 + 60, digest[1] % 96 + 60, digest[2] % 96 + 60)
+    left, right = int(width * 0.2), int(width * 0.8)
+    top, bottom = int(height * 0.2), int(height * 0.8)
+    stripe = digest[3] % 32
+    rows = bytearray()
+    for y in range(height):
+        for x in range(width):
+            if left <= x < right and top <= y < bottom:
+                v = (x + y + stripe) % 48
+                rows += bytes((min(255, subject[0] + v), min(255, subject[1] + (v // 2)),
+                               min(255, subject[2] + (v // 3))))
+            else:
+                rows += bytes((255, 255, 255))
+    return encode_png(width, height, bytes(rows))
+
+
+__all__ = ["encode_png", "placeholder_png", "placeholder_compliant_png"]

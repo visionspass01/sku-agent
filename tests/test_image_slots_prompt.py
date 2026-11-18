@@ -106,9 +106,12 @@ def test_compose_applies_seven_rules(policy, rules):
     assert "颜色" in prompt and "版型" in prompt
     # ⑤ 主图预留平台角标区
     assert "平台角标" in prompt
-    # ⑥ 图内文字策略按图位不同
+    # ⑥ 图内文字策略按图位不同（M5：文案由 copywriter 生成，带字数）
     assert "不生成任何文字" in drafts[0].prompt
-    assert "主标语 ≤4 词" in drafts[1].prompt
+    assert drafts[1].copy_spec["allowed"] is True
+    assert drafts[1].copy_spec["headline"]
+    assert drafts[1].copy_spec["char_count"] <= drafts[1].copy_spec["limit"]
+    assert "主标语" in drafts[1].prompt
     # 平台禁用词按"规则卡 N 项"表述，不能把词本身写进 Prompt（否则评审会自伤）
     assert "平台规则卡禁止词" in first.negative_prompt
     assert "全网最低价" not in prompt and "国家级" not in prompt

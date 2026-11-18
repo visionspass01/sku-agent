@@ -2,15 +2,16 @@
 
 诚实性约定：输出是**占位图**，不是真实图生图结果——
 - 内容由「参考图 sha256 + prompt + seed」派生，同输入必然同输出（便于断言）；
-- 左上角画一块棋盘标记（代表 "FAKE"），右下角画边框，肉眼一眼能看出不是真图；
-- `meta={"placeholder": True}`，任务详情里也标出来，绝不冒充真图。
+- 画面是"纯白背景 + 居中主体色块"，**刻意满足平台像素门禁**（白底纯度/主体占比/留白），
+  这样离线测试也能真实走到"交付前合规门禁"这一步；它是占位图，不冒充真图；
+- `meta={"placeholder": True}`，任务详情里也标出来。
 """
 
 from __future__ import annotations
 
 import time
 
-from app.agents_image.png import placeholder_png
+from app.agents_image.png import placeholder_compliant_png
 from app.agents_image.providers.image_provider import (
     ImageRequest,
     ImageResult,
@@ -22,7 +23,7 @@ from app.agents_image.providers.image_provider import (
 def _make_image(req: ImageRequest) -> bytes:
     seed_src = (req.init_images[0].sha256 if req.init_images else "") + req.prompt + \
                str(req.seed if req.seed is not None else 0)
-    return placeholder_png(seed_src, int(req.width), int(req.height))
+    return placeholder_compliant_png(seed_src, int(req.width), int(req.height))
 
 
 class FakeProvider:

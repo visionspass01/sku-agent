@@ -59,6 +59,10 @@ class ImageSettings(BaseSettings):
     default_quota_images: int = Field(default=50, ge=0, le=100000)
     quota_period_key_rollover: bool = True
 
+    # ---- 交付前像素门禁（M5）----
+    compliance_gate: str = "main"          # main（只拦主图）| all（所有出图图位）| off
+    compliance_autofix: bool = True        # 不过时先归白/裁方/放大再复检
+
     # ---- 质量与成本 ----
     critic_pass_score: int = Field(default=75, ge=0, le=100)
     reflexion_max_rounds: int = Field(default=2, ge=0, le=5)

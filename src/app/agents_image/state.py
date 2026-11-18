@@ -52,6 +52,7 @@ class PromptDraft(BaseModel):
     margin_percent: int = 8       # 铁律③：留白显式声明
     text_policy: str = "none"     # none | headline | spec
     fragments: list[str] = Field(default_factory=list)   # RAG 命中的写法片段
+    copy_spec: dict = Field(default_factory=dict)        # 图内文案（headline/subhead/badge/字数）
 
 
 class GeneratedImage(BaseModel):
@@ -89,6 +90,8 @@ class ImageTaskState(BaseModel):
     prompt: str = ""
     prompt_final: str = ""
     platform: str = "淘系"
+    variant_id: str = ""          # A/B（同款多店铺差异化）
+    variant_direction: str = ""   # 该变体的主图方向（如"版型优先"）
     aspect: str = "1:1"
     count: int = 1
     compositions: list[str] = Field(default_factory=list)

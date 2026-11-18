@@ -18,7 +18,7 @@ def save_bytes(session, data: bytes, *, kind: str, mime: str = "",
                task_id: str | None = None, slot: int = 0,
                username: str = "anonymous", department: str | None = None,
                product_id: str | None = None, color_key: str = "",
-               source: str = "mcp") -> ImageAsset:
+               source: str = "mcp", blocked_reason: str = "") -> ImageAsset:
     """落盘并入库；参考图按 `(sha256, 账号, 商品)` 去重，产出按 task 独立成行。"""
     storage = get_storage()
     ref = storage.put(data, kind=kind, mime=mime)
@@ -39,6 +39,7 @@ def save_bytes(session, data: bytes, *, kind: str, mime: str = "",
         asset_id=uuid.uuid4().hex, task_id=task_id, slot=slot,
         username=username, department=department, product_id=product_id,
         color_key=color_key or "",
+        blocked_reason=blocked_reason or "",
         kind=kind, source=source, sha256=ref.sha256,
         storage=ref.storage, key=ref.key, mime=ref.mime,
         width=ref.width, height=ref.height, bytes=ref.bytes,
