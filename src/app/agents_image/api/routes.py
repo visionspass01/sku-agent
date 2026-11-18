@@ -54,10 +54,11 @@ def image_health() -> dict:
         "providers_registered": providers(),
         "product_source": settings.product_source,
         "product_sources_registered": registered_catalogs(),
-        "vision_provider": settings.vision_provider,
         "storage": settings.storage,
         "dispatcher": settings.dispatcher,
         "concurrency": settings.concurrency,
+        "provider_concurrency": settings.provider_concurrency,
+        "provider_in_flight": _provider_in_flight(),
         "max_refs": settings.max_refs,
         "max_batch_products": settings.max_batch_products,
         "secret_is_default": settings.secret_is_default,
@@ -65,6 +66,16 @@ def image_health() -> dict:
         "degraded_reason": "",
         **metrics.snapshot(),
     }
+
+
+def _provider_in_flight() -> int:
+    """当前在途的第三方生图调用数（进程内视图；面板同时给 DB 侧 running 任务数）。"""
+    try:
+        from app.agents_image.generator import handler as generator_handler
+
+        return generator_handler.provider_in_flight()
+    except Exception:  # noqa: BLE001
+        return 0
 
 
 @router.get("/products")
@@ -253,6 +264,14 @@ async def create_tasks(request: Request) -> JSONResponse:
             raise ImageError("IMG_QUOTA_EXCEEDED",
                              f"配额不足：本期（{quota['period_type']}）剩余 {quota['remaining']} 张，"
                              f"本次需要 {planned_images} 张", retryable=False)
+
+        # 预算闸（P1-8）：用配置单价做**事前估算**；真实计费以 provider 返回为准（P0-5）
+        estimated_cost = round(float(settings.cost_per_image_cny) * planned_images, 4)
+        if settings.cost_budget_cny and estimated_cost > float(settings.cost_budget_cny):
+            raise ImageError("IMG_COST_BUDGET_EXCEEDED",
+                             f"单次请求成本估算 ¥{estimated_cost} 超过预算上限 "
+                             f"¥{settings.cost_budget_cny}（{planned_images} 张）；"
+                             "请减少张数/颜色，或调大 IMAGE_COST_BUDGET_CNY", retryable=False)
 
         with session_scope() as session:
             from app.agents_image.store import quota as quota_store

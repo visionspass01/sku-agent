@@ -153,6 +153,8 @@ def totals(session, *, username: str | None = None) -> dict:
         "failed": sum(int(row.failed or 0) for row in rows),
         "cost_cny": round(sum(float(row.cost_cny or 0.0) for row in rows), 4),
         "tokens": sum(int(row.tokens or 0) for row in rows),
+        "adopted": sum(int(row.adopted or 0) for row in rows),
+        "rejected": sum(int(row.rejected or 0) for row in rows),
     }
 
 

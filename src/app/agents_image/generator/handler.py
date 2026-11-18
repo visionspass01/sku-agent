@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -13,6 +14,45 @@ from app.agents_image.providers.image_provider import ImageInput, ImageRequest, 
 from app.core.errors import ImageError
 
 logger = logging.getLogger("sku-agent.image.generator")
+
+# 第三方生图 API 的**全局并发上限**（默认 10）：保护对方限流与自身成本，
+# 与任务并发（IMAGE_CONCURRENCY）分开——任务并发高不代表要同时压 10+ 个外部请求。
+_semaphore: asyncio.Semaphore | None = None
+_semaphore_loop: Any = None
+
+
+def _provider_semaphore() -> asyncio.Semaphore:
+    global _semaphore, _semaphore_loop
+    from app.agents_image.config import get_image_settings
+
+    try:
+        loop: Any = asyncio.get_running_loop()
+    except RuntimeError:  # pragma: no cover
+        loop = None
+    if _semaphore is None or _semaphore_loop is not loop:
+        limit = max(1, int(getattr(get_image_settings(), "provider_concurrency", 10) or 10))
+        _semaphore = asyncio.Semaphore(limit)
+        _semaphore_loop = loop
+    return _semaphore
+
+
+def provider_in_flight() -> int:
+    """当前在途的第三方调用数（health / 面板用）。"""
+    from app.agents_image.config import get_image_settings
+
+    sem = _semaphore
+    if sem is None:
+        return 0
+    limit = getattr(sem, "_value", 0)
+    total = int(getattr(get_image_settings(), "provider_concurrency", 10) or 10)
+    return max(0, total - int(limit))
+
+
+def reset_provider_semaphore() -> None:
+    """测试用：清掉信号量（换事件循环时必须重建）。"""
+    global _semaphore, _semaphore_loop
+    _semaphore = None
+    _semaphore_loop = None
 
 
 async def run(payload: dict[str, Any]) -> dict[str, Any]:
@@ -39,7 +79,8 @@ async def run(payload: dict[str, Any]) -> dict[str, Any]:
             seed=payload.get("seed"),
             preserve=list(payload.get("preserve") or []),
         )
-        result = await provider.generate(request)
+        async with _provider_semaphore():
+            result = await provider.generate(request)
         results.append({
             "slot": int(slot.get("slot") or 1),
             "images": result.images,

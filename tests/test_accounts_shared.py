@@ -99,13 +99,13 @@ def test_create_user_validation_and_listing(db):
     from app.db.engine import session_scope
 
     with session_scope() as session:
-        accounts.create_user(session, username="worker9", password="hhw999",
+        accounts.create_user(session, username="worker-acc-1", password="hhw999",
                              department="男装", display_name="测试")
         with pytest.raises(ImageError):
-            accounts.create_user(session, username="worker9", password="x" * 8)
+            accounts.create_user(session, username="worker-acc-1", password="x" * 8)
         rows = {row["username"]: row for row in accounts.list_users(session)}
-    assert rows["worker9"]["department"] == "男装"
-    assert rows["worker9"]["enabled"] is True
+    assert rows["worker-acc-1"]["department"] == "男装"
+    assert rows["worker-acc-1"]["enabled"] is True
 
 
 def test_image_user_legacy_table_is_migrated(db):

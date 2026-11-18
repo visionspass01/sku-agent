@@ -30,9 +30,10 @@ router = APIRouter(tags=["image-admin"])   # 由 `api/routes.py` 以 `/api/image
 
 
 async def _runtime_snapshot() -> dict:
-    """进程内计数 + 在途图片 + RAG 缓存命中（面板的 5 张卡靠它）。"""
+    """**本实例**的运行时视图（多副本部署时只能代表当前进程，面板会明确标注）。"""
     from app.agents_image import metrics as image_metrics
     from app.agents_image.dispatch.task_dispatcher import get_dispatcher
+    from app.agents_image.generator import handler as generator_handler
     from app.agents_image.rag import index as rag_index
 
     snapshot = image_metrics.snapshot()
@@ -40,31 +41,53 @@ async def _runtime_snapshot() -> dict:
         in_flight = int(getattr(get_dispatcher(), "in_flight", 0) or 0)
     except Exception:  # noqa: BLE001
         in_flight = snapshot.get("in_flight_images", 0)
-    return {"counters": snapshot, "in_flight": in_flight,
+    return {"scope": "instance", "counters": snapshot, "in_flight": in_flight,
+            "provider_in_flight": generator_handler.provider_in_flight(),
             "rag_cache": rag_index.cache_stats()}
 
 
 def _cards(session, *, runtime: dict) -> dict:
-    from sqlalchemy import select
+    """五张卡：**全部从 DB 聚合**（多副本也一致），只有"在途"标注为本实例。"""
+    from sqlalchemy import func, select
 
     from app.agents_image.store.models import ImageTask
 
     totals = usage_store.totals(session)
-    rows = session.execute(select(ImageTask)).scalars().all()
-    done = [row for row in rows if row.status == "done"]
-    first_pass = [row for row in done if int(row.attempts or 1) <= 1]
+
+    def _count(status: str) -> int:
+        return int(session.execute(
+            select(func.count()).select_from(ImageTask)
+            .where(ImageTask.status == status)).scalar_one() or 0)
+
+    done_total = _count("done")
+    failed_total = _count("failed")
+    running_db = _count("running")
+    first_pass = int(session.execute(
+        select(func.count()).select_from(ImageTask)
+        .where(ImageTask.status == "done", ImageTask.attempts <= 1)).scalar_one() or 0)
+    delivered_sum = float(session.execute(
+        select(func.coalesce(func.sum(ImageTask.delivered_images), 0))).scalar_one() or 0)
+    attempted_sum = float(session.execute(
+        select(func.coalesce(func.sum(ImageTask.attempted_images), 0))).scalar_one() or 0)
+    cost_sum = float(session.execute(
+        select(func.coalesce(func.sum(ImageTask.external_cost_cny), 0))).scalar_one() or 0)
     cache = runtime.get("rag_cache") or {}
     return {
         "cache_hit_rate": cache.get("hit_rate", 0.0),
-        "llm_calls": 0,                      # 生图链路目前不调 LLM（D16 接 rubric 后再统计）
+        "llm_calls": 0,                      # 生图链路目前不调 LLM（rubric 后置）
         "llm_tokens": int(totals.get("tokens") or 0),
         "in_flight_images": int(runtime.get("in_flight") or 0),
-        "images_delivered": int(totals.get("images") or 0),
-        "images_attempted": int(totals.get("images_attempted") or 0),
-        "first_pass_rate": round(len(first_pass) / len(done), 4) if done else 0.0,
-        "tasks_done": len(done),
-        "tasks_failed": sum(1 for row in rows if row.status == "failed"),
-        "cost_cny": totals.get("cost_cny", 0.0),
+        "in_flight_scope": "instance",
+        "tasks_running_db": running_db,      # DB 侧真实在跑（跨副本）
+        "provider_in_flight": int(runtime.get("provider_in_flight") or 0),
+        "images_delivered": int(delivered_sum),
+        "images_attempted": int(attempted_sum),
+        "adopted": int(totals.get("adopted") or 0),
+        "rejected": int(totals.get("rejected") or 0),
+        "first_pass_rate": round(first_pass / done_total, 4) if done_total else 0.0,
+        "tasks_done": done_total,
+        "tasks_failed": failed_total,
+        "cost_cny": round(cost_sum, 4),
     }
 
 

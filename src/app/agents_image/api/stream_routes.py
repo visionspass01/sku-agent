@@ -24,7 +24,7 @@ from app.db.engine import session_scope
 
 router = APIRouter(tags=["image-stream"])
 _TERMINAL = {"done", "failed", "canceled"}
-_POLL_SECONDS = 0.3
+_POLL_SECONDS = 3.0   # P1-7：图片场景对时延不敏感，3s 轮询把 DB 压力降一个数量级
 _KEEPALIVE_SECONDS = 10
 _MAX_STREAM_SECONDS = 120
 

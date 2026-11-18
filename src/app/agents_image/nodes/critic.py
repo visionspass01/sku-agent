@@ -46,9 +46,15 @@ def _expected_ratio(aspect: str) -> float:
 
 
 def critique(state: ImageTaskState, drafts: list[PromptDraft], images: list[CheckedImage],
-             *, settings=None, rules=None) -> CriticResult:
-    """返回 CriticResult（score / issues / blocking 摘要），不抛异常。"""
-    pass_score = int(getattr(settings, "critic_pass_score", 75) or 75)
+             *, settings=None, rules=None, manifest: dict | None = None) -> CriticResult:
+    """返回 CriticResult（score / issues / blocking 摘要），不抛异常。
+
+    通过线与 blocking 规则优先取 manifest（`IMAGE_CRITIC_PASS_SCORE` 仍是兜底），
+    这样调阈值不用改代码（P1-8：manifest.critic 段以前从未被读取）。
+    """
+    critic_cfg = dict((manifest or {}).get("critic") or {})
+    pass_score = int(critic_cfg.get("pass_score")
+                     or getattr(settings, "critic_pass_score", 75) or 75)
     issues: list[str] = []
     blocking: list[str] = []
     score = 100

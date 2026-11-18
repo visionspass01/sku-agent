@@ -47,16 +47,14 @@ def _load_refs(session, ref_ids: list[str]) -> list[dict]:
 
 
 async def _platform_rules(state: ImageTaskState):
-    """执行期尽量取平台规则（图内文字/禁用词/大小限制）；中台不可用只记 warning，
-    因为任务创建阶段已经校验过参数，这里失败不该让已交付的图作废。"""
-    try:
-        from app.agents_image.sources.product_source import get_catalog
+    """取平台规则（图内文字/禁用词/大小限制）。
 
-        return await get_catalog().get_platform_rules(platform=state.platform)
-    except Exception as exc:  # noqa: BLE001
-        logger.info("执行期取平台规则失败（用 manifest 默认）：%s", exc)
-        state.warnings.append(f"IMG_UPSTREAM_MCP_UNAVAILABLE: 执行期取平台规则失败（{type(exc).__name__}）")
-        return None
+    P1-1：执行期与创建期保持**同一口径**——中台不可用就失败（不再 fail-open 用默认规则出图），
+    否则同一套参数在两条路径上语义不一致，且可能用错平台的图内文字/白底规则。
+    """
+    from app.agents_image.sources.product_source import get_catalog
+
+    return await get_catalog().get_platform_rules(platform=state.platform)
 
 
 def _recall_for_slots(state: ImageTaskState, settings) -> dict[int, list[str]]:
@@ -186,7 +184,8 @@ async def execute_task(task_id: str) -> ImageTaskState:
         images = _collect_images(result)
         attempted += len(images)
         state.touch("critic", attempt=attempt, images=len(images))
-        critic = critic_mod.critique(state, current, images, settings=settings, rules=rules)
+        critic = critic_mod.critique(state, current, images, settings=settings, rules=rules,
+                                     manifest=registry.manifest)
         if critic.passed:
             break
         signature = critic_mod.failure_signature(state, critic)

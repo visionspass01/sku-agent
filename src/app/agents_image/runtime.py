@@ -14,6 +14,7 @@ from app.core import health as health_registry
 logger = logging.getLogger("sku-agent.image.runtime")
 
 _cleanup_task: asyncio.Task | None = None
+_recovery_task: asyncio.Task | None = None
 
 
 def health_block() -> dict:
@@ -23,7 +24,6 @@ def health_block() -> dict:
         "enabled": bool(settings.enabled),
         "provider": settings.provider,
         "product_source": settings.product_source,
-        "vision_provider": settings.vision_provider,
         "storage": settings.storage,
         "dispatcher": settings.dispatcher,
         "concurrency": settings.concurrency,
@@ -37,16 +37,21 @@ def health_block() -> dict:
 
 
 def sweep_local_files(now: dt.datetime | None = None) -> dict:
-    """删除本地存储里过期的参考图/产出（本地存储 = 24h 保留）。"""
+    """删除本地存储里过期的参考图/产出（本地存储 = 24h 保留），并**同步标记资产行**。
+
+    P1-4：只删文件不删资产行会造成"任务详情里有一张图、打开 404"的不一致，
+    这里把对应 `image_asset` 行标 `purged_at`（保留审计线索，接口返回 purged=true）。
+    """
     settings = get_image_settings()
     if settings.storage.strip().lower() != "local":
-        return {"removed": 0, "skipped": "storage!=local"}
+        return {"removed": 0, "purged": 0, "skipped": "storage!=local"}
     reference = now or dt.datetime.now()
+    cutoff = reference - dt.timedelta(hours=settings.retention_hours)
     removed = 0
+    purged_keys: list[str] = []
     for directory in (settings.refs_dir, settings.outputs_dir, settings.thumbs_dir):
         if not directory.exists():
             continue
-        cutoff = reference - dt.timedelta(hours=settings.retention_hours)
         for path in directory.glob("*"):
             if not path.is_file():
                 continue
@@ -58,9 +63,44 @@ def sweep_local_files(now: dt.datetime | None = None) -> dict:
                 try:
                     path.unlink()
                     removed += 1
+                    purged_keys.append(f"{directory.name}/{path.name}")
                 except OSError:  # pragma: no cover —— 权限/占用
                     logger.warning("清理文件失败：%s", path)
-    return {"removed": removed}
+    purged = _mark_purged(purged_keys, reference) if purged_keys else 0
+    return {"removed": removed, "purged": purged}
+
+
+def _mark_purged(keys: list[str], moment: dt.datetime) -> int:
+    """把已删文件的资产行标 purged_at（按 storage key 匹配）。"""
+    try:
+        from sqlalchemy import update
+
+        from app.agents_image.store.models import ImageAsset
+        from app.db.engine import session_scope
+
+        with session_scope() as session:
+            result = session.execute(
+                update(ImageAsset)
+                .where(ImageAsset.key.in_(keys), ImageAsset.purged_at.is_(None))
+                .values(purged_at=moment)
+            )
+            return int(result.rowcount or 0)
+    except Exception as exc:  # noqa: BLE001 —— 标记失败不影响清理
+        logger.warning("标记已清理资产失败：%s", exc)
+        return 0
+
+
+def sweep_tokens(now: dt.datetime | None = None) -> int:
+    """清理过期的令牌黑名单（P1-8：以前这个方法没有任何调用点，表只增不减）。"""
+    try:
+        from app.agents_image.store import tokens as token_store
+        from app.db.engine import session_scope
+
+        with session_scope() as session:
+            return token_store.sweep(session, now)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("清理令牌黑名单失败：%s", exc)
+        return 0
 
 
 async def _cleanup_loop(interval_seconds: int) -> None:
@@ -68,12 +108,33 @@ async def _cleanup_loop(interval_seconds: int) -> None:
         try:
             await asyncio.sleep(interval_seconds)
             result = sweep_local_files()
-            if result.get("removed"):
-                logger.info("本地图片清理：%s", result)
+            expired_tokens = sweep_tokens()
+            if result.get("removed") or expired_tokens:
+                logger.info("本地清理：文件 %s 个，令牌 %s 条", result.get("removed"),
+                            expired_tokens)
         except asyncio.CancelledError:  # pragma: no cover —— 关机时正常退出
             raise
         except Exception as exc:  # noqa: BLE001 —— 清理失败不影响服务
             logger.warning("图片清理任务异常：%s", exc)
+
+
+async def _recovery_loop(interval_seconds: int) -> None:
+    """看门狗（P1-5）：周期性重新拾起 queued / 租约过期的 running 任务。
+
+    之前只在启动时扫一次：运行期崩溃留下的 running（启动后 60s 内的）永远不会被恢复。
+    """
+    from app.agents_image.dispatch.task_dispatcher import get_dispatcher
+
+    while True:
+        try:
+            await asyncio.sleep(interval_seconds)
+            resumed = await get_dispatcher().resume_pending()
+            if resumed:
+                logger.info("看门狗续跑任务：%d 个（%s）", len(resumed), resumed[:5])
+        except asyncio.CancelledError:  # pragma: no cover
+            raise
+        except Exception as exc:  # noqa: BLE001 —— 续跑失败不影响服务
+            logger.warning("看门狗续跑异常：%s", exc)
 
 
 async def startup() -> None:
@@ -104,11 +165,16 @@ async def startup() -> None:
     if settings.storage.strip().lower() == "local":
         for directory in (settings.refs_dir, settings.outputs_dir, settings.thumbs_dir):
             directory.mkdir(parents=True, exist_ok=True)
-    global _cleanup_task
+    global _cleanup_task, _recovery_task
     if settings.cleanup_interval_minutes > 0:
         _cleanup_task = asyncio.create_task(
             _cleanup_loop(settings.cleanup_interval_minutes * 60),
             name="image-cleanup",
+        )
+    if settings.recovery_interval_seconds > 0:
+        _recovery_task = asyncio.create_task(
+            _recovery_loop(settings.recovery_interval_seconds),
+            name="image-recovery",
         )
     # 无状态续跑：进程重启后，queued / 超时 running 的任务重新提交
     try:

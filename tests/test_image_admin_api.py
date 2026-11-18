@@ -221,19 +221,21 @@ def test_admin_tasks_list_and_detail(env):
 
 def test_admin_users_crud(env):
     headers = login(env)
+    username = "worker-crud-2"
     created = env.post("/api/image/admin/users", headers=headers,
-                       json={"username": "worker9", "password": "hhw999", "department": "男装"})
+                       json={"username": username, "password": "hhw999", "department": "男装"})
     assert created.status_code == 201, created.text
-    assert env.post("/api/image/auth/login", json={"username": "worker9",
-                                                   "password": "hhw999"}).status_code == 200
+    assert env.post("/api/image/auth/login",
+                    json={"username": username, "password": "hhw999"}).status_code == 200
 
-    updated = env.put("/api/image/admin/users/worker9", headers=headers, json={"enabled": False})
+    updated = env.put(f"/api/image/admin/users/{username}", headers=headers,
+                      json={"enabled": False})
     assert updated.status_code == 200
-    assert env.post("/api/image/auth/login", json={"username": "worker9",
-                                                   "password": "hhw999"}).status_code == 401
+    assert env.post("/api/image/auth/login",
+                    json={"username": username, "password": "hhw999"}).status_code == 401
 
     users = env.get("/api/image/admin/users", headers=headers).json()["users"]
-    assert any(item["username"] == "worker9" and item["enabled"] is False for item in users)
+    assert any(item["username"] == username and item["enabled"] is False for item in users)
 
 
 def test_admin_users_validation(env):

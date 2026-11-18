@@ -27,7 +27,6 @@ def _clean_settings(monkeypatch):
 def test_defaults_are_zero_cost_local():
     settings = get_image_settings()
     assert settings.provider == "fake"
-    assert settings.vision_provider == "fake"
     assert settings.storage == "local"
     assert settings.dispatcher == "local"
     assert settings.product_source == "fake"      # 开发默认替身；演示/生产切 mcp

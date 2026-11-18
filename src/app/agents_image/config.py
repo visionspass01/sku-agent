@@ -29,7 +29,6 @@ class ImageSettings(BaseSettings):
 
     enabled: bool = True
     provider: str = "fake"            # fake | volcengine（后期验收门启用）
-    vision_provider: str = "fake"     # fake | volcengine
     storage: str = "local"            # local | cos
     dispatcher: str = "local"         # local | scf
     product_source: str = "fake"      # fake（开发/测试替身）| mcp（经 MCP 取中台数据）
@@ -40,8 +39,10 @@ class ImageSettings(BaseSettings):
     max_tasks_per_request: int = Field(default=60, ge=1, le=200)  # 颜色×平台×变体后的任务上限
     max_batch_products: int = Field(default=5, ge=1, le=10)   # 一次批量最多选几个商品
     max_total_images: int = Field(default=9, ge=1, le=9)
-    concurrency: int = Field(default=8, ge=1, le=32)
+    concurrency: int = Field(default=8, ge=1, le=32)          # 本机任务并发
+    provider_concurrency: int = Field(default=10, ge=1, le=64)  # 调第三方生图 API 的并发上限
     timeout_seconds: int = Field(default=60, ge=5, le=600)
+    recovery_interval_seconds: int = Field(default=60, ge=0, le=3600)  # 看门狗扫描间隔（0=关）
 
     # ---- 本地存储与清理（测试环境图片保留 24h）----
     images_root: str = ""             # 空 = data/images；测试/多实例时显式覆盖
