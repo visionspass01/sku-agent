@@ -20,7 +20,11 @@ from fastapi.responses import JSONResponse, Response
 from app.agents_image import metrics
 from app.agents_image.api.admin_routes import router as admin_router
 from app.agents_image.api.auth_routes import router as auth_router
-from app.agents_image.api.common import asset_payload, error_response
+from app.agents_image.api.common import (
+    asset_payload,
+    error_response,
+    verify_asset_signature,
+)
 from app.agents_image.api.deps import require_user, trace_id_of
 from app.agents_image.api.stream_routes import router as stream_router
 from app.agents_image.config import get_image_settings
@@ -83,14 +87,24 @@ async def list_products(request: Request) -> JSONResponse:
     """商品清单（转发 MCP `image_list_products`）：前端只从这里多选，不能上传图片。"""
     trace = trace_id_of(request)
     try:
-        require_user(request)
+        user = require_user(request)
         keyword = (request.query_params.get("keyword") or "").strip()
         try:
             limit = int(request.query_params.get("limit") or 20)
         except ValueError as exc:
             raise ImageError("IMG_INPUT_INVALID", "limit 必须是整数") from exc
-        rows = await get_catalog().list_products(keyword=keyword, limit=max(1, min(limit, 100)))
-        payload = {"products": [row.model_dump() for row in rows], "trace_id": trace}
+        catalog = get_catalog()
+        rows = await catalog.list_products(keyword=keyword, limit=max(1, min(limit, 100)))
+        # 部门过滤（P2-2）：普通账号只看到本部门商品，管理员看全部
+        visible = []
+        for row in rows:
+            if not user.is_admin:
+                data = await catalog.get_product(row.product_id)
+                department = _department_of(data.category)
+                if department and user.department and department != user.department:
+                    continue
+            visible.append(row)
+        payload = {"products": [row.model_dump() for row in visible], "trace_id": trace}
     except ImageError as exc:
         return error_response(exc, trace)
     except Exception as exc:  # noqa: BLE001
@@ -315,6 +329,7 @@ async def create_tasks(request: Request) -> JSONResponse:
                 state.slots = [SlotPlan(**item) for item in plan_slots.build_slots(
                     state, policy=params["policy"], labels=params["labels"],
                     slot_count=params["slot_count"])]
+                _ensure_department(resolution.products[target.product_id], user)
                 state.attrs = _attrs_for_target(
                     resolution.products[target.product_id].attrs, target)
                 validate_node.validate(state, settings=settings)
@@ -482,6 +497,24 @@ def _variant_matrix(policy, body: dict) -> list[dict]:
             for index, item in enumerate(directions[:2])]
 
 
+
+
+def _department_of(category: str | None) -> str | None:
+    """商品类目 → 部门（与中台 DEPARTMENT_CATEGORIES 同口径：童装归女装）。"""
+    mapping = {"男装": "男装", "女装": "女装", "童装": "女装"}
+    return mapping.get((category or "").strip())
+
+
+def _ensure_department(product, user) -> None:
+    """部门隔离（P2-2）：普通账号只能出自己部门（男装 / 女装含童装）的商品。"""
+    if user.is_admin:
+        return
+    department = _department_of(getattr(product, "category", ""))
+    if department and user.department and department != user.department:
+        raise ImageError("IMG_FORBIDDEN",
+                         f"无权操作 {department} 部门的商品（当前账号：{user.department}）")
+
+
 def _attrs_for_target(base_attrs: dict, target) -> dict:
     """按颜色覆盖身份锁定字段：颜色必须锁到具体 hex，避免多色商品串色。"""
     attrs = dict(base_attrs or {})
@@ -506,10 +539,15 @@ def list_tasks(request: Request) -> JSONResponse:
         user = require_user(request)
         include_all = user.is_admin and request.query_params.get("all") in {"1", "true", "yes"}
         batch_id = (request.query_params.get("batch_id") or "").strip()
+        try:
+            limit = max(1, min(int(request.query_params.get("limit") or 50), 200))
+            offset = max(0, int(request.query_params.get("offset") or 0))
+        except ValueError as exc:
+            raise ImageError("IMG_INPUT_INVALID", "limit/offset 必须是整数") from exc
         with session_scope() as session:
             rows = task_store.list_tasks(
                 session, username=None if include_all else user.username,
-                limit=50, batch_id=batch_id or None,
+                limit=limit, offset=offset, batch_id=batch_id or None,
             )
             payload = [{"task_id": row.task_id, "batch_id": row.batch_id,
                         "product_id": row.product_id, "status": row.status,
@@ -521,6 +559,79 @@ def list_tasks(request: Request) -> JSONResponse:
     except ImageError as exc:
         return error_response(exc, trace)
     return JSONResponse(status_code=200, content={"tasks": payload, "trace_id": trace})
+
+
+@router.post("/tasks/{task_id}/assets/{asset_id}/adopt")
+async def adopt_asset(task_id: str, asset_id: str, request: Request) -> JSONResponse:
+    """采纳（正样本）：只做人工判断，成本早已按 provider 成功计入，不因驳回返还。"""
+    trace = trace_id_of(request)
+    try:
+        user = require_user(request)
+        return _verdict_response(request, task_id, asset_id, "adopted", trace, user)
+    except ImageError as exc:
+        return error_response(exc, trace)
+
+
+@router.post("/tasks/{task_id}/assets/{asset_id}/reject")
+async def reject_asset(task_id: str, asset_id: str, request: Request) -> JSONResponse:
+    """驳回（负样本）：必须给原因，原因会进 Reflexion 的候选补丁。"""
+    trace = trace_id_of(request)
+    try:
+        user = require_user(request)
+        body = {}
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001 —— 允许空 body
+            body = {}
+        reason = str((body or {}).get("reason") or "").strip()
+        if not reason:
+            raise ImageError("IMG_INPUT_INVALID", "驳回必须填写原因（reason）")
+        return _verdict_response(request, task_id, asset_id, "rejected", trace, user,
+                                 reason=reason)
+    except ImageError as exc:
+        return error_response(exc, trace)
+
+
+def _verdict_response(request: Request, task_id: str, asset_id: str, verdict: str,
+                      trace: str, user, reason: str = "") -> JSONResponse:
+    from app.agents_image.store import feedback as feedback_store
+
+    with session_scope() as session:
+        task = task_store.get_task(session, task_id)
+        if task is None:
+            raise ImageError("IMG_TASK_NOT_FOUND", f"任务不存在：{task_id}")
+        _ensure_owner(task.username, user, "任务")
+        asset = asset_store.get_asset(session, asset_id)
+        if asset is None or asset.task_id != task_id:
+            raise ImageError("IMG_TASK_NOT_FOUND", f"图片不属于该任务：{asset_id}")
+        payload = feedback_store.record(
+            session, task_id=task_id, asset_id=asset_id, verdict=verdict,
+            reason=reason, username=user.username, slot=asset.slot)
+        payload["stats"] = feedback_store.summary(session, task_id=task_id)
+    return JSONResponse(status_code=200, content={**payload, "trace_id": trace})
+
+
+@router.post("/tasks/{task_id}/assets/{asset_id}/unblock")
+def unblock_asset(task_id: str, asset_id: str, request: Request) -> JSONResponse:
+    """人工放行被像素门禁拦下的图（管理员或本人；门禁假阳性时用）。"""
+    trace = trace_id_of(request)
+    try:
+        user = require_user(request)
+        with session_scope() as session:
+            task = task_store.get_task(session, task_id)
+            if task is None:
+                raise ImageError("IMG_TASK_NOT_FOUND", f"任务不存在：{task_id}")
+            _ensure_owner(task.username, user, "任务")
+            asset = asset_store.get_asset(session, asset_id)
+            if asset is None or asset.task_id != task_id:
+                raise ImageError("IMG_TASK_NOT_FOUND", f"图片不属于该任务：{asset_id}")
+            asset.kind = "output"
+            asset.blocked_reason = ""
+            asset.adopt_status = "pending"
+    except ImageError as exc:
+        return error_response(exc, trace)
+    return JSONResponse(status_code=200, content={"ok": True, "asset_id": asset_id,
+                                                  "trace_id": trace})
 
 
 @router.get("/tasks/{task_id}")
@@ -538,6 +649,9 @@ def get_task(task_id: str, request: Request) -> JSONResponse:
             payload = {
                 "task_id": task.task_id, "batch_id": task.batch_id,
                 "product_id": task.product_id, "ref_source": task.ref_source,
+                "platform": task.platform, "variant_id": task.variant_id,
+                "color_key": getattr(task, "color_key", "") or "",
+                "slot_count": task.slot_count, "image_count": task.image_count,
                 "status": task.status, "username": task.username, "prompt": task.prompt,
                 "prompt_final": task.prompt_final, "aspect": task.aspect, "n": task.n,
                 "attempts": task.attempts,
@@ -549,6 +663,7 @@ def get_task(task_id: str, request: Request) -> JSONResponse:
                 "slots": list(task.slots_json or []),
                 "refs": [asset_payload(asset) for asset in refs],
                 "assets": [asset_payload(asset) for asset in outputs],
+                "copy": dict(task.copy_json or {}),
                 "created_at": task.created_at.isoformat() if task.created_at else "",
                 "finished_at": task.finished_at.isoformat() if task.finished_at else "",
             }
@@ -567,12 +682,23 @@ def _ensure_owner(owner: str | None, user, what: str) -> None:
 
 @router.get("/assets/{asset_id}")
 def get_asset(asset_id: str, request: Request):
+    """取图：`?exp=&sig=` 短签名（给 <img src>）或 Bearer 令牌（给接口调用）。"""
     trace = trace_id_of(request)
     try:
-        user = require_user(request)
+        exp = request.query_params.get("exp") or ""
+        sig = request.query_params.get("sig") or ""
+        if exp or sig:
+            if not verify_asset_signature(asset_id, exp, sig):
+                raise ImageError("IMG_FORBIDDEN", "图片签名无效或已过期")
+            user = None
+        else:
+            user = require_user(request)
         with session_scope() as session:
             asset = asset_store.require_asset(session, asset_id)
-            _ensure_owner(asset.username, user, "图片")
+            if user is not None:
+                _ensure_owner(asset.username, user, "图片")
+            if getattr(asset, "purged_at", None) is not None:
+                raise ImageError("IMG_TASK_NOT_FOUND", "图片已过保留期（本地 24h 已清理）")
             data = asset_store.read_asset_bytes(asset)
             mime = asset.mime
     except ImageError as exc:

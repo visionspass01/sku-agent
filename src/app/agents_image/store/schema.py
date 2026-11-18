@@ -28,6 +28,7 @@ _COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("image_asset", "adopt_status", "VARCHAR(16) DEFAULT 'pending'"),
     ("image_asset", "blocked_reason", "VARCHAR(64) DEFAULT ''"),
     ("image_asset", "purged_at", "DATETIME"),
+    ("image_asset", "adopt_reason", "TEXT"),
     ("image_quota", "reserved", "INTEGER DEFAULT 0"),
     ("image_usage", "adopted", "INTEGER DEFAULT 0"),
     ("image_usage", "rejected", "INTEGER DEFAULT 0"),

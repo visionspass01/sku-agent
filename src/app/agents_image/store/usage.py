@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import datetime as dt
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from app.agents_image.store import quota as quota_store
 from app.agents_image.store.models import ImageUsage
@@ -22,26 +22,68 @@ def hour_key(now: dt.datetime | None = None) -> str:
 
 def record(session, *, username: str, department: str | None = None,
            delivered: int = 0, attempted: int = 0, tasks: int = 0, failed: int = 0,
-           tokens: int = 0, cost: float = 0.0, now: dt.datetime | None = None) -> ImageUsage:
-    """累加当前小时的计数（同一人同一小时只有一行）。"""
+           tokens: int = 0, cost: float = 0.0, now: dt.datetime | None = None,
+           **kwargs: int) -> ImageUsage:
+    """累加当前小时的计数（同一人同一小时只有一行）。
+
+    P2-3：并发下"先查后改"会写重复行/丢计数，这里改**原子 UPDATE + 冲突再 INSERT**
+    （唯一索引 `uq_image_usage_user_period` 兜底），SQLite/MySQL 语义一致。
+    """
     key = hour_key(now)
-    row = session.execute(
-        select(ImageUsage).where(ImageUsage.username == username,
-                                 ImageUsage.period_key == key,
-                                 ImageUsage.granularity == "hour")
-    ).scalars().first()
-    if row is None:
-        row = ImageUsage(username=username, department=department, period_key=key,
-                         granularity="hour", updated_at=dt.datetime.now())
-        session.add(row)
-    row.images = int(row.images or 0) + max(0, int(delivered))
-    row.images_attempted = int(row.images_attempted or 0) + max(0, int(attempted))
-    row.tasks = int(row.tasks or 0) + max(0, int(tasks))
-    row.failed = int(row.failed or 0) + max(0, int(failed))
-    row.tokens = int(row.tokens or 0) + max(0, int(tokens))
-    row.cost_cny = float(row.cost_cny or 0.0) + max(0.0, float(cost))
-    row.updated_at = dt.datetime.now()
-    session.flush()
+    increments = {
+        "images": max(0, int(delivered)),
+        "images_attempted": max(0, int(attempted)),
+        "tasks": max(0, int(tasks)),
+        "failed": max(0, int(failed)),
+        "tokens": max(0, int(tokens)),
+        "adopted": max(0, int(kwargs.pop("adopted", 0) or 0)),
+        "rejected": max(0, int(kwargs.pop("rejected", 0) or 0)),
+    }
+    del kwargs
+    updated = session.execute(
+        update(ImageUsage)
+        .where(ImageUsage.username == username,
+               ImageUsage.period_key == key,
+               ImageUsage.granularity == "hour")
+        .values(**{field: getattr(ImageUsage, field) + value
+                   for field, value in increments.items() if value},
+                cost_cny=ImageUsage.cost_cny + max(0.0, float(cost)),
+                updated_at=dt.datetime.now())
+    )
+    if updated.rowcount:
+        session.flush()
+        return session.execute(
+            select(ImageUsage).where(ImageUsage.username == username,
+                                     ImageUsage.period_key == key,
+                                     ImageUsage.granularity == "hour")
+        ).scalars().first()
+    row = ImageUsage(username=username, department=department, period_key=key,
+                     granularity="hour", updated_at=dt.datetime.now(),
+                     images=increments["images"], images_attempted=increments["images_attempted"],
+                     tasks=increments["tasks"], failed=increments["failed"],
+                     tokens=increments["tokens"], adopted=increments["adopted"],
+                     rejected=increments["rejected"], cost_cny=max(0.0, float(cost)))
+    session.add(row)
+    try:
+        session.flush()
+    except Exception:  # noqa: BLE001 —— 并发插入撞唯一索引：回退成更新
+        session.rollback()
+        session.execute(
+            update(ImageUsage)
+            .where(ImageUsage.username == username,
+                   ImageUsage.period_key == key,
+                   ImageUsage.granularity == "hour")
+            .values(**{field: getattr(ImageUsage, field) + value
+                       for field, value in increments.items() if value},
+                    cost_cny=ImageUsage.cost_cny + max(0.0, float(cost)),
+                    updated_at=dt.datetime.now())
+        )
+        session.flush()
+        return session.execute(
+            select(ImageUsage).where(ImageUsage.username == username,
+                                     ImageUsage.period_key == key,
+                                     ImageUsage.granularity == "hour")
+        ).scalars().first()
     return row
 
 

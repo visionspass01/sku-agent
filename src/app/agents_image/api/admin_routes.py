@@ -262,6 +262,40 @@ async def admin_grant_quota(username: str, request: Request) -> JSONResponse:
     return JSONResponse(status_code=200, content={**payload, "trace_id": trace})
 
 
+@router.get("/admin/samples")
+def admin_samples(request: Request) -> JSONResponse:
+    """正/负样本清单（M6）：采纳=正样本、驳回=负样本。"""
+    trace = trace_id_of(request)
+    try:
+        require_admin(request)
+        from app.agents_image.store import feedback as feedback_store
+
+        kind = (request.query_params.get("kind") or "").strip() or None
+        with session_scope() as session:
+            rows = feedback_store.samples(session, kind=kind)
+            summary = feedback_store.summary(session)
+    except ImageError as exc:
+        return error_response(exc, trace)
+    return JSONResponse(status_code=200, content={"samples": rows, "summary": summary,
+                                                  "trace_id": trace})
+
+
+@router.get("/admin/feedback")
+def admin_feedback(request: Request) -> JSONResponse:
+    trace = trace_id_of(request)
+    try:
+        require_admin(request)
+        from app.agents_image.store import feedback as feedback_store
+
+        with session_scope() as session:
+            rows = feedback_store.list_feedback(session)
+            summary = feedback_store.summary(session)
+    except ImageError as exc:
+        return error_response(exc, trace)
+    return JSONResponse(status_code=200, content={"feedback": rows, "summary": summary,
+                                                  "trace_id": trace})
+
+
 @router.post("/admin/replay-outbox")
 async def admin_replay_outbox(request: Request) -> JSONResponse:
     trace = trace_id_of(request)

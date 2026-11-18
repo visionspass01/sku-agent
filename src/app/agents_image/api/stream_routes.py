@@ -32,6 +32,8 @@ _MAX_STREAM_SECONDS = 120
 def _snapshot_payload(task) -> dict:
     return {
         "task_id": task.task_id, "batch_id": task.batch_id, "product_id": task.product_id,
+        "platform": task.platform, "variant_id": getattr(task, "variant_id", "") or "",
+        "color_key": getattr(task, "color_key", "") or "",
         "status": task.status, "attempts": task.attempts,
         "attempted_images": task.attempted_images,
         "delivered_images": task.delivered_images,

@@ -275,7 +275,7 @@ async function createTasks() {
   try {
     const body = await api("/api/image/tasks", { json: payload });
     setText("batch-badge", `batch: ${body.batch_id}`);
-    setText("create-hint", `已创建 ${body.tasks.length} 个任务`);
+    setText("create-hint", `已创建 ${body.tasks.length} 个任务` + (body.platforms ? `（平台：${body.platforms.join("/")}）` : ""));
     body.tasks.forEach((task) => watchTask(task.task_id, task.product_id));
     loadQuota();
   } catch (err) {
@@ -305,6 +305,21 @@ function parseSseChunk(chunk) {
 
 /* SSE 用 fetch 读流（带 Authorization 头），而不是 EventSource：
  * EventSource 不能加请求头，只能把令牌放 URL——那会漏进日志与 Referer。 */
+async function openStreamWithRetry(taskId, handlers, attempt = 0) {
+  const controller = await openStream(taskId, {
+    ...handlers,
+    onError(err) {
+      if (attempt >= 3) {
+        handlers.onError && handlers.onError(err);
+        return;
+      }
+      const delay = 1000 * (attempt + 1);
+      setTimeout(() => openStreamWithRetry(taskId, handlers, attempt + 1), delay);
+    },
+  });
+  return controller;
+}
+
 async function openStream(taskId, handlers) {
   const controller = new AbortController();
   let resp;
@@ -363,10 +378,11 @@ function watchTask(taskId, productId) {
   const statusEl = row.querySelector(".pi-status");
   const nameEl = row.querySelector(".pi-name");
 
-  const controller = openStream(taskId, {
+  const controller = openStreamWithRetry(taskId, {
     onEvent(event, data) {
       if (event === "snapshot") {
-        nameEl.textContent = data.product_id ? `商品 ${data.product_id}` : "";
+        nameEl.textContent = [data.product_id, data.platform, data.variant_id]
+          .filter(Boolean).join(" · ");
       } else if (event === "stage") {
         statusEl.textContent = data.status;
         row.className = "progress-item " + data.status;
@@ -408,21 +424,20 @@ function appendGallery(taskId, asset) {
   card.dataset.task = taskId;
   card.innerHTML = [
     `<div class="gc-head"><span>slot ${esc(asset.slot)}</span><span class="muted">${esc(asset.kind)}</span></div>`,
-    `<img loading="lazy" alt="slot ${esc(asset.slot)}" src="${esc(asset.url)}" />`,
+    `<img loading="lazy" alt="slot ${esc(asset.slot)}" src="${esc(asset.signed_url || asset.url)}" />`,
     `<figcaption class="gc-foot"><span>${esc(asset.width)}×${esc(asset.height)} · ${esc(asset.mime)}</span>`,
     `<code>${esc(asset.sha256 ? asset.sha256.slice(0, 16) : "")}…</code></figcaption>`,
   ].join("");
   card.querySelector("img").addEventListener("error", () => {
-    card.querySelector("img").alt = "图片需要登录后查看";
+    // 签名过期（5 分钟）时回退到带 Bearer 的 blob 取法
+    fetch(asset.url, { headers: authHeaders() })
+      .then((resp) => (resp.ok ? resp.blob() : null))
+      .then((blob) => {
+        if (blob) card.querySelector("img").src = URL.createObjectURL(blob);
+      })
+      .catch(() => { /* 保留占位 alt */ });
   });
   gallery.appendChild(card);
-  // 图片接口需要 Authorization 头：EventSource 带不了，这里用 blob 方式取一次
-  fetch(asset.url, { headers: authHeaders() })
-    .then((resp) => (resp.ok ? resp.blob() : null))
-    .then((blob) => {
-      if (blob) card.querySelector("img").src = URL.createObjectURL(blob);
-    })
-    .catch(() => { /* 保留占位 alt */ });
 }
 
 async function loadGallery(taskId) {

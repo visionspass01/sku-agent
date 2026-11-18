@@ -90,6 +90,7 @@ class ImageAsset(Base):
     color_key: Mapped[str] = mapped_column(String(64), default="", index=True)  # 商品+颜色
     kind: Mapped[str] = mapped_column(String(16), default="ref")   # ref | output | thumb
     adopt_status: Mapped[str] = mapped_column(String(16), default="pending")  # pending|adopted|rejected
+    adopt_reason: Mapped[str] = mapped_column(Text, default="")
     blocked_reason: Mapped[str] = mapped_column(String(64), default="")       # 合规门禁拦截原因
     purged_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
     source: Mapped[str] = mapped_column(String(16), default="mcp")  # mcp（v6：参考图只来自中台）
@@ -134,6 +135,24 @@ class ImageMemory(Base):
     fix_summary: Mapped[str] = mapped_column(Text, default="")
     prompt_patch: Mapped[str] = mapped_column(Text, default="")
     hits: Mapped[int] = mapped_column(Integer, default=0)
+    sample_kind: Mapped[str] = mapped_column(String(16), default="auto")  # auto|positive|negative
+    adopt_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=dt.datetime.now)
+
+
+class ImageFeedback(Base):
+    """人工采纳/驳回（M6）：采纳计正样本、驳回记负样本；成本不因驳回返还。"""
+
+    __tablename__ = "image_feedback"
+    __table_args__ = (Index("uq_image_feedback_asset", "asset_id", unique=True),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    task_id: Mapped[str] = mapped_column(String(32), default="", index=True)
+    asset_id: Mapped[str] = mapped_column(String(32), default="", index=True)
+    slot: Mapped[int] = mapped_column(Integer, default=0)
+    verdict: Mapped[str] = mapped_column(String(16), default="adopted")
+    reason: Mapped[str] = mapped_column(Text, default="")
+    username: Mapped[str] = mapped_column(String(32), default="", index=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=dt.datetime.now)
 
 
