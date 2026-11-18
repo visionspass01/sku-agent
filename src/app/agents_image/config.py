@@ -42,6 +42,10 @@ class ImageSettings(BaseSettings):
     concurrency: int = Field(default=8, ge=1, le=32)          # 本机任务并发
     provider_concurrency: int = Field(default=10, ge=1, le=64)  # 调第三方生图 API 的并发上限
     timeout_seconds: int = Field(default=60, ge=5, le=600)
+    # 商品上下文批量取数（W2）：同一 3 秒窗口内的请求合并成一次 MCP 调用
+    context_batch_window_seconds: float = Field(default=3.0, ge=0.0, le=30.0)
+    context_batch_max_ids: int = Field(default=50, ge=1, le=200)
+    context_cache_ttl_seconds: float = Field(default=60.0, ge=0.0, le=600.0)
     recovery_interval_seconds: int = Field(default=30, ge=0, le=3600)  # 看门狗扫描间隔（0=关）
     # 任务租约（W1）：执行期每阶段续约；只有租约过期才允许看门狗重投
     task_lease_seconds: int = Field(default=300, ge=30, le=3600)

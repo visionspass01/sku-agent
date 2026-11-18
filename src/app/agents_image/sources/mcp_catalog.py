@@ -27,6 +27,24 @@ from app.core.errors import ImageError
 
 logger = logging.getLogger("sku-agent.image.catalog.mcp")
 
+
+def _product_of(payload: dict, *, tool: str) -> ProductData:
+    """把中台返回的商品对象校验成 `ProductData`（单商品/批量共用）。"""
+    images = []
+    for item in payload.get("images") or []:
+        try:
+            images.append(ProductImage.model_validate(item))
+        except Exception as exc:  # noqa: BLE001 —— 中台字段不合 schema
+            raise ImageError("IMG_UPSTREAM_INVALID",
+                             f"商品图字段不合 schema：{exc}") from exc
+    try:
+        data = ProductData.model_validate({**payload, "images": []})
+    except Exception as exc:  # noqa: BLE001
+        raise ImageError("IMG_UPSTREAM_INVALID",
+                         f"商品字段不合 schema（{tool}）：{exc}") from exc
+    data.images = images
+    return data
+
 ToolCaller = Callable[[str, dict], Awaitable[dict]]
 
 
@@ -80,21 +98,24 @@ class McpCatalog:
                                    {"keyword": keyword, "limit": int(limit)})
         return [ProductSummary.model_validate(item) for item in payload.get("products") or []]
 
+    async def get_products_context(self, product_ids: list[str]) -> dict[str, ProductData]:
+        """批量取商品上下文（W2）：一次 MCP 调用拿多个商品，避免 N 次往返。"""
+        ids = [str(item).strip() for item in product_ids if str(item).strip()]
+        if not ids:
+            return {}
+        payload = await self._tool("image_get_products_context", {"product_ids": ids})
+        out: dict[str, ProductData] = {}
+        for item in payload.get("products") or []:
+            data = _product_of(item, tool="image_get_products_context")
+            out[data.product_id] = data
+        missing = [product_id for product_id in ids if product_id not in out]
+        if missing:
+            raise ImageError("IMG_PRODUCT_NOT_FOUND", f"商品不存在：{missing[0]}")
+        return out
+
     async def get_product(self, product_id: str) -> ProductData:
         payload = await self._tool("image_get_product", {"product_id": product_id})
-        images = []
-        for item in payload.get("images") or []:
-            try:
-                images.append(ProductImage.model_validate(item))
-            except Exception as exc:  # noqa: BLE001 —— 中台字段不合 schema
-                raise ImageError("IMG_UPSTREAM_INVALID",
-                                 f"商品图字段不合 schema：{exc}") from exc
-        try:
-            data = ProductData.model_validate({**payload, "images": []})
-        except Exception as exc:  # noqa: BLE001
-            raise ImageError("IMG_UPSTREAM_INVALID", f"商品字段不合 schema：{exc}") from exc
-        data.images = images
-        return data
+        return _product_of(payload, tool="image_get_product")
 
     # ------------------------------------------------------------ 预设
     async def list_compositions(self, *, category: str = "",

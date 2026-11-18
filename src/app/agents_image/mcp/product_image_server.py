@@ -25,6 +25,7 @@ logger = logging.getLogger("sku-agent.image.mcp")
 IMAGE_TOOL_NAMES = (
     "image_list_products",
     "image_get_product",
+    "image_get_products_context",   # W2：批量商品上下文（3 秒窗口合并后的单次调用）
     "image_list_compositions",
     "image_list_scene_styles",
     "image_get_plan_policy",
@@ -181,6 +182,23 @@ async def image_get_product(product_id: str) -> dict:
     }
 
 
+async def image_get_products_context(product_ids: list[str]) -> dict:
+    """批量取商品上下文（W2）：Agent 把 3 秒窗口内的商品 id 合并成一次调用。"""
+    ids = [str(item).strip() for item in (product_ids or []) if str(item).strip()]
+    if not ids:
+        return {"products": [], "missing": [], "error": ""}
+    payload = await _request("GET", "/api/v1/image/products/context",
+                             params={"ids": ",".join(ids)})
+    if payload is None:
+        return {"products": [], "missing": ids, "error": "中台批量上下文不可用"}
+    products = list(payload.get("products") or [])
+    missing = list(payload.get("missing") or [])
+    if not products and missing:
+        return {"products": [], "missing": missing, "error": "商品不存在",
+                "error_kind": "not_found"}
+    return {"products": products, "missing": missing, "error": ""}
+
+
 async def image_list_compositions(category: str = "", platform: str = "淘系") -> dict:
     """构图候选（composition_id / label / desc / prompt_hint）。"""
     data = await _request("GET", "/api/v1/image/presets/compositions",
@@ -240,6 +258,7 @@ async def download_image(url: str) -> bytes:
 IMAGE_TOOLS = {
     "image_list_products": image_list_products,
     "image_get_product": image_get_product,
+    "image_get_products_context": image_get_products_context,
     "image_list_compositions": image_list_compositions,
     "image_list_scene_styles": image_list_scene_styles,
     "image_get_plan_policy": image_get_plan_policy,
@@ -255,6 +274,7 @@ def _build_server():
     server = FastMCP("image-mcp")
     server.tool()(image_list_products)
     server.tool()(image_get_product)
+    server.tool()(image_get_products_context)
     server.tool()(image_list_compositions)
     server.tool()(image_list_scene_styles)
     server.tool()(image_get_plan_policy)

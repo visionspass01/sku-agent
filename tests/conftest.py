@@ -202,17 +202,29 @@ def _fake_platform(monkeypatch):
         mcp_platform.reset_transport()
 
 
+@pytest.fixture(autouse=True)
+def _image_context_window(monkeypatch):
+    """生图商品上下文的合并窗口在测试里默认关掉：真实 3 秒窗口会让整套用例变慢。
+
+    专门验证"合并"的用例自己把 `IMAGE_CONTEXT_BATCH_WINDOW_SECONDS` 调小并
+    调用 `reset_image_settings()` 覆盖（同一个 monkeypatch 实例，最后写入的生效）。
+    """
+    monkeypatch.setenv("IMAGE_CONTEXT_BATCH_WINDOW_SECONDS", "0")
+
+
 def _reset_process_singletons() -> None:
     """重置进程级单例：MCP hub（带熔断状态）与 RAG 检索器（绑在构建时的库上）。
 
     不重置会跨用例传染：一个用例打出的熔断会让后续用例全部快失败；
     一个用例用临时库构建的检索器会让后续用例检索到别的知识库。
     """
+    from app.agents_image.sources.batch_context import reset_product_batcher
     from app.mcp_client import client as mcp_client
     from app.rag.hybrid import invalidate_retriever
 
     mcp_client._hub = None
     invalidate_retriever()
+    reset_product_batcher()
 
 
 @pytest.fixture(autouse=True)

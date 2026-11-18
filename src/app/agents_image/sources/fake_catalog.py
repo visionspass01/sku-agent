@@ -219,6 +219,13 @@ class FakeCatalog:
             rows = [row for row in rows if keyword in row.title or keyword in row.product_id]
         return rows[: max(1, int(limit))]
 
+    async def get_products_context(self, product_ids: list[str]) -> dict[str, ProductData]:
+        """批量取商品上下文（W2）：fake 实现直接复用单商品逻辑（合并窗口在调用侧）。"""
+        out: dict[str, ProductData] = {}
+        for product_id in product_ids:
+            out[product_id] = await self.get_product(product_id)
+        return out
+
     async def get_product(self, product_id: str) -> ProductData:
         self._maybe_fail(getattr(self, "fail_product", ""))
         spec = _PRODUCTS.get((product_id or "").strip())

@@ -49,6 +49,14 @@ class ProductContextOut(Envelope):
     sku_ids: list[str] = Field(default_factory=list)
 
 
+class ProductContextListOut(Envelope):
+    """批量商品上下文（W2）：`products` 命中，`missing` 由 Agent 翻成 404。"""
+
+    products: list[ProductContextOut] = Field(default_factory=list)
+    missing: list[str] = Field(default_factory=list)
+    count: int = 0
+
+
 class PresetOut(Envelope):
     preset_id: str
     kind: str = "composition"

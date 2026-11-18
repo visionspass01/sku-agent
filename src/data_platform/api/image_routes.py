@@ -80,6 +80,39 @@ def product_context(product_id: str, request: Request):
     )
 
 
+@router.get("/products/context", response_model=isc.ProductContextListOut,
+            dependencies=[Depends(require_scope("read"))])
+def products_context(request: Request, ids: str = Query(default="")):
+    """批量商品上下文（W2）：Agent 一次请求多个商品，避免 N 次往返。
+
+    `ids` 用逗号分隔（也可重复传参）；不存在的 id 放进 `missing`，由 Agent 侧翻成 404。
+    """
+    wanted = [item.strip() for item in (ids or "").replace(" ", ",").split(",") if item.strip()]
+    if not wanted:
+        for value in request.query_params.getlist("ids"):
+            wanted.extend([item.strip() for item in value.split(",") if item.strip()])
+    seen: list[str] = []
+    for item in wanted:
+        if item not in seen:
+            seen.append(item)
+    products: list[isc.ProductContextOut] = []
+    missing: list[str] = []
+    for product_id in seen:
+        data = image_mock.get_product(product_id)
+        if data is None:
+            missing.append(product_id)
+            continue
+        products.append(isc.ProductContextOut(
+            product_id=data["product_id"], title=data["title"], category=data["category"],
+            attrs=data["attrs"],
+            images=[isc.ProductImageOut(**item) for item in data["images"]],
+            skus=[isc.ProductSkuOut(**item) for item in data.get("skus") or []],
+            sku_ids=data["sku_ids"],
+        ))
+    request.state.audit_detail = f"image.products_context n={len(products)} missing={len(missing)}"
+    return isc.ProductContextListOut(products=products, missing=missing, count=len(products))
+
+
 async def binary_asset_endpoint(request: Request):
     """商品图二进制（Starlette 原生路由：不走响应模型，避免把二进制塞进 JSON 契约）。
 

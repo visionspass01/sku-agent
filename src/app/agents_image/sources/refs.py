@@ -94,14 +94,23 @@ async def resolve_refs(
     refs_per_item: int = 2,
     max_refs: int = 6,
     timeout_seconds: float = 5.0,
+    products: dict[str, ProductData] | None = None,
 ) -> RefResolution:
-    """批量解析：按「商品+颜色」取图并落库（成功时返回每个目标可用的 RefImage 列表）。"""
+    """批量解析：按「商品+颜色」取图并落库（成功时返回每个目标可用的 RefImage 列表）。
+
+    `products`：调用方已经批量取回的商品上下文（W2 合并请求）——给了就直接用，
+    不再逐个商品回中台，避免"一次批量请求打 N 次 MCP"。
+    """
     if not targets:
         raise_image("IMG_REFERENCE_REQUIRED", "请至少选择一个商品")
     unique_products: dict[str, ProductData] = {}
     for target in targets:
-        if target.product_id not in unique_products:
-            unique_products[target.product_id] = await catalog.get_product(target.product_id)
+        if target.product_id in unique_products:
+            continue
+        if products and target.product_id in products:
+            unique_products[target.product_id] = products[target.product_id]
+            continue
+        unique_products[target.product_id] = await catalog.get_product(target.product_id)
 
     per_item = max(1, int(refs_per_item or 1))
     # 预算校验：颜色数 × 基础张数不能超过上限，否则参考图会被静默截断（身份锁定失效）

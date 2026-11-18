@@ -33,6 +33,7 @@ from app.agents_image.ids import new_batch_id, new_task_id
 from app.agents_image.nodes import plan_slots
 from app.agents_image.nodes import validate as validate_node
 from app.agents_image.providers.image_provider import providers
+from app.agents_image.sources import batch_context
 from app.agents_image.sources import refs as refs_source
 from app.agents_image.sources.product_source import get_catalog, registered_catalogs
 from app.agents_image.state import ImageTaskState, SlotPlan
@@ -66,10 +67,21 @@ def image_health() -> dict:
         "max_refs": settings.max_refs,
         "max_batch_products": settings.max_batch_products,
         "secret_is_default": settings.secret_is_default,
+        "context_batches": _context_batches(),
         "degraded": False,
         "degraded_reason": "",
         **metrics.snapshot(),
     }
+
+
+def _context_batches() -> dict:
+    """商品上下文合并统计（W2）：真实发起的合并请求数 / 缓存命中。"""
+    try:
+        from app.agents_image.sources.product_source import get_catalog
+
+        return batch_context.get_product_batcher(get_catalog()).stats()
+    except Exception:  # noqa: BLE001
+        return {}
 
 
 def _provider_in_flight() -> int:
@@ -262,7 +274,9 @@ async def create_tasks(request: Request) -> JSONResponse:
             raise ImageError("IMG_INPUT_INVALID", "需求描述不能为空")
 
         catalog = get_catalog()
-        targets = await _resolve_targets(catalog, body, product_ids)
+        # W2：商品上下文一次批量取回（窗口内合并 MCP 请求：3 秒内的多次取数合成一次调用）
+        products = await batch_context.get_product_batcher(catalog).get_many(product_ids)
+        targets = await _resolve_targets(catalog, body, product_ids, products=products)
         platforms = _platform_list(body)
         params_by_platform = {
             platform: await _resolve_request_parameters(
@@ -303,6 +317,10 @@ async def create_tasks(request: Request) -> JSONResponse:
                              f"配额不足：本期（{quota['period_type']}）剩余 {quota['remaining']} 张，"
                              f"本次需要 {planned_images} 张", retryable=False)
 
+        # 部门闸（W2 前置）：必须在下载参考图之前判定，越权用户不能先把别的部门的图拉下来
+        for product_id in product_ids:
+            _ensure_department(products[product_id], user)
+
         # 预算闸（P1-8）：用配置单价做**事前估算**；真实计费以 provider 返回为准（P0-5）
         estimated_cost = round(float(settings.cost_per_image_cny) * planned_images, 4)
         if settings.cost_budget_cny and estimated_cost > float(settings.cost_budget_cny):
@@ -341,6 +359,7 @@ async def create_tasks(request: Request) -> JSONResponse:
                 username=user.username, department=user.department,
                 refs_per_item=settings.refs_per_item, max_refs=settings.max_refs,
                 timeout_seconds=settings.mcp_timeout_seconds,
+                products=products,
             )
             batch_id = new_batch_id()
             created: list[dict] = []
@@ -357,7 +376,7 @@ async def create_tasks(request: Request) -> JSONResponse:
                 state.slots = [SlotPlan(**item) for item in plan_slots.build_slots(
                     state, policy=params["policy"], labels=params["labels"],
                     slot_count=params["slot_count"])]
-                _ensure_department(resolution.products[target.product_id], user)
+                # 部门校验已在下载参考图之前做过（W2），这里不再重复
                 state.attrs = _attrs_for_target(
                     resolution.products[target.product_id].attrs, target)
                 validate_node.validate(state, settings=settings)
@@ -451,7 +470,8 @@ def _idempotent_conflict(trace: str) -> JSONResponse:
     )
 
 
-async def _resolve_targets(catalog, body: dict, product_ids: list[str]) -> list[refs_source.RefTarget]:
+async def _resolve_targets(catalog, body: dict, product_ids: list[str],
+                           products: dict | None = None) -> list[refs_source.RefTarget]:
     """把「选中商品 + 颜色」展开成出图目标（M3：出图最小单位 = 商品 + 颜色）。
 
     请求侧三种写法：
@@ -471,7 +491,9 @@ async def _resolve_targets(catalog, body: dict, product_ids: list[str]) -> list[
 
     targets: list[refs_source.RefTarget] = []
     for product_id in product_ids:
-        data = await catalog.get_product(product_id)
+        data = (products or {}).get(product_id)
+        if data is None:
+            data = await catalog.get_product(product_id)
         available = data.colors()
         names = {item["color"] for item in available if item["color"]}
         if product_id in requested and requested[product_id]:
@@ -551,11 +573,16 @@ def _department_of(category: str | None) -> str | None:
 
 
 def _ensure_department(product, user) -> None:
-    """部门隔离（P2-2）：普通账号只能出自己部门（男装 / 女装含童装）的商品。"""
+    """部门隔离（P2-2）：普通账号只能出自己部门的商品；类目未维护 → 一律拒绝（W2）。"""
     if user.is_admin:
         return
-    department = _department_of(getattr(product, "category", ""))
-    if department and user.department and department != user.department:
+    category = str(getattr(product, "category", "") or "").strip()
+    department = _department_of(category)
+    if not department:
+        raise ImageError("IMG_FORBIDDEN",
+                         f"商品类目「{category or '空'}」无法映射到部门，普通账号不能出图；"
+                         "请在中台把该类目归到男装/女装（含童装）")
+    if user.department and department != user.department:
         raise ImageError("IMG_FORBIDDEN",
                          f"无权操作 {department} 部门的商品（当前账号：{user.department}）")
 
@@ -596,13 +623,26 @@ async def _reuse_plan(session, user, body: dict, targets, catalog) -> dict | Non
 
 
 def _attrs_for_target(base_attrs: dict, target) -> dict:
-    """按颜色覆盖身份锁定字段：颜色必须锁到具体 hex，避免多色商品串色。"""
+    """按颜色覆盖身份锁定字段：颜色必须锁到具体 hex，避免多色商品串色。
+
+    W2：目标颜色**没有色值**时不能静默沿用商品首个颜色的 hex（会把米色画成黑色），
+    必须报 `IMG_INPUT_INVALID` 让中台补齐；只有"商品本身只有这一个颜色、中台 attrs
+    的色值就是它"时才允许沿用。
+    """
     attrs = dict(base_attrs or {})
-    if target.color:
-        attrs["color_names"] = [target.color]
-        if target.color_hex:
-            attrs["color_hex"] = target.color_hex
-    return attrs
+    if not target.color:
+        return attrs
+    known = [str(item) for item in (attrs.get("color_names") or [])]
+    base_hex = str(attrs.get("color_hex") or "")
+    attrs["color_names"] = [target.color]
+    if target.color_hex:
+        attrs["color_hex"] = target.color_hex
+        return attrs
+    if base_hex and known == [target.color]:
+        return attrs          # 单色商品：中台 attrs 的色值就是这个颜色，可以沿用
+    raise ImageError(
+        "IMG_INPUT_INVALID",
+        f"颜色「{target.color}」缺少色值（color_hex），无法锁定身份；请在中台补齐该颜色色值")
 
 
 def _registry():

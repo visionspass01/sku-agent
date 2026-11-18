@@ -85,9 +85,18 @@ def test_download_image(wired):
     assert raw.startswith(b"\x89PNG")
 
 
-def test_tool_registry_has_seven_tools(wired):
+def test_tool_registry_has_eight_tools(wired):
     assert set(wired.IMAGE_TOOLS) == set(wired.IMAGE_TOOL_NAMES)
-    assert len(wired.IMAGE_TOOL_NAMES) == 7
+    assert len(wired.IMAGE_TOOL_NAMES) == 8          # W2：新增 image_get_products_context
+
+
+def test_get_products_context_batches(wired):
+    """批量商品上下文：一次调用拿多个商品，缺失的 id 显式返回（由 Agent 翻成 404）。"""
+    body = run(wired.image_get_products_context(["P-1001", "P-1002", "P-9999"]))
+    ids = {item["product_id"] for item in body["products"]}
+    assert ids == {"P-1001", "P-1002"}
+    assert body["missing"] == ["P-9999"]
+    assert body["error"] == ""
 
 
 def test_missing_token_surfaces_business_error(platform_db, monkeypatch):
