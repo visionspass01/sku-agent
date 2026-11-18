@@ -57,6 +57,30 @@ class ProductContextListOut(Envelope):
     count: int = 0
 
 
+class SimilarIn(Envelope):
+    """拍立淘入参（W3）：`image_b64` 是待搜图（Agent 侧把素材库图/商品主图编码后传）。"""
+
+    image_b64: str = ""
+    min_sales: int = 100
+    top_n: int = 5
+    exclude: str = ""
+
+
+class SimilarItemOut(Envelope):
+    """相似款：`sales` 是销量口径（用于 > 门槛过滤与降序），`image` 是商品主图。"""
+
+    product_id: str = ""
+    title: str = ""
+    sales: int = 0
+    image: ProductImageOut | None = None
+
+
+class SimilarOut(Envelope):
+    items: list[SimilarItemOut] = Field(default_factory=list)
+    count: int = 0
+    min_sales: int = 100
+
+
 class PresetOut(Envelope):
     preset_id: str
     kind: str = "composition"

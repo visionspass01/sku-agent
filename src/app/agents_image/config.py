@@ -66,6 +66,12 @@ class ImageSettings(BaseSettings):
     default_quota_images: int = Field(default=50, ge=0, le=100000)
     quota_period_key_rollover: bool = True
 
+    # ---- 参考图三源（W3）：素材库 / 拍立淘 ----
+    library_max_mb: float = Field(default=8.0, ge=0.1, le=50.0)   # 素材库单图上限（MB）
+    library_max_images: int = Field(default=20, ge=1, le=200)     # 每人素材库上限（张）
+    pailitao_min_sales: int = Field(default=100, ge=0, le=100000)  # 相似款销量门槛（>）
+    pailitao_top_n: int = Field(default=5, ge=1, le=5)            # 每个商品最多取几个相似款
+
     # ---- 交付前像素门禁（M5）----
     compliance_gate: str = "main"          # main（只拦主图）| all（所有出图图位）| off
     compliance_autofix: bool = True        # 不过时先归白/裁方/放大再复检
@@ -106,6 +112,11 @@ class ImageSettings(BaseSettings):
     @property
     def outputs_dir(self) -> pathlib.Path:
         return self.images_dir / "outputs"
+
+    @property
+    def library_dir(self) -> pathlib.Path:
+        """素材库（人工上传）落盘目录：不参与 24h 清理，由用户显式删除。"""
+        return self.images_dir / "library"
 
     @property
     def thumbs_dir(self) -> pathlib.Path:

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import datetime as dt
+import hashlib
 
 from data_platform.image_png import placeholder_png
 
@@ -99,6 +100,12 @@ PRODUCTS: dict[str, dict] = {
 }
 
 # ---------------------------------------------------------------- 预设（可入库热更新）
+# 拍立淘替身用的销量（W3）：> 门槛才进候选，与 Agent 侧 fake 目录同源
+SALES: dict[str, int] = {
+    "P-1001": 320, "P-1002": 12, "P-2001": 860, "P-3001": 240,
+    "P-3002": 95, "P-3003": 150, "P-4001": 3, "P-4002": 8,
+}
+
 PRESETS: tuple[dict, ...] = (
     {"preset_id": "C-FULL-FRONT-TOP", "kind": "composition", "code": "full_front_top",
      "label": "正面全身像·上装突出", "desc": "全身入镜，重心在上装",
@@ -247,6 +254,30 @@ def get_product(product_id: str) -> dict | None:
             "skus": skus,
             "sku_ids": list(spec.get("sku_ids") or []),
             "broken_image": bool(spec.get("broken_image"))}
+
+
+def find_similar(image_b64: str = "", *, min_sales: int = 100, top_n: int = 5,
+                 exclude: str = "") -> list[dict]:
+    """拍立淘 mock（W3）：按图确定性返回相似款（销量 > 门槛 → 降序 → 前 N 个）。
+
+    真实环境这里是"以图搜图"的向量检索 + 商家商品库；mock 期用图片哈希做确定性打散，
+    保证同图同结果（可复现），不同图结果不同（能验证链路真的在传图）。
+    """
+    digest = hashlib.sha256((image_b64 or "").encode("utf-8")).hexdigest()
+    pool = [pid for pid in PRODUCTS
+            if pid != exclude and int(SALES.get(pid, 0)) > int(min_sales)]
+    pool.sort(key=lambda pid: (-int(SALES.get(pid, 0)),
+                               hashlib.sha256((digest + pid).encode("utf-8")).hexdigest()))
+    out: list[dict] = []
+    for product_id in pool[: max(1, int(top_n))]:
+        data = get_product(product_id)
+        if not data or not data["images"]:
+            continue
+        main = next((item for item in data["images"] if item.get("is_main")),
+                    data["images"][0])
+        out.append({"product_id": product_id, "title": data["title"],
+                    "sales": int(SALES.get(product_id, 0)), "image": main})
+    return out
 
 
 def image_bytes(image_id: str) -> bytes | None:

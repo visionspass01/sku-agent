@@ -21,10 +21,16 @@ function expect(name, ok) {
 for (const id of ["login-panel", "workbench", "admin-panel", "product-rows",
                   "composition-select", "scene-style-select", "count-input",
                   "aspect-select", "prompt-input", "btn-create", "progress",
-                  "gallery", "metric-cards", "image-chart"]) {
+                  "gallery", "metric-cards", "image-chart",
+                  "ref-source-select", "library-panel", "library-grid"]) {
   expect(`页面含 #${id}`, html.includes(`id="${id}"`));
 }
-expect("无文件上传入口", !html.includes('type="file"') && !html.toLowerCase().includes("upload"));
+// W3：上传入口在「素材库」面板（参考图三源之一）；商品清单本身仍然只能从中台选，不能上传
+expect("素材库有上传入口", html.includes('id="library-file"') &&
+  html.includes('id="btn-library-upload"') && html.includes('type="file"'));
+expect("商品图不可上传", !html.includes('id="product-upload"') && !html.includes("product-file"));
+expect("参考图来源三选一", ["mcp", "library", "pailitao"].every(
+  (source) => html.includes(`value="${source}"`)));
 expect("无内联事件", !/\son(click|change|input)=/.test(html));
 expect("脚本外链（版本号由服务端注入）", html.includes("/image.js") && html.includes("/image_admin.js"));
 

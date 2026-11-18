@@ -113,6 +113,17 @@ def products_context(request: Request, ids: str = Query(default="")):
     return isc.ProductContextListOut(products=products, missing=missing, count=len(products))
 
 
+@router.post("/similar-by-image", response_model=isc.SimilarOut,
+             dependencies=[Depends(require_scope("read"))])
+def similar_by_image(payload: isc.SimilarIn, request: Request):
+    """拍立淘（W3）：以图搜相似款。只返回销量 > `min_sales` 的商品，按销量降序取前 N 个。"""
+    items = image_mock.find_similar(payload.image_b64, min_sales=payload.min_sales,
+                                    top_n=payload.top_n, exclude=payload.exclude)
+    out = [isc.SimilarItemOut(**item) for item in items]
+    request.state.audit_detail = f"image.similar n={len(out)} min_sales={payload.min_sales}"
+    return isc.SimilarOut(items=out, count=len(out), min_sales=payload.min_sales)
+
+
 async def binary_asset_endpoint(request: Request):
     """商品图二进制（Starlette 原生路由：不走响应模型，避免把二进制塞进 JSON 契约）。
 

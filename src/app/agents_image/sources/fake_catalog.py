@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 
 from app.agents_image.png import placeholder_png
 from app.agents_image.sources.product_source import (
@@ -20,9 +21,16 @@ from app.agents_image.sources.product_source import (
     ProductImage,
     ProductSku,
     ProductSummary,
+    SimilarProduct,
     SlotSpec,
 )
 from app.core.errors import raise_image
+
+# 拍立淘替身用的销量（W3）：与中台 mock 保持同源，>100 才进候选
+_SALES: dict[str, int] = {
+    "P-1001": 320, "P-1002": 12, "P-2001": 860, "P-3001": 240,
+    "P-3002": 95, "P-3003": 150, "P-4001": 3, "P-4002": 8,
+}
 
 # 商品 → 身份锁定字段（与中台 `image_catalog` mock 同构，D6 时中台返回同样的形状）
 _PRODUCTS: dict[str, dict] = {
@@ -218,6 +226,24 @@ class FakeCatalog:
         if keyword:
             rows = [row for row in rows if keyword in row.title or keyword in row.product_id]
         return rows[: max(1, int(limit))]
+
+    async def find_similar(self, image_bytes: bytes, *, min_sales: int = 100,
+                           top_n: int = 5) -> list[SimilarProduct]:
+        """拍立淘替身（W3）：按图片哈希确定性挑相似款，按销量降序并过滤门槛。"""
+        digest = hashlib.sha256(image_bytes or b"").hexdigest()
+        pool = [pid for pid in _PRODUCTS if int(_SALES.get(pid, 0)) > int(min_sales)]
+        pool.sort(key=lambda pid: (-int(_SALES.get(pid, 0)),
+                                   hashlib.sha256((digest + pid).encode()).hexdigest()))
+        out: list[SimilarProduct] = []
+        for product_id in pool[:max(1, int(top_n))]:
+            data = await self.get_product(product_id)
+            main = next((item for item in data.images if item.is_main),
+                        data.images[0] if data.images else None)
+            if main is None:
+                continue
+            out.append(SimilarProduct(product_id=product_id, title=data.title,
+                                      sales=int(_SALES.get(product_id, 0)), image=main))
+        return out
 
     async def get_products_context(self, product_ids: list[str]) -> dict[str, ProductData]:
         """批量取商品上下文（W2）：fake 实现直接复用单商品逻辑（合并窗口在调用侧）。"""

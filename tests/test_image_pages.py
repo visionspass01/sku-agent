@@ -34,11 +34,15 @@ def test_image_page_has_required_anchors():
     for element_id in ("login-panel", "workbench", "admin-panel", "product-rows",
                        "composition-select", "scene-style-select", "count-input",
                        "aspect-select", "prompt-input", "btn-create", "progress",
-                       "gallery", "metric-cards", "image-chart"):
+                       "gallery", "metric-cards", "image-chart",
+                       "ref-source-select", "library-panel", "library-grid"):
         assert f'id="{element_id}"' in html, element_id
-    # 没有上传入口（v6：参考图只能来自中台商品图）
-    assert 'type="file"' not in html
-    assert "upload" not in html.lower()
+    # W3：上传入口只在「素材库」面板；商品清单仍然只能从中台选（不能上传商品图）
+    assert 'id="library-file"' in html
+    assert 'type="file"' in html
+    assert 'id="product-upload"' not in html
+    for source in ("mcp", "library", "pailitao"):
+        assert f'value="{source}"' in html, source
 
 
 def test_image_js_uses_auth_headers_and_fetch_stream():

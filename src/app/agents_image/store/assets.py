@@ -110,3 +110,32 @@ def require_asset(session, asset_id: str) -> ImageAsset:
     if asset is None:
         raise_image("IMG_TASK_NOT_FOUND", f"图片不存在：{asset_id}")
     return asset
+
+
+# ---------------------------------------------------------------- 素材库（W3）
+def list_library(session, *, username: str | None = None, limit: int = 100) -> list[ImageAsset]:
+    """素材库列表：`username=None` 表示管理员视角（全部账号），否则只看本人。"""
+    statement = select(ImageAsset).where(ImageAsset.kind == "library")
+    if username:
+        statement = statement.where(ImageAsset.username == username)
+    statement = statement.order_by(ImageAsset.created_at.desc()).limit(max(1, int(limit)))
+    return list(session.execute(statement).scalars().all())
+
+
+def count_library(session, username: str) -> int:
+    from sqlalchemy import func
+
+    return int(session.execute(
+        select(func.count()).select_from(ImageAsset)
+        .where(ImageAsset.kind == "library", ImageAsset.username == username)
+    ).scalar_one())
+
+
+def delete_asset(session, asset: ImageAsset) -> None:
+    """删除素材图：先删文件、再删行（文件已丢也不影响元数据清理）。"""
+    try:
+        get_storage(asset.storage).delete(asset.key)
+    except Exception:  # noqa: BLE001 —— 文件已丢/存储异常都不阻断元数据清理
+        pass
+    session.delete(asset)
+    session.flush()

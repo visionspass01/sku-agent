@@ -91,6 +91,17 @@ class ProductData(BaseModel):
         return out
 
 
+class SimilarProduct(BaseModel):
+    """拍立淘相似款（W3）：`sales` 用于按销量门禁过滤，`image` 是该商品主图。"""
+
+    model_config = ConfigDict(extra="ignore")
+
+    product_id: str = ""
+    title: str = ""
+    sales: int = 0
+    image: ProductImage | None = None
+
+
 class Preset(BaseModel):
     """构图 / 场景风格候选（`preset_id` + 展示文案 + 提示词线索）。"""
 

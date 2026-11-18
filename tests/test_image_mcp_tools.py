@@ -85,9 +85,26 @@ def test_download_image(wired):
     assert raw.startswith(b"\x89PNG")
 
 
-def test_tool_registry_has_eight_tools(wired):
+def test_tool_registry_has_nine_tools(wired):
     assert set(wired.IMAGE_TOOLS) == set(wired.IMAGE_TOOL_NAMES)
-    assert len(wired.IMAGE_TOOL_NAMES) == 8          # W2：新增 image_get_products_context
+    # W2：image_get_products_context（批量上下文）；W3：image_find_similar（拍立淘）
+    assert len(wired.IMAGE_TOOL_NAMES) == 9
+
+
+def test_find_similar_returns_sales_filtered_items(wired):
+    """拍立淘工具：只回销量 > 门槛的商品，按销量降序，条数 ≤ top_n。"""
+    body = run(wired.image_find_similar(image_b64="cXVlcnk=", min_sales=100, top_n=5))
+    assert body["error"] == ""
+    sales = [item["sales"] for item in body["items"]]
+    assert sales == sorted(sales, reverse=True)
+    assert all(value > 100 for value in sales)
+    assert len(body["items"]) <= 5
+    assert all(item["image"]["url"] for item in body["items"])
+
+
+def test_find_similar_rejects_empty_image(wired):
+    body = run(wired.image_find_similar(image_b64=""))
+    assert body["items"] == [] and body["error_kind"] == "invalid"
 
 
 def test_get_products_context_batches(wired):

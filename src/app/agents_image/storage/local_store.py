@@ -19,7 +19,8 @@ from app.core.errors import raise_image
 _EXT = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}
 # kind → 子目录名（与 settings.*_dir 保持一致：refs / outputs / thumbnails）
 _KIND_DIR = {"ref": "refs", "output": "outputs", "thumb": "thumbnails",
-             "blocked": "blocked"}   # blocked：门禁不过的图（留档排查/人工放行）
+             "blocked": "blocked",   # blocked：门禁不过的图（留档排查/人工放行）
+             "library": "library"}   # library：人工上传的素材库（W3，不随 24h 清理）
 
 
 class LocalStore:
@@ -32,7 +33,8 @@ class LocalStore:
     def _dir(self, kind: str) -> pathlib.Path:
         mapping = {"ref": self.settings.refs_dir,
                    "output": self.settings.outputs_dir,
-                   "thumb": self.settings.thumbs_dir}
+                   "thumb": self.settings.thumbs_dir,
+                   "library": self.settings.library_dir}
         directory = mapping.get(kind)
         if directory is None:
             raise_image("IMG_INPUT_INVALID", f"未知的图片类型：{kind}")

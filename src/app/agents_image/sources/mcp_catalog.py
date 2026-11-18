@@ -21,6 +21,7 @@ from app.agents_image.sources.product_source import (
     ProductData,
     ProductImage,
     ProductSummary,
+    SimilarProduct,
     SlotSpec,
 )
 from app.core.errors import ImageError
@@ -97,6 +98,22 @@ class McpCatalog:
         payload = await self._tool("image_list_products",
                                    {"keyword": keyword, "limit": int(limit)})
         return [ProductSummary.model_validate(item) for item in payload.get("products") or []]
+
+    async def find_similar(self, image_bytes: bytes, *, min_sales: int = 100,
+                           top_n: int = 5) -> list[SimilarProduct]:
+        """拍立淘（W3）：把商品图交给中台搜索相似款，只认销量 > 门槛的前 N 个商品。"""
+        payload = await self._tool("image_find_similar", {
+            "image_b64": base64.b64encode(image_bytes or b"").decode("ascii"),
+            "min_sales": int(min_sales), "top_n": int(top_n),
+        })
+        out: list[SimilarProduct] = []
+        for item in payload.get("items") or []:
+            try:
+                out.append(SimilarProduct.model_validate(item))
+            except Exception as exc:  # noqa: BLE001 —— 中台字段不合 schema
+                raise ImageError("IMG_UPSTREAM_INVALID",
+                                 f"相似款字段不合 schema：{exc}") from exc
+        return out
 
     async def get_products_context(self, product_ids: list[str]) -> dict[str, ProductData]:
         """批量取商品上下文（W2）：一次 MCP 调用拿多个商品，避免 N 次往返。"""

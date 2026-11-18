@@ -35,7 +35,8 @@
   <main>
     <div class="scope-hint" id="image-hint">
       登录后在下方商品清单里勾选商品（最多 5 个），选择构图与场景风格（可选，走中台默认），
-      填写需求即可批量出图。参考图由中台商品图提供，本页不提供上传。
+      填写需求即可批量出图。参考图有三种来源：中台商品图（默认，按颜色锁定）、
+      人工上传的素材库、拍立淘相似款主图（销量 &gt; 100 的其他商家商品）。
     </div>
 
     <section class="panel" id="login-panel">
@@ -86,7 +87,27 @@
         <label>比例
           <select id="aspect-select"></select>
         </label>
+        <label>参考图来源
+          <select id="ref-source-select">
+            <option value="mcp">中台商品图（按颜色锁定）</option>
+            <option value="library">素材库（人工上传）</option>
+            <option value="pailitao">拍立淘相似款（销量 &gt; 100）</option>
+          </select>
+        </label>
       </div>
+
+      <section class="image-library" id="library-panel" hidden>
+        <div class="row">
+          <strong>素材库</strong>
+          <input id="library-file" type="file" accept="image/png,image/jpeg,image/webp" />
+          <button class="mini-btn secondary" id="btn-library-upload">上传</button>
+          <button class="mini-btn secondary" id="btn-library-refresh">刷新</button>
+          <span class="muted" id="library-hint">素材库全局池，按账号隔离；任务时勾选要用的图</span>
+        </div>
+        <div class="image-library-grid" id="library-grid"></div>
+      </section>
+
+      <p class="muted" id="ref-source-hint"></p>
 
       <label class="image-prompt-label">需求描述
         <textarea id="prompt-input" rows="3" placeholder="例如：白底主图，正面全身像上装突出，影棚正式风"></textarea>

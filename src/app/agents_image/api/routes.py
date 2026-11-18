@@ -26,6 +26,7 @@ from app.agents_image.api.common import (
     verify_asset_signature,
 )
 from app.agents_image.api.deps import require_user, trace_id_of
+from app.agents_image.api.library_routes import router as library_router
 from app.agents_image.api.stream_routes import router as stream_router
 from app.agents_image.config import get_image_settings
 from app.agents_image.dispatch.task_dispatcher import get_dispatcher
@@ -44,10 +45,14 @@ from app.db.engine import session_scope
 
 logger = logging.getLogger("sku-agent.image.api")
 
+# 参考图三源（W3）：任务级互斥，默认走中台商品图
+REF_SOURCES = ("mcp", "library", "pailitao")
+
 router = APIRouter(prefix="/api/image", tags=["image"])
 router.include_router(auth_router)
 router.include_router(stream_router)
 router.include_router(admin_router)
+router.include_router(library_router)
 
 
 @router.get("/health")
@@ -272,6 +277,13 @@ async def create_tasks(request: Request) -> JSONResponse:
         prompt = str(body.get("prompt") or "").strip()
         if not prompt:
             raise ImageError("IMG_INPUT_INVALID", "需求描述不能为空")
+        # W3：参考图三源（互斥）——mcp（中台商品图，默认）/ library（人工素材库）/ pailitao（拍立淘）
+        ref_source = str(body.get("ref_source") or "mcp").strip().lower() or "mcp"
+        if ref_source not in REF_SOURCES:
+            raise ImageError("IMG_INPUT_INVALID",
+                             f"不支持的参考图来源：{ref_source}"
+                             f"（可选：{'、'.join(REF_SOURCES)}）")
+        library_asset_ids = _dedupe([str(item) for item in (body.get("library_asset_ids") or [])])
 
         catalog = get_catalog()
         # W2：商品上下文一次批量取回（窗口内合并 MCP 请求：3 秒内的多次取数合成一次调用）
@@ -354,13 +366,27 @@ async def create_tasks(request: Request) -> JSONResponse:
                                      f"配额不足：本期剩余 {quota['remaining']} 张，"
                                      f"本次需要 {planned_images} 张", retryable=False)
 
-            resolution = await refs_source.resolve_refs(
-                catalog, targets, session=session,
-                username=user.username, department=user.department,
-                refs_per_item=settings.refs_per_item, max_refs=settings.max_refs,
-                timeout_seconds=settings.mcp_timeout_seconds,
-                products=products,
-            )
+            if ref_source == "library":
+                resolution = await refs_source.resolve_library_refs(
+                    targets, session=session, username=user.username,
+                    asset_ids=library_asset_ids, max_refs=settings.max_refs,
+                    is_admin=user.is_admin, products=products)
+            elif ref_source == "pailitao":
+                resolution = await refs_source.resolve_pailitao_refs(
+                    catalog, targets, session=session, username=user.username,
+                    department=user.department, products=products,
+                    query_asset_ids=library_asset_ids,
+                    min_sales=settings.pailitao_min_sales,
+                    top_n=settings.pailitao_top_n, max_refs=settings.max_refs,
+                    timeout_seconds=settings.mcp_timeout_seconds)
+            else:
+                resolution = await refs_source.resolve_refs(
+                    catalog, targets, session=session,
+                    username=user.username, department=user.department,
+                    refs_per_item=settings.refs_per_item, max_refs=settings.max_refs,
+                    timeout_seconds=settings.mcp_timeout_seconds,
+                    products=products,
+                )
             batch_id = new_batch_id()
             created: list[dict] = []
             first_slots: list[dict] = []
@@ -394,6 +420,7 @@ async def create_tasks(request: Request) -> JSONResponse:
                     compositions=params["compositions"], scene_styles=params["scene_styles"],
                     slots=[item.model_dump() for item in state.slots],
                     prompt_pack=[], request_id=idempotency_key,
+                    ref_source=ref_source,
                     trace_id=trace, attrs=state.attrs,
                     image_count=(1 if reuse_map else min(planned_for_target,
                                                          params["image_count"])),
@@ -404,6 +431,7 @@ async def create_tasks(request: Request) -> JSONResponse:
                 )
                 asset_store.bind_refs_to_task(session, task.ref_asset_ids, task.task_id)
                 created.append({"task_id": task.task_id, "product_id": target.product_id,
+                                "ref_source": task.ref_source,
                                 "color": target.color, "color_key": target.color_key,
                                 "platform": platform, "variant_id": state.variant_id,
                                 "variant_direction": state.variant_direction,
@@ -426,6 +454,7 @@ async def create_tasks(request: Request) -> JSONResponse:
                            "max_tasks_per_request": settings.max_tasks_per_request,
                            "refs_truncated": resolution.truncated},
                 "planned_images": planned_images,
+                "ref_source": ref_source,
                 "reused_images": sum(1 for target, platform, variant in matrix
                                      if _reuse_of(target, platform, variant)),
                 "trace_id": trace, "idempotent": False,

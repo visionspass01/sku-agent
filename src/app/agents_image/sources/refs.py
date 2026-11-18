@@ -157,4 +157,137 @@ async def resolve_refs(
     return result
 
 
-__all__ = ["RefTarget", "RefResolution", "resolve_refs"]
+# ---------------------------------------------------------------- W3：素材库 / 拍立淘
+def _load_products(targets: list[RefTarget], products: dict[str, ProductData] | None) -> dict:
+    out: dict[str, ProductData] = {}
+    for target in targets:
+        if target.product_id in out:
+            continue
+        if products and target.product_id in products:
+            out[target.product_id] = products[target.product_id]
+    return out
+
+
+def _ref_of(asset, *, source: str, product_id: str, color: str = "",
+            color_hex: str = "", image_id: str = "", image=None) -> RefImage:
+    return RefImage(asset_id=asset.asset_id, sha256=asset.sha256, mime=asset.mime,
+                    width=asset.width, height=asset.height, bytes=asset.bytes,
+                    source=source, product_id=product_id, image_id=image_id,
+                    color=color, color_hex=color_hex or getattr(image, "color_hex", ""))
+
+
+async def resolve_library_refs(
+    targets: list[RefTarget],
+    *,
+    session,
+    username: str,
+    asset_ids: list[str],
+    max_refs: int = 6,
+    is_admin: bool = False,
+    products: dict[str, ProductData] | None = None,
+) -> RefResolution:
+    """素材库来源（W3）：用人工上传的素材库图片做参考图。
+
+    - 素材库是**全局池 + 账号隔离**：普通账号只能用自己上传的图（管理员可用全部）；
+    - 必须**显式勾选**（不给就报 `IMG_REFERENCE_REQUIRED`，不猜"用最新上传的"）；
+    - 素材图**不参与颜色锁定**：颜色仍由中台 attrs 决定（避免用错色图当颜色依据）。
+    """
+    if not targets:
+        raise_image("IMG_REFERENCE_REQUIRED", "请至少选择一个商品")
+    ids = [str(item).strip() for item in asset_ids or [] if str(item).strip()]
+    if not ids:
+        raise_image("IMG_REFERENCE_REQUIRED",
+                    "参考图来源为素材库，但没有勾选任何素材图；"
+                    "请先在素材库上传/勾选（或把 ref_source 改回 mcp）")
+    rows = asset_store.get_assets(session, ids)
+    usable = [row for row in rows if row.kind == "library"]
+    others = [row for row in usable if not is_admin and row.username != username]
+    if others:
+        raise_image("IMG_FORBIDDEN", "素材库图片属于其他账号，不能使用")
+    if not usable:
+        raise_image("IMG_REFERENCE_REQUIRED", "勾选的素材图不存在或已删除，请重新选择")
+    usable = usable[: max(1, int(max_refs))]
+    result = RefResolution(products=_load_products(targets, products))
+    refs = [_ref_of(row, source="library", product_id=row.product_id or "")
+            for row in usable]
+    for target in targets:
+        result.refs[target.color_key] = list(refs)
+    return result
+
+
+async def resolve_pailitao_refs(
+    catalog: PlatformCatalog,
+    targets: list[RefTarget],
+    *,
+    session,
+    username: str,
+    department: str | None,
+    products: dict[str, ProductData] | None = None,
+    query_asset_ids: list[str] | None = None,
+    min_sales: int = 100,
+    top_n: int = 5,
+    max_refs: int = 6,
+    timeout_seconds: float = 5.0,
+) -> RefResolution:
+    """拍立淘来源（W3）：拿图去中台搜相似款，只取销量 > `min_sales` 的前 `top_n` 个商品主图。
+
+    - 搜图的输入图：优先用勾选的素材库图（`query_asset_ids`），否则用所选商品的第一个颜色主图；
+    - 结果按销量降序，一个商品只取一张主图（因此最多 `top_n` 张、同时也是商品数上限）；
+    - 没有符合条件的商品 → `IMG_SIMILAR_NOT_FOUND`「未搜到销量超100的近似商品」（直接终止，不降级）；
+    - 拍立淘图**不参与颜色锁定**（身份锁定仍取中台 attrs）。
+    """
+    if not targets:
+        raise_image("IMG_REFERENCE_REQUIRED", "请至少选择一个商品")
+    unique = _load_products(targets, products)
+    for target in targets:
+        if target.product_id not in unique:
+            unique[target.product_id] = await catalog.get_product(target.product_id)
+
+    finder = getattr(catalog, "find_similar", None)
+    if not callable(finder):
+        raise_image("IMG_UPSTREAM_MCP_UNAVAILABLE",
+                    "当前商品数据源不支持拍立淘搜图（需要中台 MCP 图像搜索能力）",
+                    retryable=False)
+
+    query_refs = asset_store.get_assets(session, list(query_asset_ids or []))
+    query_bytes = asset_store.read_asset_bytes(query_refs[0]) if query_refs else b""
+
+    result = RefResolution(products=unique)
+    for product_id in unique:
+        data = unique[product_id]
+        raw = query_bytes
+        if not raw:
+            ordered = _pick_images(data.images, targets[0].color if targets else "")
+            usable = [item for item in ordered if item.has_payload]
+            if not usable:
+                raise_image("IMG_REFERENCE_REQUIRED",
+                            f"商品 {product_id} 没有可用于搜图的图片（也勾选了素材库图）")
+            raw = await _fetch(usable[0], timeout=timeout_seconds, catalog=catalog)
+        similar = await finder(raw, min_sales=int(min_sales), top_n=int(top_n))
+        similar = [item for item in similar if int(item.sales) > int(min_sales)]
+        similar.sort(key=lambda item: -int(item.sales))
+        picked: list[RefImage] = []
+        for item in similar:
+            if len(picked) >= max(1, int(max_refs)):
+                break
+            if item.image is None or not item.image.has_payload:
+                continue
+            payload = await _fetch(item.image, timeout=timeout_seconds, catalog=catalog)
+            asset = asset_store.save_bytes(
+                session, payload, kind="ref", mime=item.image.mime or "image/png",
+                username=username, department=department,
+                product_id=product_id, source="pailitao",
+            )
+            picked.append(_ref_of(asset, source="pailitao", product_id=product_id,
+                                  image_id=item.image.image_id, image=item.image))
+        if not picked:
+            raise_image("IMG_SIMILAR_NOT_FOUND",
+                        f"未搜到销量超{int(min_sales)}的近似商品")
+        for target in targets:
+            if target.product_id == product_id:
+                result.refs[target.color_key] = list(picked)
+    return result
+
+
+__all__ = ["RefTarget", "RefResolution", "resolve_refs", "resolve_library_refs",
+           "resolve_pailitao_refs"]

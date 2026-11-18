@@ -26,6 +26,7 @@ IMAGE_TOOL_NAMES = (
     "image_list_products",
     "image_get_product",
     "image_get_products_context",   # W2：批量商品上下文（3 秒窗口合并后的单次调用）
+    "image_find_similar",           # W3：拍立淘以图搜相似款
     "image_list_compositions",
     "image_list_scene_styles",
     "image_get_plan_policy",
@@ -199,6 +200,21 @@ async def image_get_products_context(product_ids: list[str]) -> dict:
     return {"products": products, "missing": missing, "error": ""}
 
 
+async def image_find_similar(image_b64: str = "", min_sales: int = 100,
+                             top_n: int = 5) -> dict:
+    """拍立淘（W3）：把图交给中台搜相似款，只认销量 > 门槛的前 N 个商品。"""
+    if not image_b64:
+        return {"items": [], "count": 0, "error": "缺少待搜图片", "error_kind": "invalid"}
+    payload = await _request("POST", "/api/v1/image/similar-by-image",
+                             json_body={"image_b64": image_b64,
+                                        "min_sales": int(min_sales),
+                                        "top_n": int(top_n)})
+    if payload is None:
+        return {"items": [], "count": 0, "error": "中台相似款搜索不可用"}
+    return {"items": list(payload.get("items") or []),
+            "count": int(payload.get("count") or 0), "error": ""}
+
+
 async def image_list_compositions(category: str = "", platform: str = "淘系") -> dict:
     """构图候选（composition_id / label / desc / prompt_hint）。"""
     data = await _request("GET", "/api/v1/image/presets/compositions",
@@ -259,6 +275,7 @@ IMAGE_TOOLS = {
     "image_list_products": image_list_products,
     "image_get_product": image_get_product,
     "image_get_products_context": image_get_products_context,
+    "image_find_similar": image_find_similar,
     "image_list_compositions": image_list_compositions,
     "image_list_scene_styles": image_list_scene_styles,
     "image_get_plan_policy": image_get_plan_policy,
@@ -275,6 +292,7 @@ def _build_server():
     server.tool()(image_list_products)
     server.tool()(image_get_product)
     server.tool()(image_get_products_context)
+    server.tool()(image_find_similar)
     server.tool()(image_list_compositions)
     server.tool()(image_list_scene_styles)
     server.tool()(image_get_plan_policy)

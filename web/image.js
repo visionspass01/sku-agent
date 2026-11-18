@@ -18,6 +18,8 @@ const state = {
   products: [],
   catalog: null,
   selected: new Set(),
+  library: [],
+  librarySelected: new Set(),
   streams: new Map(),
 };
 
@@ -110,6 +112,7 @@ function renderIdentity() {
     loadQuota();
     loadProducts();
     loadCatalog();
+    updateRefSourceUi();
     if (state.user.is_admin) loadAdmin();
   }
 }
@@ -141,6 +144,9 @@ async function doLogout() {
   saveSession("", null);
   state.selected.clear();
   state.products = [];
+  state.library = [];
+  state.librarySelected.clear();
+  renderLibrary();
   renderIdentity();
 }
 
@@ -246,6 +252,113 @@ async function loadQuota() {
   }
 }
 
+/* ---------------------------------------------------------------- 参考图来源（W3） */
+const REF_SOURCE_HINTS = {
+  mcp: "中台商品图：按「商品+颜色」取主图与细节图，颜色会锁到底（推荐用于精确复刻）。",
+  library: "素材库：用人工上传的图做参考，图不参与颜色锁定，颜色仍以中台 attrs 为准。",
+  pailitao: "拍立淘：把你的图交给中台搜相似款，只取销量 > 100 的前 5 个商品主图；搜不到会直接报错。",
+};
+
+function currentRefSource() {
+  const select = $("ref-source-select");
+  return (select && select.value) || "mcp";
+}
+
+function updateRefSourceUi() {
+  const source = currentRefSource();
+  const panel = $("library-panel");
+  if (panel) panel.hidden = source !== "library";
+  setHint("ref-source-hint", REF_SOURCE_HINTS[source] || "", "low");
+  if (source === "library") loadLibrary();
+}
+
+async function loadLibrary() {
+  if (!state.token) return;
+  try {
+    const body = await api("/api/image/library");
+    state.library = body.items || [];
+    const ids = new Set(state.library.map((item) => item.asset_id));
+    state.librarySelected.forEach((id) => {
+      if (!ids.has(id)) state.librarySelected.delete(id);
+    });
+    renderLibrary();
+    const limits = body.limits || {};
+    setText("library-hint", `已上传 ${state.library.length}/${limits.max_images || "-"} 张` +
+      `（单图 ≤ ${limits.max_mb || "-"} MB），勾选后用于本次任务`);
+  } catch (err) {
+    setText("library-hint", `素材库加载失败：${err.message}`);
+  }
+}
+
+function renderLibrary() {
+  const grid = $("library-grid");
+  if (!grid) return;
+  if (!state.library.length) {
+    grid.innerHTML = '<p class="muted">素材库还是空的：选一张图上传（png / jpeg / webp）。</p>';
+    return;
+  }
+  grid.innerHTML = state.library.map((item) => {
+    const checked = state.librarySelected.has(item.asset_id) ? "checked" : "";
+    return [
+      `<figure class="library-card${checked ? " selected" : ""}" data-asset="${esc(item.asset_id)}">`,
+      `<label><input type="checkbox" class="library-check" data-asset="${esc(item.asset_id)}" ${checked} />`,
+      `<img loading="lazy" alt="素材图" src="${esc(item.signed_url || item.url)}" /></label>`,
+      `<figcaption><span>${esc(item.width)}×${esc(item.height)}</span>`,
+      `<button class="mini-btn secondary library-del" data-asset="${esc(item.asset_id)}">删除</button>`,
+      "</figcaption></figure>",
+    ].join("");
+  }).join("");
+  grid.querySelectorAll(".library-check").forEach((box) => {
+    box.addEventListener("change", () => {
+      if (box.checked) state.librarySelected.add(box.dataset.asset);
+      else state.librarySelected.delete(box.dataset.asset);
+      renderLibrary();
+    });
+  });
+  grid.querySelectorAll(".library-del").forEach((button) => {
+    button.addEventListener("click", async () => {
+      try {
+        await api(`/api/image/library/${button.dataset.asset}`, { method: "DELETE" });
+        state.librarySelected.delete(button.dataset.asset);
+        loadLibrary();
+      } catch (err) {
+        setText("library-hint", `删除失败：${err.message}`);
+      }
+    });
+  });
+}
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(new Error("读取文件失败"));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function uploadLibraryImage() {
+  const input = $("library-file");
+  const file = input && input.files && input.files[0];
+  if (!file) {
+    setText("library-hint", "先选择一张图片");
+    return;
+  }
+  const button = $("btn-library-upload");
+  if (button) button.disabled = true;
+  setText("library-hint", "上传中…");
+  try {
+    const dataUrl = await readFileAsDataUrl(file);
+    await api("/api/image/library", { json: { data_b64: dataUrl, mime: file.type } });
+    input.value = "";
+    await loadLibrary();
+  } catch (err) {
+    setText("library-hint", `上传失败：${err.message}`);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
 /* ---------------------------------------------------------------- 建任务 + SSE */
 async function createTasks() {
   const productIds = Array.from(state.selected);
@@ -268,6 +381,15 @@ async function createTasks() {
   const style = $("scene-style-select").value;
   if (composition) payload.compositions = [composition];
   if (style) payload.scene_styles = [style];
+  // W3：参考图三源（互斥）；素材库按勾选传，拍立淘可选用素材图当搜图输入
+  const refSource = currentRefSource();
+  payload.ref_source = refSource;
+  const libraryIds = Array.from(state.librarySelected);
+  if (libraryIds.length) payload.library_asset_ids = libraryIds;
+  if (refSource === "library" && !libraryIds.length) {
+    setText("create-hint", "参考图来源是素材库，请先勾选素材图（或切回中台商品图）");
+    return;
+  }
 
   const button = $("btn-create");
   button.disabled = true;
@@ -275,7 +397,9 @@ async function createTasks() {
   try {
     const body = await api("/api/image/tasks", { json: payload });
     setText("batch-badge", `batch: ${body.batch_id}`);
-    setText("create-hint", `已创建 ${body.tasks.length} 个任务` + (body.platforms ? `（平台：${body.platforms.join("/")}）` : ""));
+    setText("create-hint", `已创建 ${body.tasks.length} 个任务` +
+      (body.ref_source ? `（参考图：${body.ref_source}）` : "") +
+      (body.platforms ? `（平台：${body.platforms.join("/")}）` : ""));
     body.tasks.forEach((task) => watchTask(task.task_id, task.product_id));
     loadQuota();
   } catch (err) {
@@ -534,6 +658,13 @@ function bindEvents() {
     if (event.key === "Enter") loadProducts();
   });
   $("btn-create").addEventListener("click", createTasks);
+  const refSelect = $("ref-source-select");
+  if (refSelect) refSelect.addEventListener("change", updateRefSourceUi);
+  const uploadButton = $("btn-library-upload");
+  if (uploadButton) uploadButton.addEventListener("click", uploadLibraryImage);
+  const refreshButton = $("btn-library-refresh");
+  if (refreshButton) refreshButton.addEventListener("click", loadLibrary);
+  updateRefSourceUi();
   $("btn-clear").addEventListener("click", () => {
     state.selected.clear();
     renderProducts();

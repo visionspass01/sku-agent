@@ -176,7 +176,7 @@ def test_memory_ignores_blank_signature(_db):
 
 
 # ---------------------------------------------------------------- 编排闭环
-def _seed_task(tmp_path, monkeypatch, *, aspect="1:1") -> str:
+def _seed_task(tmp_path, monkeypatch, *, aspect="1:1", prompt="白底主图") -> str:
     monkeypatch.setenv("IMAGE_IMAGES_ROOT", str(tmp_path / "images"))
     monkeypatch.setenv("IMAGE_CLEANUP_INTERVAL_MINUTES", "0")
     reset_image_settings()
@@ -184,7 +184,7 @@ def _seed_task(tmp_path, monkeypatch, *, aspect="1:1") -> str:
     with session_scope() as session:
         ref = asset_store.save_bytes(session, placeholder_png("r", 64, 64), kind="ref",
                                      product_id="P-1001")
-        state = _state(aspect=aspect)
+        state = _state(aspect=aspect, prompt=prompt)
         state.slots = [SlotPlan(**item) for item in plan_slots.build_slots(
             state, policy=asyncio.run(FakeCatalog().get_plan_policy()))]
         task = task_store.create_task(
@@ -200,13 +200,17 @@ def _seed_task(tmp_path, monkeypatch, *, aspect="1:1") -> str:
 
 def test_graph_retries_after_critic_failure(tmp_path, monkeypatch, _db):
     """第一轮出图比例错误 → Critic 判失败 → Reflexion 改 Prompt → 第二轮通过。"""
-    task_id = _seed_task(tmp_path, monkeypatch)
+    marker = "critic-retry-marker-9f2a"
+    task_id = _seed_task(tmp_path, monkeypatch, prompt=f"白底主图 {marker}")
     from app.agents_image.providers.fake import FakeProvider
 
     original = FakeProvider.generate          # 先取未绑定的原函数，避免被自己的补丁递归
     state = {"calls": 0}
 
     async def generate(self, req):
+        # 只统计**本用例任务**的调用：别的用例遗留的后台任务也会走 provider（prompt 里没有这个标记）
+        if marker not in (req.prompt or ""):
+            return await original(self, req)
         state["calls"] += 1
         if state["calls"] == 1:
             bad = placeholder_png("bad", 640, 360)         # 16:9，与 1:1 不符
