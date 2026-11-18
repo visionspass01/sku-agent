@@ -638,6 +638,15 @@ _EXTRA_COLUMNS: dict[str, list[tuple[str, str]]] = {
     ],
     # 服装口径上移后补列：老库里 dim_sku / mart_sku_metrics 没有这些字段，
     # 不补的话 SELECT 会直接报 "no such column"（create_all 不会 ALTER 既有表）。
+    # 生图回写的新字段（v8）：文案契约 / 是否复用 / 变体 / 参考图来源。
+    # 老库直接 SELECT 会报 "no such column: image_result.copy_json"，所以必须在迁移里补。
+    "image_result": [
+        ("copy_json", "JSON"),
+        ("reused", "INTEGER DEFAULT 0"),
+        ("variant_id", "VARCHAR(8) DEFAULT ''"),
+        ("variant_direction", "VARCHAR(64) DEFAULT ''"),
+        ("ref_source", "VARCHAR(16) DEFAULT 'mcp'"),
+    ],
     "dim_sku": [
         ("platform", "VARCHAR(16) DEFAULT ''"),
         ("list_price", "FLOAT DEFAULT 0"),

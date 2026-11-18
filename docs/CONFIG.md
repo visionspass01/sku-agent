@@ -225,4 +225,23 @@
 | `IMAGE_COMPLIANCE_AUTOFIX` | `true` | 门禁不过时先归白/裁方/放大再复检 |
 | `IMAGE_COST_BUDGET_CNY` | `0.5` | 单次请求成本估算上限（估算用 `IMAGE_COST_PER_IMAGE_CNY`；真实成本取 provider） |
 
+---
+
+## v8 新增配置（生图 Agent，本轮评审修复）
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `IMAGE_CONTEXT_BATCH_WINDOW_SECONDS` | `3.0` | 商品上下文合并窗口：窗口内的取数合成一次 MCP 调用（0=不合并） |
+| `IMAGE_CONTEXT_BATCH_MAX_IDS` | `50` | 单次合并请求最多带多少个商品 id（超出自动分片） |
+| `IMAGE_CONTEXT_CACHE_TTL_SECONDS` | `60` | 商品上下文缓存时长（0=不缓存） |
+| `IMAGE_TASK_LEASE_SECONDS` | `300` | 任务租约：执行期每阶段续约，看门狗只重投租约过期的任务 |
+| `IMAGE_MAX_RECOVERIES` | `3` | 同一任务最多被看门狗重投几次（超限判 `IMG_RECOVERY_EXHAUSTED`） |
+| `IMAGE_PROVIDER_RETRIES` | `2` | 第三方生图调用重试次数（只重试限流/超时/5xx，计入「发起量」） |
+| `IMAGE_PROVIDER_RETRY_BACKOFF_SECONDS` | `0.2` | 重试退避基数（第 n 次等待 n×该值） |
+| `IMAGE_MAX_TASK_RETRIES` | `3` | 失败任务可被人工重试的次数上限（单任务与批次重试共用） |
+| `IMAGE_LIBRARY_MAX_MB` | `8.0` | 素材库单图大小上限（MB） |
+| `IMAGE_LIBRARY_MAX_IMAGES` | `20` | 每个账号素材库图片数量上限 |
+| `IMAGE_PAILITAO_MIN_SALES` | `100` | 拍立淘相似款的销量门槛（严格大于） |
+| `IMAGE_PAILITAO_TOP_N` | `5` | 每个商品最多取几个相似款主图（1..5） |
+
 平台标识：**淘系 / 抖系**（`通用` 仅作中台兜底规则卡）。

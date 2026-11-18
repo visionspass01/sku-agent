@@ -17,7 +17,7 @@
 - 部门权限隔离与写操作人工确认（HITL），审批与售后为单条原子操作
 - 全链路可观测（每轮运行详情、延迟分位、工具可靠性、trace_id 贯通）
 
-工程侧同时提供 1075 条离线测试、12 道 CI 门禁、11 个评测脚本与 4 个基准脚本，所有对外数字均可一条命令复现。
+工程侧同时提供 1448 条离线测试、12 道 CI 门禁、11 个评测脚本与 4 个基准脚本，所有对外数字均可一条命令复现。
 
 ---
 
@@ -33,7 +33,7 @@
 | **数据库** | SQLite / MySQL 8.0 | 本地零依赖启动，容器部署使用 MySQL |
 | **缓存与队列** | Redis 7 / fakeredis | TTL 抖动缓存、巡检 Stream 消费组、分布式锁 |
 | **检索** | BM25 + 512 维哈希向量 + RRF + 可插拔重排 | 可选腾讯云 TokenHub Embedding + Qdrant |
-| **测试与质量** | pytest + coverage、ruff、Node DOM 冒烟、GitHub Actions | 1075 条离线用例，覆盖率 89% |
+| **测试与质量** | pytest + coverage、ruff、Node DOM 冒烟、GitHub Actions | 1448 条离线用例，覆盖率 89% |
 | **部署** | Docker Compose | 六服务编排，4C4G 单机可运行 |
 
 ---
@@ -197,7 +197,7 @@ sku-agent-demo/
 ├── docs/                               # 8 份工程文档（架构 / API / 配置 / 部署 / RAG / UI / 简介 / 一页纸）
 ├── PYTHON_BACKEND_GUIDE.md             # 逐模块代码导读（11 章）
 ├── scripts/                            # 初始化 / 评测 / 基准 / 校验 / 演示脚本
-├── tests/                              # 1075 条离线测试（1076 收集）
+├── tests/                              # 1448 条离线测试（1076 收集）
 ├── docker/                             # Dockerfile、compose 编排、nginx、初始化 SQL
 ├── AGENTS.md                           # L2 工作区基线（运行时注入系统提示）
 ├── data/kb/                            # 14 篇知识库（67 个片段：通用 9 篇 SOP + 男装 2 + 女装 2 + 历史案例 1）
@@ -352,7 +352,7 @@ Redis、Qdrant、Embedding、数据中台、模型五类依赖均有降级阶梯
 
 ### 10. 对外数字可复现
 
-1075 条离线测试、12 道 CI 门禁、11 个评测脚本与 4 个基准脚本；检索、权限、治理、口径、降级、并发等指标均提供单条命令与固定题集，文档中的数值标注为实测口径。
+1448 条离线测试、12 道 CI 门禁、11 个评测脚本与 4 个基准脚本；检索、权限、治理、口径、降级、并发等指标均提供单条命令与固定题集，文档中的数值标注为实测口径。
 
 ---
 
@@ -360,7 +360,7 @@ Redis、Qdrant、Embedding、数据中台、模型五类依赖均有降级阶梯
 
 | 指标 | 结果 | 命令 |
 |------|------|------|
-| 离线测试 | 1075 passed / 1076 收集，覆盖率 89% | `pytest --cov=src/app --cov=src/data_platform` |
+| 离线测试 | 1448 passed / 1448 收集，覆盖率 89% | `pytest --cov=src/app --cov=src/data_platform` |
 | Agent 路由 | 100%（26/26） | `scripts/eval_routing.py --min-accuracy 0.9` |
 | 工具部门作用域 | 100%（34/34） | `scripts/eval_permissions.py --min-pass 1.0` |
 | 中台治理 | 100%（30/30） | `scripts/eval_platform_governance.py` |
@@ -442,11 +442,11 @@ Redis、Qdrant、Embedding、数据中台、模型五类依赖均有降级阶梯
 同一仓库里的第二个演示 Agent（与 SKU 监管 Agent 并行、互不影响）：**服装电商图生图**。
 
 - 入口：`/agents.html` → 「电商生图 Agent」卡片 → `/image.html`（独立登录态）
-- 输入：用户在**中台商品清单里批量选中商品（1–5 个）** + 自然语言需求；参考图由 Agent 经 MCP 从所选商品取，**用户不能上传图片**
+- 输入：用户在**中台商品清单里批量选中商品（1–5 个）** + 自然语言需求；参考图有三种来源（任务级互斥）：**中台商品图**（默认，颜色锁定）/ **人工上传素材库** / **拍立淘相似款**（销量 >100 的前 5 个商品主图，搜不到直接报错）
 - 参数：构图 / 场景风格 / 9 图位策略 / 张数默认 / 平台规则 / 商品数据 **全部来自数据中台（经 MCP）**，中台不可用直接 503 让人重试（不静默降级）
 - 执行：9 图位规划 → 五槽位 Prompt（七条铁律）→ RAG 写法片段 → 本地生图插件（`IMAGE_PROVIDER=fake` 出占位图；真实 Seedream 后置）→ Critic 评审 → Reflexion 重写问题图位
 - 产出：图片存本地 24h（或 COS，后置）；**结果元数据（不含图片）回写中台**，失败进 outbox 可重放
-- 台账：独立账号（`admin / hhw123`、`worker1 / hhw111`、`worker2 / hhw222`）、配额（按交付张数）、使用量、管理员面板（SVG 折线图 + 5 张卡）
+- 台账：独立账号（`admin / hhw123`、`worker1 / hhw111`、`worker2 / hhw222`）、配额（按**使用量**占额度）、管理员面板（SVG 折线图 + 5 张卡：使用量·发起量·成功率·上架率·配额·在途成本）
 
 ### 快速体验（全部离线，无需 Key）
 
@@ -467,7 +467,9 @@ PYTHONPATH=src uvicorn app.main:app --port 8000
 |---|---|
 | 账号 | `POST /api/image/auth/login` · `GET /me` · `POST /logout` · `POST /verify` |
 | 参数 | `GET /api/image/products` · `GET /api/image/catalog`（均转发中台） |
-| 任务 | `POST /api/image/tasks`（批量选商品）· `GET /tasks` · `GET /tasks/{id}` · `GET /tasks/{id}/stream`(SSE) · `POST /tasks/{id}/cancel` |
+| 任务 | `POST /api/image/tasks`（批量选商品）· `GET /tasks` · `GET /tasks/{id}` · `GET /tasks/{id}/stream`(SSE) · `POST /tasks/{id}/cancel` · `POST /tasks/{id}/retry` |
+| 批次 | `POST /api/image/tasks/cancel-batch` · `POST /api/image/tasks/retry-batch` · `GET /api/image/batches/{batch_id}` |
+| 素材库 | `POST/GET /api/image/library` · `DELETE /library/{asset_id}`（按账号隔离） |
 | 我的 | `GET /api/image/assets/{id}` · `GET /api/image/quota` · `GET /api/image/health` |
 | 管理员 | `/api/image/admin/{metrics,tasks,tasks/{id},users,quota,reload,reindex,replay-outbox}` |
 
@@ -479,6 +481,12 @@ PYTHONPATH=src python scripts/bench_image.py       # 并发压测（零成本）
 PYTHONPATH=src python scripts/check_image.py 主图.png --platform 淘系 [--fix out.png]
 ```
 `check_image.py` 的像素级校验对 PNG **零依赖**（自带解码），JPEG/WebP 才需要可选的 Pillow。
+
+起了真实服务后可以一条命令跑通全链路（建任务 / iterate 差额 / 幂等 / 素材库 / 拍立淘 / 批次 / 口径卡片）：
+
+```bash
+PYTHONPATH=src python scripts/smoke_image_service.py --app http://127.0.0.1:8021
+```
 
 
 ---
@@ -505,3 +513,26 @@ PYTHONPATH=src python scripts/check_image.py 主图.png --platform 淘系 [--fix
 
 **评测口径**（`scripts/eval_image.py`，离线）：Recall@3、Prompt 合规率、像素门禁通过率、双平台差异率、variant 差异率、首轮通过率、时延。
 出图**质量**评估后期由人工评测（采纳率/上架率/驳回原因），自动评测只覆盖结构与规则指标。
+
+---
+
+## v8：第二轮评审修复（生图 Agent）
+
+第二轮评审的 12 类问题 + 一个新需求（参考图三源）已全部落地，另一批明确留到后期。
+
+| 类别 | 变化 |
+|---|---|
+| **跨色串成品** | `iterate` 复用只对同一 `(颜色, 平台, 变体)` 生效；多色/双平台不再互相挂错成品 |
+| **幂等** | 事务内先抢占 `image_request(pending)`：并发同 key 返回 409 + `Retry-After`，失败回滚后可重试 |
+| **额度账** | 只依赖事务回滚撤销预留（不再二次释放）；派发失败保留 `queued` 交看门狗补投；结算按**使用量**占额度 |
+| **看门狗** | 「启动超时」改为**租约**（每阶段续约）+ 重投封顶，正常长任务不会被误重投 |
+| **取数效率** | 商品上下文 3 秒窗口合并成一次 MCP 调用（+60s TTL、50 个 id 分片）；部门闸前置到下载参考图之前 |
+| **参考图三源** | 中台商品图 / 素材库（人工上传，按账号隔离）/ 拍立淘（销量 >100 的相似款前 5 个主图，无符合直接 422） |
+| **iterate 差额** | 基础任务缺图位时按差额补齐，配额与结算用同一个张数（不再"预留 1 张、实际出 6 张"） |
+| **文案口径** | 变体方向只进 Prompt 场景块、不进图内主标语；`copy_json` 落任务并回写中台 |
+| **第三方韧性** | 限流/超时/5xx 退避重试（默认 2 次），真实发起次数记「发起量」；失败任务可单任务/整批重试 |
+| **数据口径** | 5 张卡：使用量(+发起量/可用性) · 生图成功率 · 上架率 · 配额 · 在途+成本（单张成本） |
+| **可解释** | 任务落 `warnings/blocked`；结算对账不一致 → `IMG_QUOTA_SETTLE_MISMATCH`；库结构降级 → `/health degraded` |
+| **批次与首屏** | 整批取消/重试/批次汇总；管理端按部门筛选；画廊 20 张/页懒加载，首屏不再一次渲染几十张图 |
+
+留到后期：Critic 视觉保真（vision 质检）、真实 provider 契约测试、出图质量的**人工评测口径**（需与业务部门统一）。

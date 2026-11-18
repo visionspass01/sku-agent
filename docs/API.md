@@ -270,11 +270,16 @@ MCP server 现在**不碰任何数据库**：它们是「工具名 → `/api/v1/
 | POST | `/api/image/auth/logout` | 令牌立即失效（jti 黑名单） |
 | GET | `/api/image/products?keyword=&limit=` | 商品清单（转发 MCP `image_list_products`） |
 | GET | `/api/image/catalog?platform=&category=` | 构图 / 场景风格 / 图位策略 / 平台规则 |
-| POST | `/api/image/tasks` | `{request_id?, product_ids[1..5], prompt, compositions?, scene_styles?, n?, aspect?, platform?}` → `{batch_id, tasks[], slots, limits}` |
+| POST | `/api/image/tasks` | `{request_id?, product_ids[1..5], prompt, compositions?, scene_styles?, n?, aspect?, platform?}` → `{batch_id, tasks[], slots, limits}`；v8 新增 `ref_source`(mcp/library/pailitao)、`library_asset_ids[]`、`base_task_id` |
 | GET | `/api/image/tasks?batch_id=` | 我的任务列表（管理员 `?all=true`） |
 | GET | `/api/image/tasks/{id}` | 任务快照（含 `slots / prompt_pack / refs / assets / backfill_status`） |
 | GET | `/api/image/tasks/{id}/stream` | SSE：`snapshot → stage → asset → backfill → done` |
 | POST | `/api/image/tasks/{id}/cancel` | 取消（已结束 409 `IMG_TASK_CONFLICT`） |
+| POST | `/api/image/tasks/{id}/retry` | 重试失败/已取消任务（上限 `IMAGE_MAX_TASK_RETRIES`，重新预留额度） |
+| POST | `/api/image/tasks/cancel-batch` | `{batch_id}` → 整批取消（两分支语义，返回逐任务结果与统计） |
+| POST | `/api/image/tasks/retry-batch` | `{batch_id}` → 整批重试失败/已取消任务（done/queued 明确跳过） |
+| GET | `/api/image/batches/{batch_id}` | 批次汇总：状态分布 / 交付 / 尝试 / 复用 / 成本 / 参考图来源 / 任务 brief |
+| POST/GET/DELETE | `/api/image/library` · `/library/{asset_id}` | 素材库：上传（JSON base64）/ 列表 / 删除（按账号隔离，管理员 `?scope=all`） |
 | GET | `/api/image/assets/{id}` | 取图（本人或管理员；本地存储走鉴权接口） |
 | GET | `/api/image/quota` | 我的配额（管理员返回 `unlimited`） |
 | GET | `/api/image/health` | 健康（provider / product_source / 并发 / 计数） |
@@ -284,7 +289,7 @@ MCP server 现在**不碰任何数据库**：它们是「工具名 → `/api/v1/
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/image/admin/metrics?granularity=day&count=30&username=` | 折线桶（含按账户细分）+ 5 张卡 + outbox 状态 |
-| GET | `/api/image/admin/tasks?username=&status=&limit=` | 全量任务 |
+| GET | `/api/image/admin/tasks?username=&status=&department=&limit=` | 全量任务（v8 支持按部门筛选） |
 | GET | `/api/image/admin/tasks/{id}` | 任务详情（Prompt 包、图位、回写状态） |
 | GET/POST/PUT | `/api/image/admin/users` · `/users/{username}` | 账号列表 / 新建 / 改密码或启停 |
 | GET/PUT | `/api/image/admin/quota` · `/quota/{username}` | 配额列表 / 授权（day/week/month/unlimited） |
@@ -298,7 +303,9 @@ MCP server 现在**不碰任何数据库**：它们是「工具名 → `/api/v1/
 `IMG_BATCH_TOO_LARGE`(422) · `IMG_PRODUCT_NOT_FOUND`(404) · `IMG_REFERENCE_REQUIRED`(422，所选商品无可用图) ·
 `IMG_TOO_MANY_REFS`(422) · `IMG_QUOTA_EXCEEDED`(429) · `IMG_UPSTREAM_MCP_UNAVAILABLE`(503，中台不可用直接失败) ·
 `IMG_UPSTREAM_INVALID`(502) · `IMG_CONTENT_BLOCKED`(422) · `IMG_SCHEMA_INVALID`(422) · `IMG_CRITIC_FAILED`(422) ·
-`IMG_BACKFILL_FAILED`(502) · `IMG_TASK_NOT_FOUND`(404) · `IMG_TASK_CONFLICT`(409) · `IMG_TIMEOUT`(504)
+`IMG_BACKFILL_FAILED`(502) · `IMG_TASK_NOT_FOUND`(404) · `IMG_TASK_CONFLICT`(409) · `IMG_TIMEOUT`(504) ·
+`IMG_SIMILAR_NOT_FOUND`(422，拍立淘没搜到销量 >100 的近似款) · `IMG_LIBRARY_FULL`(422，素材库超上限) ·
+`IMG_PROVIDER_RATE_LIMITED`(429) / `IMG_PROVIDER_UNAVAILABLE`(503)（第三方限流/不可用，已自动重试 `IMAGE_PROVIDER_RETRIES` 次）
 
 
 ---
@@ -315,3 +322,21 @@ MCP server 现在**不碰任何数据库**：它们是「工具名 → `/api/v1/
 | `GET /api/image/assets/{id}` | 支持 `?exp=&sig=` 短签名（5 分钟），给 `<img src>` 用；过期/篡改 403 |
 | `GET /api/image/tasks` | 支持 `limit` / `offset` 分页 |
 | 错误码新增 | `IMG_REFS_BUDGET`(422，颜色×参考图超预算)、`IMG_COST_BUDGET_EXCEEDED`(429，预算闸) |
+
+---
+
+## v8 接口变化（生图 Agent，本轮评审修复）
+
+| 变化 | 说明 |
+|---|---|
+| 参考图三源（互斥，任务级） | `ref_source=mcp`（默认，中台商品图按颜色锁定）/`library`（人工上传素材库，需 `library_asset_ids`）/`pailitao`（拍立淘相似款，销量 >100 前 5 个商品主图，搜不到即 422 `IMG_SIMILAR_NOT_FOUND`） |
+| 素材库 | `POST /api/image/library`（`{data_b64, mime?}`，单图 ≤ `IMAGE_LIBRARY_MAX_MB`，每人 ≤ `IMAGE_LIBRARY_MAX_IMAGES`）、`GET`、`DELETE /{asset_id}`；图不参与颜色锁定 |
+| 商品上下文批量取数 | 中台新增 `GET /api/v1/image/products/context?ids=`；MCP 新增 `image_get_products_context`；Agent 侧 3 秒窗口合并（`IMAGE_CONTEXT_BATCH_WINDOW_SECONDS`）+ 60s TTL 缓存，超 50 个 id 自动分片 |
+| 拍立淘 | 中台新增 `POST /api/v1/image/similar-by-image`；MCP 新增 `image_find_similar`（工具总数 9） |
+| 幂等 | 改为事务内先抢占 `image_request.pending`：并发同 key 返回 409 + `Retry-After: 2`；失败回滚后可重试 |
+| 配额 | 按**使用量**（第三方成功生成张数）占额度，被像素门禁拦下的图也计（钱已花）；`iterate` 只按差额计 |
+| 租约 | 任务执行期每阶段续约 `lease_until`；看门狗只拾取**租约过期**的 running，重投超 `IMAGE_MAX_RECOVERIES` 次判 `IMG_RECOVERY_EXHAUSTED` |
+| 重试 | 第三方调用只对限流/超时/5xx 退避重试（`IMAGE_PROVIDER_RETRIES`），真实发起次数记「发起量」 |
+| 任务详情 | 增加 `copy`（逐图位文案）、`warnings`、`blocked`、`retries`、`provider_calls` |
+| 口径（管理端 5 卡） | 使用量（+发起量、API 可用性=使用量/发起量）· 生图成功率（交付÷使用量）· 上架率（人工通过÷使用量，另给标记上架率）· 配额（used/limit）· 在途+成本（元/张） |
+| 健康检查 | `/api/image/health` 增加 `degraded` / `degraded_reason`（补列/唯一索引失败时置位）与 `context_batches` 统计 |
