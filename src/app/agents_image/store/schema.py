@@ -14,6 +14,9 @@ from app.db.engine import get_engine
 
 logger = logging.getLogger("sku-agent.image.schema")
 
+# 建表/补列/补索引的失败记录（功能10）：唯一索引建不上 = 幂等兜底失效，health 要能看到
+_ISSUES: list[str] = []
+
 # (表, 列, DDL 片段) —— 只加列，不改类型、不删列
 _COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("image_task", "color_key", "VARCHAR(64) DEFAULT ''"),
@@ -31,6 +34,9 @@ _COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("image_task", "recoveries", "INTEGER DEFAULT 0"),
     ("image_request", "status", "VARCHAR(16) DEFAULT 'pending'"),
     ("image_usage", "provider_calls", "INTEGER DEFAULT 0"),
+    ("image_usage", "agent_passed", "INTEGER DEFAULT 0"),
+    ("image_task", "warnings_json", "JSON"),
+    ("image_task", "blocked_json", "JSON"),
     ("image_task", "retries", "INTEGER DEFAULT 0"),
     ("image_task", "provider_calls", "INTEGER DEFAULT 0"),
     ("image_task", "listing_status", "VARCHAR(16) DEFAULT 'not_listed'"),
@@ -115,6 +121,7 @@ def _ensure_indexes(engine) -> list[str]:
             created.append(name)
         except Exception as exc:  # noqa: BLE001 —— 历史数据有重复时唯一索引会失败
             logger.warning("建索引失败 %s（可能有历史重复数据）：%s", name, exc)
+            _ISSUES.append(f"index {name}: {type(exc).__name__}: {exc}"[:200])
     return created
 
 
@@ -128,4 +135,14 @@ def ensure_image_schema() -> dict:
     models_base.create_all(engine, tables=tables)
     columns = _ensure_columns(engine)
     indexes = _ensure_indexes(engine)
-    return {"created": [t.name for t in tables], "columns": columns, "indexes": indexes}
+    return {"created": [t.name for t in tables], "columns": columns, "indexes": indexes,
+            "issues": list(_ISSUES)}
+
+
+def schema_status() -> dict:
+    """当前库结构是否"降级"（补列/唯一索引失败）：`/health` 与运维面板据此告警。"""
+    return {"degraded": bool(_ISSUES), "issues": list(_ISSUES)}
+
+
+def reset_schema_issues() -> None:
+    _ISSUES.clear()

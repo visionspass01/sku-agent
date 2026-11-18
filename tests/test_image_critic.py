@@ -25,7 +25,10 @@ from app.db.engine import session_scope
 
 
 @pytest.fixture(autouse=True)
-def _fresh():
+def _fresh(monkeypatch):
+    # 关掉看门狗：本文件直接建 queued 任务再手动 execute_task，
+    # 看门狗若同时重投同一任务会让 provider 调用次数翻倍（跨用例/跨线程串味）
+    monkeypatch.setenv("IMAGE_RECOVERY_INTERVAL_SECONDS", "0")
     reset_registry()
     reset_image_settings()
     image_metrics.reset()

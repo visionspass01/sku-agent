@@ -215,7 +215,8 @@ async def execute_task(task_id: str) -> ImageTaskState:
         memory_patches = _memory_patches(signature)
         state.touch("reflexion", attempt=attempt, issues=len(critic.issues))
         if attempt >= max_attempts:
-            _archive_failure(state, critic, signature, attempted)
+            _archive_failure(state, critic, signature, attempted,
+                             cost=sum(float(item or 0.0) for item in image_costs))
             raise ImageError("IMG_CRITIC_FAILED",
                              f"评审未通过（第 {attempt} 轮，score={critic.score}）："
                              f"{'；'.join(critic.issues[:3])}")
@@ -245,7 +246,8 @@ async def execute_task(task_id: str) -> ImageTaskState:
                                    error_code="IMG_TASK_CONFLICT",
                                    error_detail="已提交生图模型，结果被丢弃（用户取消）")
             _cancel_settle(session, state, attempted=attempted,
-                           provider_calls=provider_calls)
+                           provider_calls=provider_calls,
+                           cost=sum(float(item or 0.0) for item in image_costs))
             metrics.record_task_failed()
             state.touch("canceled", attempted=attempted)
             return state
@@ -327,7 +329,9 @@ async def execute_task(task_id: str) -> ImageTaskState:
                              slots=[slot.model_dump() if hasattr(slot, "model_dump") else dict(slot)
                                     for slot in (state.slots or [])])
         task_store.update_task(session, task_id, copy_json=copy_json,
-                               provider_calls=provider_calls)
+                               provider_calls=provider_calls,
+                               warnings_json=list(state.warnings or []),
+                               blocked_json=list(blocked or []))
         _settle(session, state, delivered=delivered, attempted=attempted, cost=cost,
                 provider_calls=provider_calls)
     metrics.record_task_done(delivered=delivered, attempted=attempted)
@@ -340,7 +344,7 @@ async def execute_task(task_id: str) -> ImageTaskState:
 
 
 def _archive_failure(state: ImageTaskState, critic: CriticResult, signature: str,
-                     attempted: int) -> None:
+                     attempted: int, cost: float = 0.0) -> None:
     """失败归档：任务 attempts 落库 + 失败签名写进 `image_memory`（下次同因优先复用修复）。
 
     同时记一次失败使用量（Critic 超限 = 一张都没交付，额度由调度器释放）。
@@ -356,7 +360,8 @@ def _archive_failure(state: ImageTaskState, critic: CriticResult, signature: str
             from app.agents_image.store import usage as usage_store
 
             usage_store.record(session, username=state.username, department=state.department,
-                               failed=1, tasks=1, attempted=attempted)
+                               failed=1, tasks=1, attempted=attempted, delivered=attempted,
+                               cost=cost)
     except Exception:  # noqa: BLE001 —— 归档失败不改变任务结论
         logger.warning("失败归档写入出错：task=%s", state.task_id)
 
@@ -387,17 +392,25 @@ def _settle(session, state: ImageTaskState, *, delivered: int, attempted: int,
     except Exception:  # noqa: BLE001 —— 账号查不到按普通用户处理
         is_admin = False
     planned = _planned_of(session, state.task_id)
-    if not is_admin:
-        # 交付成功张数结算，未出图的预留全部释放（失败/取消同理走 _cancel_settle）
-        quota_store.commit_reserve(session, state.username, min(delivered, planned))
-        quota_store.release(session, state.username, max(0, planned - delivered))
+    # 配额口径（功能8）：**使用量**（第三方成功生成的张数）占额度——被门禁拦下的图也已经花过钱，
+    # 不能因为"没交付"就白用额度；重试轮次多出的张数按本轮计划上限封顶，避免超扣。
+    charged = min(max(int(attempted), int(delivered)), planned or 0)
+    if not is_admin and planned:
+        settled = quota_store.commit_reserve(session, state.username, charged)
+        if not settled:
+            state.warnings.append(
+                "IMG_QUOTA_SETTLE_MISMATCH: 预留额度与结算张数不一致"
+                f"（计划 {planned} 张 / 结算 {charged} 张），已按剩余预留释放")
+            logger.warning("配额结算对账不一致：task=%s planned=%s charged=%s",
+                           state.task_id, planned, charged)
+        quota_store.release(session, state.username, max(0, planned - charged))
     usage_store.record(session, username=state.username, department=state.department,
-                       delivered=delivered, attempted=attempted, tasks=1, cost=cost,
-                       provider_calls=provider_calls)
+                       delivered=attempted, attempted=attempted, tasks=1, cost=cost,
+                       provider_calls=provider_calls, agent_passed=delivered)
 
 
 def _cancel_settle(session, state: ImageTaskState, *, attempted: int,
-                   provider_calls: int = 0) -> None:
+                   provider_calls: int = 0, cost: float = 0.0) -> None:
     """取消/失败结算：预留全部释放，尝试张数照记（成本已在 provider 侧发生）。"""
     from app.agents_image.store import quota as quota_store
     from app.agents_image.store import usage as usage_store
@@ -411,9 +424,10 @@ def _cancel_settle(session, state: ImageTaskState, *, attempted: int,
     planned = _planned_of(session, state.task_id)
     if not is_admin and planned:
         quota_store.release(session, state.username, planned)
+    # 取消/失败也要落使用量与成本：provider 已经跑过、钱已经花掉，不记就低估了成本
     usage_store.record(session, username=state.username, department=state.department,
-                       failed=1, tasks=1, attempted=attempted,
-                       provider_calls=provider_calls)
+                       failed=1, tasks=1, attempted=attempted, delivered=attempted,
+                       provider_calls=provider_calls, cost=cost)
 
 
 def _planned_of(session, task_id: str) -> int:

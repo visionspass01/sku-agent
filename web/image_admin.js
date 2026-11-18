@@ -50,23 +50,28 @@ const ImageAdmin = (() => {
     return key.slice(5);
   }
 
-  /* ------------------------------------------------------------ 指标卡 */
+  /* ------------------------------------------------------------ 指标卡（功能8 口径） */
   function renderCards(container, cards, extra) {
     if (!container) return;
     const data = cards || {};
     const outbox = (extra && extra.outbox) || {};
+    const pct = (value) => `${fmt((value || 0) * 100, 1)}%`;
     const items = [
-      { label: "RAG 缓存命中率", value: `${fmt((data.cache_hit_rate || 0) * 100, 1)}%`,
-        hint: "知识库召回的进程内缓存" },
-      { label: "LLM 调用 / token", value: `${fmt(data.llm_calls)} / ${fmt(data.llm_tokens)}`,
-        hint: "生图链路当前不调 LLM（rubric 预留）" },
-      { label: "当前生成中图片", value: fmt(data.in_flight_images), hint: "调度器在途" },
-      { label: "累计交付 / 尝试", value: `${fmt(data.images_delivered)} / ${fmt(data.images_attempted)}`,
-        hint: `任务 ${fmt(data.tasks_done)} 完成 · ${fmt(data.tasks_failed)} 失败` },
-      { label: "首轮通过率", value: `${fmt((data.first_pass_rate || 0) * 100, 1)}%`,
-        hint: `成本 ¥${fmt(data.cost_cny, 2)} · 回写待重放 ${fmt(outbox.pending)}` },
-      { label: "上架率（采纳→上架）", value: `${fmt((data.listing_rate || 0) * 100, 1)}%`,
-        hint: `采纳 ${fmt(data.adopted)} / 驳回 ${fmt(data.rejected)}` },
+      { label: "使用量（张）",
+        value: `${fmt(data.usage_images)} · 发起 ${fmt(data.provider_calls)}`,
+        hint: `API 可用性（使用量/发起量）${pct(data.api_availability)}` },
+      { label: "生图成功率（Agent 审核通过 / 使用量）",
+        value: pct(data.agent_pass_rate),
+        hint: `交付 ${fmt(data.agent_passed)} / 使用量 ${fmt(data.usage_images)}` },
+      { label: "上架率（人工通过 / 使用量）",
+        value: pct(data.listing_rate),
+        hint: `采纳 ${fmt(data.adopted)} / 驳回 ${fmt(data.rejected)} · 标记上架 ${pct(data.listing_reported_rate)}` },
+      { label: "配额（已用 / 上限）",
+        value: `${fmt(data.quota_used)} / ${fmt(data.quota_limit)}`,
+        hint: `用量占比 ${pct(data.quota_used_rate)}` },
+      { label: "在途 / 成本",
+        value: `${fmt(data.in_flight)} · ¥${fmt(data.cost_cny, 2)}`,
+        hint: `单张 ¥${fmt(data.cost_per_image, 4)} · 回写待重放 ${fmt(outbox.pending)}` },
     ];
     container.innerHTML = items.map((item) => `
       <div class="card">
@@ -109,7 +114,8 @@ const ImageAdmin = (() => {
       return;
     }
     const max = Math.max(1, ...buckets.map((bucket) => Number(bucket.images || 0)),
-      ...buckets.map((bucket) => Number(bucket.images_attempted || 0)));
+      ...buckets.map((bucket) => Number(bucket.provider_calls || 0)),
+      ...buckets.map((bucket) => Number(bucket.agent_passed || 0)));
     const gridY = 4;
     const innerH = CHART_H - PAD.top - PAD.bottom;
 
@@ -131,8 +137,10 @@ const ImageAdmin = (() => {
     }
 
     const delivered = chartPoints(buckets, "images", max);
-    const attempted = chartPoints(buckets, "images_attempted", max);
+    const attempted = chartPoints(buckets, "provider_calls", max);
+    const passed = chartPoints(buckets, "agent_passed", max);
     svgNode.appendChild(polyline(attempted, "#8fa3b8", true));
+    svgNode.appendChild(polyline(passed, "#34d399", false));
     svgNode.appendChild(polyline(delivered, "#38bdf8", false));
 
     delivered.forEach((point) => {
@@ -165,12 +173,12 @@ const ImageAdmin = (() => {
       });
       hot.addEventListener("mousemove", (event) => {
         const rows = Object.entries(bucket.by_user || {}).map(
-          ([user, stats]) => `${user}：交付 ${stats.images} / 尝试 ${stats.images_attempted}`
+          ([user, stats]) => `${user}：使用量 ${stats.images} / 发起 ${stats.provider_calls}`
         );
         tip.innerHTML = [
           `<b>${esc(shortKey(bucket.key, granularity))}</b>`,
-          `交付 ${bucket.images} · 尝试 ${bucket.images_attempted}`,
-          `任务 ${bucket.tasks} · 失败 ${bucket.failed}`,
+          `使用量 ${bucket.images} · 发起量 ${bucket.provider_calls || 0}`,
+          `交付 ${bucket.agent_passed || 0} · 任务 ${bucket.tasks} · 失败 ${bucket.failed}`,
           rows.length ? rows.join("\n") : "（无账户细分）",
         ].map((line) => esc(line)).join("<br/>");
         tip.hidden = false;

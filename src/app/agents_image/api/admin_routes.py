@@ -72,7 +72,27 @@ def _cards(session, *, runtime: dict) -> dict:
     cost_sum = float(session.execute(
         select(func.coalesce(func.sum(ImageTask.external_cost_cny), 0))).scalar_one() or 0)
     cache = runtime.get("rag_cache") or {}
+    # 功能8 口径（唯一真相：都在 usage 流水里）
+    usage_images = int(totals.get("images") or 0)          # 使用量：第三方成功生成张数
+    provider_calls = int(totals.get("provider_calls") or 0)  # 发起量：第三方调用发起次数
+    agent_passed = int(totals.get("agent_passed") or 0)     # 交付张数：Agent 审核通过
+    adopted = int(totals.get("adopted") or 0)               # 人工通过（采纳）
+    quota_used, quota_limit = _quota_totals(session)
     return {
+        "usage_images": usage_images,
+        "provider_calls": provider_calls,
+        "api_availability": (round(usage_images / provider_calls, 4)
+                             if provider_calls else 0.0),
+        "agent_passed": agent_passed,
+        "agent_pass_rate": (round(agent_passed / usage_images, 4)
+                            if usage_images else 0.0),
+        "listing_rate": (round(adopted / usage_images, 4) if usage_images else 0.0),
+        "listing_reported_rate": _listing_rate(session),
+        "quota_used": quota_used,
+        "quota_limit": quota_limit,
+        "quota_used_rate": (round(quota_used / quota_limit, 4) if quota_limit else 0.0),
+        "in_flight": int(runtime.get("in_flight") or 0) + running_db,
+        "cost_per_image": (round(cost_sum / usage_images, 4) if usage_images else 0.0),
         "cache_hit_rate": cache.get("hit_rate", 0.0),
         "llm_calls": 0,                      # 生图链路目前不调 LLM（rubric 后置）
         "llm_tokens": int(totals.get("tokens") or 0),
@@ -82,14 +102,26 @@ def _cards(session, *, runtime: dict) -> dict:
         "provider_in_flight": int(runtime.get("provider_in_flight") or 0),
         "images_delivered": int(delivered_sum),
         "images_attempted": int(attempted_sum),
-        "adopted": int(totals.get("adopted") or 0),
+        "adopted": adopted,
         "rejected": int(totals.get("rejected") or 0),
         "first_pass_rate": round(first_pass / done_total, 4) if done_total else 0.0,
         "tasks_done": done_total,
         "tasks_failed": failed_total,
         "cost_cny": round(cost_sum, 4),
-        "listing_rate": _listing_rate(session),
     }
+
+
+def _quota_totals(session) -> tuple[int, int]:
+    """配额总量（已用/上限）：只统计有限额度的账号（管理员 unlimited 不计入分母）。"""
+    from sqlalchemy import func, select
+
+    from app.agents_image.store.models import ImageQuota
+
+    used = int(session.execute(
+        select(func.coalesce(func.sum(ImageQuota.used), 0))).scalar_one() or 0)
+    limit = int(session.execute(
+        select(func.coalesce(func.sum(ImageQuota.period_limit), 0))).scalar_one() or 0)
+    return used, limit
 
 
 def _listing_rate(session) -> float:

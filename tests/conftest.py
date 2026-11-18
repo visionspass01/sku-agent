@@ -204,12 +204,17 @@ def _fake_platform(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _image_context_window(monkeypatch):
-    """生图商品上下文的合并窗口在测试里默认关掉：真实 3 秒窗口会让整套用例变慢。
+    """生图侧的两个后台行为在测试里默认关掉：
 
-    专门验证"合并"的用例自己把 `IMAGE_CONTEXT_BATCH_WINDOW_SECONDS` 调小并
-    调用 `reset_image_settings()` 覆盖（同一个 monkeypatch 实例，最后写入的生效）。
+    - 商品上下文合并窗口（真实 3 秒会让整套用例变慢）；
+    - 看门狗周期扫描（会重投手工塞进库的 `queued` 任务，导致同一任务被执行两次、
+      provider 调用次数与结算次数翻倍 —— 这是跨用例串味的常见来源）。
+
+    专门验证它们的用例自己把 `IMAGE_CONTEXT_BATCH_WINDOW_SECONDS` /
+    `IMAGE_RECOVERY_INTERVAL_SECONDS` 改成需要的值并 `reset_image_settings()` 覆盖。
     """
     monkeypatch.setenv("IMAGE_CONTEXT_BATCH_WINDOW_SECONDS", "0")
+    monkeypatch.setenv("IMAGE_RECOVERY_INTERVAL_SECONDS", "0")
 
 
 def _reset_process_singletons() -> None:

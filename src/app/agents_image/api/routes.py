@@ -73,10 +73,21 @@ def image_health() -> dict:
         "max_batch_products": settings.max_batch_products,
         "secret_is_default": settings.secret_is_default,
         "context_batches": _context_batches(),
-        "degraded": False,
-        "degraded_reason": "",
+        **_degraded_state(),
         **metrics.snapshot(),
     }
+
+
+def _degraded_state() -> dict:
+    """库结构降级（补列/唯一索引失败）要能被 health 与面板看到，而不是只在日志里。"""
+    try:
+        from app.agents_image.store.schema import schema_status
+
+        status = schema_status()
+    except Exception:  # noqa: BLE001
+        status = {"degraded": False, "issues": []}
+    return {"degraded": bool(status.get("degraded")),
+            "degraded_reason": "；".join(status.get("issues") or [])[:300]}
 
 
 def _context_batches() -> dict:
@@ -939,6 +950,8 @@ def get_task(task_id: str, request: Request) -> JSONResponse:
                 "refs": [asset_payload(asset) for asset in refs],
                 "assets": [asset_payload(asset) for asset in outputs],
                 "copy": dict(task.copy_json or {}),
+                "warnings": list(getattr(task, "warnings_json", None) or []),
+                "blocked": list(getattr(task, "blocked_json", None) or []),
                 "created_at": task.created_at.isoformat() if task.created_at else "",
                 "finished_at": task.finished_at.isoformat() if task.finished_at else "",
             }

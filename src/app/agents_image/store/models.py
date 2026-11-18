@@ -71,6 +71,9 @@ class ImageTask(Base):
     lease_until: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
     recoveries: Mapped[int] = mapped_column(Integer, default=0)
     retries: Mapped[int] = mapped_column(Integer, default=0)   # 人工重试次数（W4）
+    # 告警与部分成功（功能10）：warnings 是「没拦住但要知道」的条目，blocked 是被门禁拦下的图位
+    warnings_json: Mapped[list] = mapped_column(JSON, default=list)
+    blocked_json: Mapped[list] = mapped_column(JSON, default=list)
     provider_calls: Mapped[int] = mapped_column(Integer, default=0)  # 发起量（含重试）
 
     trace_id: Mapped[str] = mapped_column(String(32), default="")
@@ -215,7 +218,9 @@ class ImageUsage(Base):
     images: Mapped[int] = mapped_column(Integer, default=0)            # 成功出图张数（计费口径）
     images_attempted: Mapped[int] = mapped_column(Integer, default=0)
     # 发起量（W4）：第三方 API 真实发起次数（含限流重试），用于算 API 可用性
-    provider_calls: Mapped[int] = mapped_column(Integer, default=0)  # 尝试张数
+    provider_calls: Mapped[int] = mapped_column(Integer, default=0)
+    # 交付张数（功能8 口径）：Agent 审核（Critic + 像素门禁）通过、真正交付给用户的张数
+    agent_passed: Mapped[int] = mapped_column(Integer, default=0)  # 尝试张数
     adopted: Mapped[int] = mapped_column(Integer, default=0)           # 采纳张数（正样本）
     rejected: Mapped[int] = mapped_column(Integer, default=0)          # 驳回张数（负样本）
     tasks: Mapped[int] = mapped_column(Integer, default=0)

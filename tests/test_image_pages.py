@@ -78,7 +78,8 @@ def test_admin_panel_renders_svg_chart_without_libraries():
     assert "by_user" in js                      # 悬停账户细分
     # 零外部依赖：不能出现 CDN 脚本或第三方前端库
     assert "https://" not in js and "http://" not in js.replace("http://www.w3.org/2000/svg", "")
-    for label in ("缓存命中率", "LLM", "生成中图片", "累计交付", "首轮通过率"):
+    # 5 张卡按功能8 口径（使用量/发起量/成功率/上架率/配额/在途+成本）
+    for label in ("使用量", "发起", "生图成功率", "上架率", "配额", "在途"):
         assert label in js, label
 
 

@@ -34,6 +34,7 @@ def record(session, *, username: str, department: str | None = None,
         "images": max(0, int(delivered)),
         "images_attempted": max(0, int(attempted)),
         "provider_calls": max(0, int(kwargs.pop("provider_calls", 0) or 0)),
+        "agent_passed": max(0, int(kwargs.pop("agent_passed", 0) or 0)),
         "tasks": max(0, int(tasks)),
         "failed": max(0, int(failed)),
         "tokens": max(0, int(tokens)),
@@ -61,6 +62,8 @@ def record(session, *, username: str, department: str | None = None,
     row = ImageUsage(username=username, department=department, period_key=key,
                      granularity="hour", updated_at=dt.datetime.now(),
                      images=increments["images"], images_attempted=increments["images_attempted"],
+                     provider_calls=increments["provider_calls"],
+                     agent_passed=increments["agent_passed"],
                      tasks=increments["tasks"], failed=increments["failed"],
                      tokens=increments["tokens"], adopted=increments["adopted"],
                      rejected=increments["rejected"], cost_cny=max(0.0, float(cost)))
@@ -159,6 +162,7 @@ def buckets(session, *, granularity: str = "day", count: int = 30,
     rows = session.execute(statement).scalars().all()
 
     buckets: dict[str, dict] = {key: {"key": key, "images": 0, "images_attempted": 0,
+                                      "provider_calls": 0, "agent_passed": 0,
                                       "tasks": 0, "failed": 0, "cost_cny": 0.0,
                                       "by_user": {}} for key in keys}
     for row in rows:
@@ -171,16 +175,24 @@ def buckets(session, *, granularity: str = "day", count: int = 30,
             continue
         images = int(row.images or 0)
         attempted = int(row.images_attempted or 0)
+        provider_calls = int(getattr(row, "provider_calls", 0) or 0)
+        agent_passed = int(getattr(row, "agent_passed", 0) or 0)
         bucket["images"] += images
         bucket["images_attempted"] += attempted
+        bucket["provider_calls"] += provider_calls
+        bucket["agent_passed"] += agent_passed
         bucket["tasks"] += int(row.tasks or 0)
         bucket["failed"] += int(row.failed or 0)
         bucket["cost_cny"] = round(bucket["cost_cny"] + float(row.cost_cny or 0.0), 4)
         user = bucket["by_user"].setdefault(row.username, {"images": 0, "tasks": 0,
-                                                           "images_attempted": 0})
+                                                           "images_attempted": 0,
+                                                           "provider_calls": 0,
+                                                           "agent_passed": 0})
         user["images"] += images
         user["tasks"] += int(row.tasks or 0)
         user["images_attempted"] += attempted
+        user["provider_calls"] += provider_calls
+        user["agent_passed"] += agent_passed
     return [buckets[key] for key in keys]
 
 
@@ -198,6 +210,8 @@ def totals(session, *, username: str | None = None) -> dict:
         "tokens": sum(int(row.tokens or 0) for row in rows),
         "adopted": sum(int(row.adopted or 0) for row in rows),
         "rejected": sum(int(row.rejected or 0) for row in rows),
+        "provider_calls": sum(int(getattr(row, "provider_calls", 0) or 0) for row in rows),
+        "agent_passed": sum(int(getattr(row, "agent_passed", 0) or 0) for row in rows),
     }
 
 
