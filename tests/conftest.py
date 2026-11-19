@@ -215,6 +215,7 @@ def _image_context_window(monkeypatch):
     """
     monkeypatch.setenv("IMAGE_CONTEXT_BATCH_WINDOW_SECONDS", "0")
     monkeypatch.setenv("IMAGE_RECOVERY_INTERVAL_SECONDS", "0")
+    monkeypatch.setenv("IMAGE_OUTBOX_REPLAY_SECONDS", "0")
 
 
 def _reset_process_singletons() -> None:

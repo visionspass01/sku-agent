@@ -46,31 +46,45 @@ async def _runtime_snapshot() -> dict:
             "rag_cache": rag_index.cache_stats()}
 
 
-def _cards(session, *, runtime: dict) -> dict:
-    """五张卡：**全部从 DB 聚合**（多副本也一致），只有"在途"标注为本实例。"""
+def _cards(session, *, runtime: dict, username: str | None = None,
+           department: str | None = None) -> dict:
+    """五张卡：**全部从 DB 聚合**（多副本也一致）。
+
+    第三轮 P2-3：卡片要跟 `?username=` / `?department=` 一致（过去只过滤了折线桶，
+    卡片还是全局数，单账号视图自相矛盾）；P2-7：在途用 DB 的 running 为准，避免
+    "本实例在途 + DB running" 双计数。
+    """
     from sqlalchemy import func, select
 
     from app.agents_image.store.models import ImageTask
 
-    totals = usage_store.totals(session)
+    totals = usage_store.totals(session, username=username, department=department)
+
+    def _task_filter(statement):
+        if username:
+            statement = statement.where(ImageTask.username == username)
+        if department:
+            statement = statement.where(ImageTask.department == department)
+        return statement
 
     def _count(status: str) -> int:
         return int(session.execute(
-            select(func.count()).select_from(ImageTask)
+            _task_filter(select(func.count()).select_from(ImageTask))
             .where(ImageTask.status == status)).scalar_one() or 0)
+
+    def _sum(column):
+        return float(session.execute(
+            _task_filter(select(func.coalesce(func.sum(column), 0)))).scalar_one() or 0)
 
     done_total = _count("done")
     failed_total = _count("failed")
     running_db = _count("running")
     first_pass = int(session.execute(
-        select(func.count()).select_from(ImageTask)
+        _task_filter(select(func.count()).select_from(ImageTask))
         .where(ImageTask.status == "done", ImageTask.attempts <= 1)).scalar_one() or 0)
-    delivered_sum = float(session.execute(
-        select(func.coalesce(func.sum(ImageTask.delivered_images), 0))).scalar_one() or 0)
-    attempted_sum = float(session.execute(
-        select(func.coalesce(func.sum(ImageTask.attempted_images), 0))).scalar_one() or 0)
-    cost_sum = float(session.execute(
-        select(func.coalesce(func.sum(ImageTask.external_cost_cny), 0))).scalar_one() or 0)
+    delivered_sum = _sum(ImageTask.delivered_images)
+    attempted_sum = _sum(ImageTask.attempted_images)
+    cost_sum = _sum(ImageTask.external_cost_cny)
     cache = runtime.get("rag_cache") or {}
     # 功能8 口径（唯一真相：都在 usage 流水里）
     usage_images = int(totals.get("images") or 0)          # 使用量：第三方成功生成张数
@@ -91,13 +105,15 @@ def _cards(session, *, runtime: dict) -> dict:
         "quota_used": quota_used,
         "quota_limit": quota_limit,
         "quota_used_rate": (round(quota_used / quota_limit, 4) if quota_limit else 0.0),
-        "in_flight": int(runtime.get("in_flight") or 0) + running_db,
+        # 在途以 DB 为准（跨副本一致）；本实例的在途单独给，避免双计数
+        "in_flight": running_db,
+        "in_flight_instance": int(runtime.get("in_flight") or 0),
         "cost_per_image": (round(cost_sum / usage_images, 4) if usage_images else 0.0),
         "cache_hit_rate": cache.get("hit_rate", 0.0),
         "llm_calls": 0,                      # 生图链路目前不调 LLM（rubric 后置）
         "llm_tokens": int(totals.get("tokens") or 0),
         "in_flight_images": int(runtime.get("in_flight") or 0),
-        "in_flight_scope": "instance",
+        "in_flight_scope": "db",
         "tasks_running_db": running_db,      # DB 侧真实在跑（跨副本）
         "provider_in_flight": int(runtime.get("provider_in_flight") or 0),
         "images_delivered": int(delivered_sum),
@@ -150,12 +166,14 @@ async def admin_metrics(request: Request) -> JSONResponse:
         require_admin(request)
         granularity = (request.query_params.get("granularity") or "day").strip().lower()
         username = (request.query_params.get("username") or "").strip() or None
+        department = (request.query_params.get("department") or "").strip() or None
         count = int(request.query_params.get("count") or 30)
         runtime = await _runtime_snapshot()
         with session_scope() as session:
             rows = usage_store.buckets(session, granularity=granularity, count=count,
                                        username=username)
-            cards = _cards(session, runtime=runtime)
+            cards = _cards(session, runtime=runtime, username=username,
+                           department=department)
             outbox = outbox_store.stats(session)
     except ImageError as exc:
         return error_response(exc, trace)
@@ -163,6 +181,7 @@ async def admin_metrics(request: Request) -> JSONResponse:
         return error_response(ImageError("IMG_INPUT_INVALID", f"count 必须是整数：{exc}"), trace)
     return JSONResponse(status_code=200, content={
         "granularity": granularity, "username": username or "all",
+        "department": department or "all",
         "buckets": rows, "cards": cards, "outbox": outbox,
         "runtime": runtime, "trace_id": trace,
     })

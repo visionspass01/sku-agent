@@ -18,7 +18,7 @@ from sqlalchemy import select
 
 from data_platform import image_mock
 from data_platform.api import image_schemas as isc
-from data_platform.api.authz import require_scope
+from data_platform.api.authz import require_scope, resolve_principal
 from data_platform.config import department_of
 from data_platform.db import ImageCatalog, ImageRequest, ImageResult, session_scope
 
@@ -95,12 +95,19 @@ def products_context(request: Request, ids: str = Query(default="")):
     for item in wanted:
         if item not in seen:
             seen.append(item)
+    principal = resolve_principal(request)
     products: list[isc.ProductContextOut] = []
     missing: list[str] = []
+    forbidden: list[str] = []
     for product_id in seen:
         data = image_mock.get_product(product_id)
         if data is None:
             missing.append(product_id)
+            continue
+        if principal is not None and not principal.department_allowed(
+                department_of(data.get("category"))):
+            # 治理下沉（第三轮 P1-13）：部门作用域在中台兜底，不能只靠 Agent 自己挡
+            forbidden.append(product_id)
             continue
         products.append(isc.ProductContextOut(
             product_id=data["product_id"], title=data["title"], category=data["category"],
@@ -109,8 +116,11 @@ def products_context(request: Request, ids: str = Query(default="")):
             skus=[isc.ProductSkuOut(**item) for item in data.get("skus") or []],
             sku_ids=data["sku_ids"],
         ))
-    request.state.audit_detail = f"image.products_context n={len(products)} missing={len(missing)}"
-    return isc.ProductContextListOut(products=products, missing=missing, count=len(products))
+    request.state.audit_detail = (
+        f"image.products_context n={len(products)} missing={len(missing)} "
+        f"forbidden={len(forbidden)} dept={getattr(principal, 'departments', None)}")
+    return isc.ProductContextListOut(products=products, missing=missing,
+                                     forbidden=forbidden, count=len(products))
 
 
 @router.post("/similar-by-image", response_model=isc.SimilarOut,
@@ -119,9 +129,22 @@ def similar_by_image(payload: isc.SimilarIn, request: Request):
     """拍立淘（W3）：以图搜相似款。只返回销量 > `min_sales` 的商品，按销量降序取前 N 个。"""
     items = image_mock.find_similar(payload.image_b64, min_sales=payload.min_sales,
                                     top_n=payload.top_n, exclude=payload.exclude)
-    out = [isc.SimilarItemOut(**item) for item in items]
-    request.state.audit_detail = f"image.similar n={len(out)} min_sales={payload.min_sales}"
-    return isc.SimilarOut(items=out, count=len(out), min_sales=payload.min_sales)
+    principal = resolve_principal(request)
+    allowed: list[dict] = []
+    filtered = 0
+    for item in items:
+        data = image_mock.get_product(str(item.get("product_id") or "")) or {}
+        if principal is not None and not principal.department_allowed(
+                department_of(data.get("category"))):
+            filtered += 1
+            continue
+        allowed.append(item)
+    out = [isc.SimilarItemOut(**item) for item in allowed]
+    request.state.audit_detail = (
+        f"image.similar n={len(out)} filtered={filtered} "
+        f"min_sales={payload.min_sales} dept={getattr(principal, 'departments', None)}")
+    return isc.SimilarOut(items=out, count=len(out), min_sales=payload.min_sales,
+                          filtered=filtered)
 
 
 async def binary_asset_endpoint(request: Request):
@@ -222,6 +245,10 @@ def save_results(payload: isc.ResultsIn, request: Request):
                 cost_cny=item.cost_cny, elapsed_ms=item.elapsed_ms, status=item.status,
                 copy_json=dict(item.copy_json or payload.copy_json or {}),
                 reused=1 if item.reused else 0,
+                blocked_json=list(payload.blocked or []),
+                warnings_json=list(payload.warnings or []),
+                partial=1 if payload.partial else 0,
+                expected_images=int(payload.expected_images or 0),
                 variant_id=str(getattr(payload, "variant_id", "") or ""),
                 variant_direction=str(getattr(payload, "variant_direction", "") or ""),
                 ref_source=str(getattr(payload, "ref_source", "") or "mcp"),
@@ -253,6 +280,9 @@ def list_results(product_id: str = Query(default=""),
             cost_cny=row.cost_cny, status=row.status,
             reused=bool(row.reused), copy_json=dict(row.copy_json or {}),
             variant_id=row.variant_id, ref_source=row.ref_source,
+            partial=bool(row.partial), expected_images=int(row.expected_images or 0),
+            blocked=list(row.blocked_json or []),
+            warnings=list(row.warnings_json or []),
             created_at=row.created_at.isoformat() if row.created_at else "",
         ) for row in rows]
     return isc.ResultListOut(product_id=product_id, items=items, count=len(items))

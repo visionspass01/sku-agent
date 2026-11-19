@@ -50,10 +50,12 @@ class ProductContextOut(Envelope):
 
 
 class ProductContextListOut(Envelope):
-    """批量商品上下文（W2）：`products` 命中，`missing` 由 Agent 翻成 404。"""
+    """批量商品上下文（W2）：`products` 命中，`missing` 由 Agent 翻成 404，
+    `forbidden` 是调用方部门看不到的商品（第三轮 P1-13 的中台兜底）。"""
 
     products: list[ProductContextOut] = Field(default_factory=list)
     missing: list[str] = Field(default_factory=list)
+    forbidden: list[str] = Field(default_factory=list)
     count: int = 0
 
 
@@ -79,6 +81,7 @@ class SimilarOut(Envelope):
     items: list[SimilarItemOut] = Field(default_factory=list)
     count: int = 0
     min_sales: int = 100
+    filtered: int = 0     # 因部门作用域被过滤掉的条数（第三轮 P1-13）
 
 
 class PresetOut(Envelope):
@@ -167,6 +170,10 @@ class ResultsIn(Envelope):
     ref_source: str = "mcp"
     variant_id: str = ""
     variant_direction: str = ""
+    expected_images: int = 0
+    partial: bool = False
+    warnings: list[str] = Field(default_factory=list)
+    blocked: list[dict] = Field(default_factory=list)
     params: dict = Field(default_factory=dict)
     requester: str = ""
     trace_id: str = ""
@@ -201,6 +208,10 @@ class ResultRowOut(Envelope):
     copy_json: dict = Field(default_factory=dict)
     variant_id: str = ""
     ref_source: str = "mcp"
+    partial: bool = False
+    expected_images: int = 0
+    blocked: list[dict] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
     created_at: str = ""
 
 

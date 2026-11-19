@@ -196,10 +196,13 @@ def buckets(session, *, granularity: str = "day", count: int = 30,
     return [buckets[key] for key in keys]
 
 
-def totals(session, *, username: str | None = None) -> dict:
+def totals(session, *, username: str | None = None,
+           department: str | None = None) -> dict:
     statement = select(ImageUsage)
     if username:
         statement = statement.where(ImageUsage.username == username)
+    if department:
+        statement = statement.where(ImageUsage.department == department)
     rows = session.execute(statement).scalars().all()
     return {
         "images": sum(int(row.images or 0) for row in rows),

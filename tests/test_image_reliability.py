@@ -307,10 +307,29 @@ def test_metrics_cards_are_db_based(env):
     cards = body["cards"]
     assert cards["tasks_done"] >= 1
     assert cards["images_delivered"] >= 1
-    assert cards["in_flight_scope"] == "instance"
+    # 在途以 DB 为准（第三轮 P2-7）；本实例在途单独给，不叠加
+    assert cards["in_flight_scope"] == "db"
+    assert cards["in_flight"] == cards["tasks_running_db"]
+    assert "in_flight_instance" in cards
     assert "tasks_running_db" in cards
     assert body["runtime"]["scope"] == "instance"
     assert body["runtime"]["provider_in_flight"] >= 0
+
+
+def test_metrics_cards_follow_account_and_department_filter(env):
+    """P2-3：卡片要跟 `?username=` / `?department=` 一致，不能是全局数。"""
+    admin = login(env)
+    worker1 = login(env, "worker1", "hhw111")
+    env.post("/api/image/tasks", headers=worker1,
+             json={"product_ids": ["P-1002"], "prompt": "白底主图", "image_count": 1})
+    scoped = env.get("/api/image/admin/metrics?granularity=day&count=3&username=worker1",
+                     headers=admin).json()
+    assert scoped["username"] == "worker1"
+    assert scoped["cards"]["usage_images"] >= 0
+    by_dept = env.get("/api/image/admin/metrics?granularity=day&count=3&department=%E7%94%B7%E8%A3%85",
+                      headers=admin).json()
+    assert by_dept["department"] == "男装"
+    assert by_dept["cards"]["tasks_done"] >= 0
 
 
 def test_health_no_generator_dependency(env):

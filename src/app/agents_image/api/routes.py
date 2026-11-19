@@ -320,7 +320,7 @@ async def create_tasks(request: Request) -> JSONResponse:
 
         # 复用计划（只读、在建任务之前）：决定"实际要出多少张"，配额/成本按它算
         with session_scope() as session:
-            reuse_plan = await _reuse_plan(session, user, body, targets, catalog)
+            reuse_plan = await _reuse_plan(session, user, body, targets)
 
         def _reuse_targets(target, platform: str, variant: dict) -> bool:
             """该目标是否与基础任务同 (颜色, 平台, 变体)：决定是否记录 base_task_id 血统。"""
@@ -650,7 +650,8 @@ def _variant_matrix(policy, body: dict) -> list[dict]:
             "IMG_INPUT_INVALID",
             "不支持的 mode：" + mode + "（可选 standard / variant / iterate）")
     if mode == "iterate":
-        return [{"id": "", "label": "只改主图", "hint": "只重做主图，其余图位沿用历史成品"}]
+        return [{"id": "", "label": "只改主图",
+                 "hint": "重做主图；其余图位能复用就复用，缺失的图位按差额补齐"}]
     if mode != "variant":
         return [{"id": "", "label": "", "hint": ""}]
     directions = list(getattr(policy, "variant_directions", []) or [])
@@ -688,7 +689,7 @@ def _ensure_department(product, user) -> None:
                          f"无权操作 {department} 部门的商品（当前账号：{user.department}）")
 
 
-async def _reuse_plan(session, user, body: dict, targets, catalog) -> dict | None:
+async def _reuse_plan(session, user, body: dict, targets) -> dict | None:
     """C2/W4：`mode=iterate` + `base_task_id` → 主图重做，其余 generate 图位能复用就复用。
 
     基础任务缺图位（比如只出了主图）时**不再报错**：可复用集合为空，剩下的图位按

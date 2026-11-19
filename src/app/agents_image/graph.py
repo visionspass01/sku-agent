@@ -382,7 +382,7 @@ async def execute_task(task_id: str) -> ImageTaskState:
     state.delivered_images = delivered
     state.cost_cny = cost
     state.touch("aggregate", delivered=delivered, attempts=state.attempt)
-    await _backfill(state, outputs_by_slot=outputs)
+    await _backfill(state, outputs_by_slot=outputs, blocked=blocked)
     return state
 
 
@@ -445,8 +445,12 @@ async def _plan_policy(state: ImageTaskState):
     return await get_catalog().get_plan_policy(platform=state.platform)
 
 
-async def _backfill(state: ImageTaskState, *, outputs_by_slot: list[dict]) -> str:
-    """结果元数据回写中台（**不含图片二进制**）；失败只改 `backfill_status`，不影响已交付的图。"""
+async def _backfill(state: ImageTaskState, *, outputs_by_slot: list[dict],
+                   blocked: list[dict] | None = None) -> str:
+    """结果元数据回写中台（**不含图片二进制**）；失败只改 `backfill_status`，不影响已交付的图。
+
+    第三轮 P2-16：把"被门禁拦下的图位 / 告警 / 部分成功"也回写，中台侧才能解释为什么少了图。
+    """
     from app.agents_image.prompt_pack import pack_yaml
     from app.agents_image.sources.product_source import get_catalog
 
@@ -466,6 +470,10 @@ async def _backfill(state: ImageTaskState, *, outputs_by_slot: list[dict]) -> st
         "prompt_pack_yaml": pack_yaml(state, generate_drafts),
         "copy_json": _copy_contract(state),
         "ref_source": state.ref_source if hasattr(state, "ref_source") else "",
+        "expected_images": int(getattr(state, "expected_images", 0) or 0),
+        "partial": bool(getattr(state, "partial", False)),
+        "warnings": list(state.warnings or []),
+        "blocked": list(blocked or []),
         "params": {"provider": get_image_settings().provider,
                    "attempts": state.attempt, "attempted": state.attempted_images,
                    "delivered": state.delivered_images,

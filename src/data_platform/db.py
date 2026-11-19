@@ -583,6 +583,11 @@ class ImageResult(Base):
     # W4：图内文案契约（逐图位）、是否复用历史成品、变体与参考图来源
     copy_json: Mapped[dict] = mapped_column(JSON, default=dict)
     reused: Mapped[int] = mapped_column(Integer, default=0)
+    # 第三轮 P2-16：门禁拦截与部分成功也要回写，中台侧才能解释"为什么少了图"
+    blocked_json: Mapped[list] = mapped_column(JSON, default=list)
+    warnings_json: Mapped[list] = mapped_column(JSON, default=list)
+    partial: Mapped[int] = mapped_column(Integer, default=0)
+    expected_images: Mapped[int] = mapped_column(Integer, default=0)
     variant_id: Mapped[str] = mapped_column(String(8), default="")
     variant_direction: Mapped[str] = mapped_column(String(64), default="")
     ref_source: Mapped[str] = mapped_column(String(16), default="mcp")
@@ -646,6 +651,10 @@ _EXTRA_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("variant_id", "VARCHAR(8) DEFAULT ''"),
         ("variant_direction", "VARCHAR(64) DEFAULT ''"),
         ("ref_source", "VARCHAR(16) DEFAULT 'mcp'"),
+        ("blocked_json", "JSON"),
+        ("warnings_json", "JSON"),
+        ("partial", "INTEGER DEFAULT 0"),
+        ("expected_images", "INTEGER DEFAULT 0"),
     ],
     "dim_sku": [
         ("platform", "VARCHAR(16) DEFAULT ''"),

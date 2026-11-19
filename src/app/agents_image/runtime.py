@@ -15,11 +15,15 @@ logger = logging.getLogger("sku-agent.image.runtime")
 
 _cleanup_task: asyncio.Task | None = None
 _recovery_task: asyncio.Task | None = None
+_outbox_task: asyncio.Task | None = None
 
 
 def health_block() -> dict:
-    """健康段：只报"当前生效的形态"，依赖健康（provider/storage 探测）后续里程碑再补。"""
+    """健康段：报"当前生效的形态" + 库结构是否降级（第三轮 P2-4）。"""
+    from app.agents_image.store.schema import schema_status
+
     settings = get_image_settings()
+    status = schema_status()
     return {
         "enabled": bool(settings.enabled),
         "provider": settings.provider,
@@ -29,8 +33,8 @@ def health_block() -> dict:
         "concurrency": settings.concurrency,
         "max_refs": settings.max_refs,
         "secret_is_default": settings.secret_is_default,
-        "degraded": False,
-        "degraded_reason": "",
+        "degraded": bool(status.get("degraded")),
+        "degraded_reason": "；".join(status.get("issues") or [])[:300],
         "tasks_pending": 0,
         "in_flight_images": 0,
     }
@@ -49,7 +53,7 @@ def sweep_local_files(now: dt.datetime | None = None) -> dict:
     cutoff = reference - dt.timedelta(hours=settings.retention_hours)
     removed = 0
     purged_keys: list[str] = []
-    for directory in (settings.refs_dir, settings.outputs_dir, settings.thumbs_dir):
+    for directory in (settings.refs_dir, settings.outputs_dir, settings.blocked_dir):
         if not directory.exists():
             continue
         for path in directory.glob("*"):
@@ -101,6 +105,25 @@ def sweep_tokens(now: dt.datetime | None = None) -> int:
     except Exception as exc:  # noqa: BLE001
         logger.warning("清理令牌黑名单失败：%s", exc)
         return 0
+
+
+async def _outbox_loop(interval_seconds: int, batch: int) -> None:
+    """回写补偿队列的定时重放（第三轮 P1-14）：不再只靠管理员手动点"重放回写"。"""
+    from app.agents_image.store import outbox as outbox_store
+    from app.db.engine import session_scope
+
+    while True:
+        try:
+            await asyncio.sleep(interval_seconds)
+            with session_scope() as session:
+                result = await outbox_store.replay(session, limit=batch)
+            if result.get("sent") or result.get("failed"):
+                logger.info("outbox 重放：sent=%s failed=%s",
+                            result.get("sent"), result.get("failed"))
+        except asyncio.CancelledError:  # pragma: no cover —— 关机时正常退出
+            raise
+        except Exception as exc:  # noqa: BLE001 —— 重放失败不影响服务
+            logger.warning("outbox 重放异常：%s", exc)
 
 
 async def _cleanup_loop(interval_seconds: int) -> None:
@@ -163,9 +186,9 @@ async def startup() -> None:
         logger.warning("IMAGE_AUTH_SECRET 仍是默认值，上线前务必改掉（当前令牌可被伪造）")
     health_registry.register("image", health_block)
     if settings.storage.strip().lower() == "local":
-        for directory in (settings.refs_dir, settings.outputs_dir, settings.thumbs_dir):
+        for directory in (settings.refs_dir, settings.outputs_dir, settings.blocked_dir):
             directory.mkdir(parents=True, exist_ok=True)
-    global _cleanup_task, _recovery_task
+    global _cleanup_task, _recovery_task, _outbox_task
     if settings.cleanup_interval_minutes > 0:
         _cleanup_task = asyncio.create_task(
             _cleanup_loop(settings.cleanup_interval_minutes * 60),
@@ -175,6 +198,12 @@ async def startup() -> None:
         _recovery_task = asyncio.create_task(
             _recovery_loop(settings.recovery_interval_seconds),
             name="image-recovery",
+        )
+    if getattr(settings, "outbox_replay_seconds", 0) > 0:
+        _outbox_task = asyncio.create_task(
+            _outbox_loop(settings.outbox_replay_seconds,
+                         int(getattr(settings, "outbox_replay_batch", 50) or 50)),
+            name="image-outbox",
         )
     # 无状态续跑：进程重启后，queued / 超时 running 的任务重新提交
     try:
@@ -189,23 +218,32 @@ async def startup() -> None:
                 settings.provider, settings.storage, settings.dispatcher)
 
 
+async def _stop_task(task) -> None:
+    if task is None:
+        return
+    task.cancel()
+    try:
+        await task
+    except (asyncio.CancelledError, Exception):  # noqa: BLE001
+        pass
+
+
 async def shutdown() -> None:
-    global _cleanup_task
-    if _cleanup_task is not None:
-        _cleanup_task.cancel()
-        try:
-            await _cleanup_task
-        except (asyncio.CancelledError, Exception):  # noqa: BLE001
-            pass
-        _cleanup_task = None
+    global _cleanup_task, _recovery_task, _outbox_task
+    for name in ("_cleanup_task", "_recovery_task", "_outbox_task"):
+        task = globals().get(name)
+        await _stop_task(task)
+        globals()[name] = None
     health_registry.unregister("image")
 
 
 def reset_for_tests() -> None:
     """测试用：清掉进程内状态（后台任务在测试里不启动）。"""
-    global _cleanup_task
-    if _cleanup_task is not None:
-        _cleanup_task.cancel()
-        _cleanup_task = None
+    global _cleanup_task, _recovery_task, _outbox_task
+    for name in ("_cleanup_task", "_recovery_task", "_outbox_task"):
+        task = globals().get(name)
+        if task is not None:
+            task.cancel()
+        globals()[name] = None
     health_registry.unregister("image")
     shutil.rmtree(get_image_settings().images_dir, ignore_errors=True)

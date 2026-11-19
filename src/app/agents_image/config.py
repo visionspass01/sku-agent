@@ -62,6 +62,9 @@ class ImageSettings(BaseSettings):
     images_root: str = ""             # 空 = data/images；测试/多实例时显式覆盖
     retention_hours: int = Field(default=24, ge=1, le=24 * 30)
     cleanup_interval_minutes: int = Field(default=60, ge=0, le=24 * 60)  # 0 = 不启动后台清理
+    # outbox 自动重放（第三轮 P1-14）：回写失败的补偿队列由后台定时重放，不再只靠人工点
+    outbox_replay_seconds: int = Field(default=60, ge=0, le=3600)
+    outbox_replay_batch: int = Field(default=50, ge=1, le=500)
 
     # ---- 本地知识库（RAG：写法片段 / 修复经验，不提供参数与规则真相）----
     rag_enabled: bool = True
@@ -121,6 +124,11 @@ class ImageSettings(BaseSettings):
     @property
     def outputs_dir(self) -> pathlib.Path:
         return self.images_dir / "outputs"
+
+    @property
+    def blocked_dir(self) -> pathlib.Path:
+        """门禁不通过的图（留档排查/人工放行），参与 24h 清理。"""
+        return self.images_dir / "blocked"
 
     @property
     def library_dir(self) -> pathlib.Path:
