@@ -108,15 +108,16 @@ def sweep_tokens(now: dt.datetime | None = None) -> int:
 
 
 async def _outbox_loop(interval_seconds: int, batch: int) -> None:
-    """回写补偿队列的定时重放（第三轮 P1-14）：不再只靠管理员手动点"重放回写"。"""
+    """回写补偿队列的定时重放（第三轮 P1-14）：不再只靠管理员手动点"重放回写"。
+
+    第四轮 P1-5：`replay()` 自己管短会话，网络 IO 不再包在 `session_scope` 里。
+    """
     from app.agents_image.store import outbox as outbox_store
-    from app.db.engine import session_scope
 
     while True:
         try:
             await asyncio.sleep(interval_seconds)
-            with session_scope() as session:
-                result = await outbox_store.replay(session, limit=batch)
+            result = await outbox_store.replay(limit=batch)
             if result.get("sent") or result.get("failed"):
                 logger.info("outbox 重放：sent=%s failed=%s",
                             result.get("sent"), result.get("failed"))
@@ -132,13 +133,25 @@ async def _cleanup_loop(interval_seconds: int) -> None:
             await asyncio.sleep(interval_seconds)
             result = sweep_local_files()
             expired_tokens = sweep_tokens()
-            if result.get("removed") or expired_tokens:
-                logger.info("本地清理：文件 %s 个，令牌 %s 条", result.get("removed"),
-                            expired_tokens)
+            # P2-7：已回写（sent）的 outbox 行按保留期清理，否则表只涨不降
+            pruned = await asyncio.to_thread(_prune_outbox)
+            if result.get("removed") or expired_tokens or pruned:
+                logger.info("本地清理：文件 %s 个，令牌 %s 条，outbox %s 条",
+                            result.get("removed"), expired_tokens, pruned)
         except asyncio.CancelledError:  # pragma: no cover —— 关机时正常退出
             raise
         except Exception as exc:  # noqa: BLE001 —— 清理失败不影响服务
             logger.warning("图片清理任务异常：%s", exc)
+
+
+def _prune_outbox() -> int:
+    try:
+        from app.agents_image.store import outbox as outbox_store
+
+        return outbox_store.prune()
+    except Exception as exc:  # noqa: BLE001 —— 清理失败不阻塞其它清理
+        logger.warning("outbox 清理失败：%s", exc)
+        return 0
 
 
 async def _recovery_loop(interval_seconds: int) -> None:

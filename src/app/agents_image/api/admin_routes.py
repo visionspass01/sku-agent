@@ -180,7 +180,7 @@ async def admin_metrics(request: Request) -> JSONResponse:
                                        username=username)
             cards = _cards(session, runtime=runtime, username=username,
                            department=department)
-            outbox = outbox_store.stats(session)
+            outbox = outbox_store.stats()
     except ImageError as exc:
         return error_response(exc, trace)
     except ValueError as exc:
@@ -385,12 +385,13 @@ def admin_feedback(request: Request) -> JSONResponse:
 
 @router.post("/admin/replay-outbox")
 async def admin_replay_outbox(request: Request) -> JSONResponse:
+    """手动重放回写队列（P1-5：网络 IO 在会话之外，只有读统计时才开会话）。"""
     trace = trace_id_of(request)
     try:
         require_admin(request)
+        result = await outbox_store.replay(limit=50)
+        stats = outbox_store.stats()
         with session_scope() as session:
-            result = await outbox_store.replay(session, limit=50)
-            stats = outbox_store.stats(session)
             pending = outbox_store.list_outbox(session, status="pending")
     except ImageError as exc:
         return error_response(exc, trace)

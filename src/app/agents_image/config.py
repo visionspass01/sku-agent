@@ -65,6 +65,9 @@ class ImageSettings(BaseSettings):
     # outbox 自动重放（第三轮 P1-14）：回写失败的补偿队列由后台定时重放，不再只靠人工点
     outbox_replay_seconds: int = Field(default=60, ge=0, le=3600)
     outbox_replay_batch: int = Field(default=50, ge=1, le=500)
+    # 第四轮 P1-5/P2-7：重放占位时长（防并发重发同一批）与已回写记录的保留时长
+    outbox_claim_seconds: int = Field(default=120, ge=5, le=3600)
+    outbox_keep_hours: int = Field(default=72, ge=1, le=24 * 30)
 
     # ---- 本地知识库（RAG：写法片段 / 修复经验，不提供参数与规则真相）----
     rag_enabled: bool = True

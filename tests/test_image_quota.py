@@ -163,13 +163,13 @@ def test_outbox_enqueue_and_replay(monkeypatch):
             return {"saved": 1, "deduped": 0}
 
     with session_scope() as session:
-        before = outbox_store.stats(session).get("pending", 0)
-        due = dt.datetime.now() + dt.timedelta(minutes=5)
-        assert len(outbox_store.pending(session, now=due)) >= 1
-        result = asyncio.run(outbox_store.replay(session, catalog=OkCatalog(), now=due))
-        assert result["sent"] >= 1
-        assert outbox_store.stats(session).get("pending", 0) <= before
-        assert outbox_store.pending(session) == []
+        before = outbox_store.stats().get("pending", 0)
+    due = dt.datetime.now() + dt.timedelta(minutes=5)
+    assert len(outbox_store.pending_payloads(limit=10, now=due)) >= 1
+    result = asyncio.run(outbox_store.replay(catalog=OkCatalog(), now=due))
+    assert result["sent"] >= 1
+    assert outbox_store.stats().get("pending", 0) <= before
+    assert outbox_store.pending_payloads(limit=10) == []
 
 
 def test_outbox_marks_failure_and_backoff():
@@ -181,13 +181,11 @@ def test_outbox_marks_failure_and_backoff():
 
     with session_scope() as session:
         outbox_store.enqueue(session, task_id="t-2", payload={})
-    with session_scope() as session:
-        due = dt.datetime.now() + dt.timedelta(minutes=5)
-        result = asyncio.run(outbox_store.replay(session, catalog=BadCatalog(),
-                                                 limit=5, now=due))
-        assert result["failed"] >= 1
-        stats = outbox_store.stats(session)
-        assert stats["pending"] + stats["failed"] >= 1
+    due = dt.datetime.now() + dt.timedelta(minutes=5)
+    result = asyncio.run(outbox_store.replay(catalog=BadCatalog(), limit=5, now=due))
+    assert result["failed"] >= 1
+    stats = outbox_store.stats()
+    assert stats["pending"] + stats["failed"] >= 1
 
 
 def test_outbox_payload_is_stored_as_data():

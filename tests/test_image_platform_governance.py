@@ -127,11 +127,11 @@ def test_outbox_replay_marks_sent(env):
         async def save_result(self, payload):
             return {"ok": True}
 
-    with session_scope() as session:
-        result = asyncio.run(outbox_store.replay(session, catalog=_Catalog(), limit=10))
-        pending = outbox_store.pending(session, limit=10)
+    # 第四轮 P1-5：replay 自己管短会话，网络 IO 不在会话里
+    result = asyncio.run(outbox_store.replay(catalog=_Catalog(), limit=10))
+    pending = outbox_store.pending_payloads(limit=10)
     assert result["sent"] >= 1
-    assert all(item.task_id != "202611191200000a01" for item in pending)
+    assert all(item["task_id"] != "202611191200000a01" for item in pending)
 
 
 def test_outbox_loop_is_wired():
