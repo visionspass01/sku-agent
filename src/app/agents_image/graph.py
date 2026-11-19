@@ -257,14 +257,25 @@ async def execute_task(task_id: str) -> ImageTaskState:
             state.touch("canceled", attempted=attempted)
             return state
         blocked: list[dict] = []
+        delivered_slots: set[int] = set()
+        gate_skipped = 0
         for image in images:
             role = _role_of(state, image.slot)
-            # M5：交付前像素门禁（主图 blocking；autofix 先归白/裁方再复检）
+            # M5：交付前像素门禁（主图 blocking；autofix 先归白/按请求比例裁再复检）
             verdict = compliance.gate(
                 image.data, slot=image.slot, role=role, platform_rules=rules,
                 gate_mode=str(getattr(settings, "compliance_gate", "main") or "main"),
                 autofix=bool(getattr(settings, "compliance_autofix", True)),
+                aspect=state.aspect,
+                nonpng_policy=str(getattr(settings, "compliance_nonpng", "warn") or "warn"),
             )
+            if verdict.degraded:
+                gate_skipped += 1
+                state.warnings.append(
+                    "IMG_GATE_SKIPPED: 图位 "
+                    f"{image.slot}（{role or '-'}）像素门禁被跳过（"
+                    + ("；".join(verdict.reasons) or "非 PNG 且未安装 Pillow")
+                    + "），该图按平台规则未做像素校验")
             if not verdict.passed:
                 asset_store.save_bytes(
                     session, verdict.data, kind="blocked", mime=image.mime or "image/png",
@@ -283,6 +294,7 @@ async def execute_task(task_id: str) -> ImageTaskState:
                 username=task.username, department=task.department,
             )
             delivered += 1 if asset is not None else 0
+            delivered_slots.add(int(image.slot))
             if asset is not None:
                 # 只留纯数据：session 关闭后 ORM 对象不能再取属性（DetachedInstanceError）
                 outputs.append({
@@ -318,6 +330,8 @@ async def execute_task(task_id: str) -> ImageTaskState:
             reused += 1
         if reused:
             task_store.update_task(session, task_id, reused_images=reused)
+        if gate_skipped:
+            metrics.record_gate_skipped(gate_skipped)
         if blocked and delivered == 0:
             reasons = "；".join(
                 f"图位 {item['slot']}：{'、'.join(item['reasons'])}" for item in blocked[:2])
@@ -326,6 +340,19 @@ async def execute_task(task_id: str) -> ImageTaskState:
                            provider_calls=provider_calls,
                            cost=sum(float(item or 0.0) for item in image_costs))
             raise ImageError("IMG_CONTENT_BLOCKED", f"所有出图都未通过平台像素门禁：{reasons}")
+        # 部分成功（第三轮 P1-1）：交付张数少于计划时，必须说清"预期 X 张、输出 Y 张"
+        expected = int(state.count or 0) or len(current)
+        missing = sorted({int(draft.slot) for draft in current} - delivered_slots)
+        partial = bool(missing) or delivered < expected
+        state.expected_images = expected
+        state.partial = partial
+        if partial:
+            state.warnings.append(
+                f"IMG_SLOT_MISSING: 预期 {expected} 张，输出 {delivered} 张"
+                + (f"（缺图位 {missing}）" if missing else ""))
+            metrics.record_partial_delivery()
+            logger.warning("部分交付：task=%s expected=%s delivered=%s missing=%s",
+                           task_id, expected, delivered, missing)
         # 成本口径（P0-5）：一律用 **provider 返回的真实计费**，不再用配置单价估
         for item in image_costs:
             external_cost += float(item or 0.0)
@@ -435,6 +462,8 @@ async def _backfill(state: ImageTaskState, *, outputs_by_slot: list[dict]) -> st
         "params": {"provider": get_image_settings().provider,
                    "attempts": state.attempt, "attempted": state.attempted_images,
                    "delivered": state.delivered_images,
+                   "expected": int(getattr(state, "expected_images", 0) or 0),
+                   "partial": bool(getattr(state, "partial", False)),
                    "critic_score": state.critic.score,
                    "cost_cny": state.cost_cny},
         "requester": state.username,

@@ -944,6 +944,7 @@ def get_task(task_id: str, request: Request) -> JSONResponse:
                 "slot_count": task.slot_count, "image_count": task.image_count,
                 "base_task_id": task.base_task_id,
                 "reused_images": task.reused_images,
+                **_partial_fields(task),
                 "retries": int(getattr(task, "retries", 0) or 0),
                 "provider_calls": int(getattr(task, "provider_calls", 0) or 0),
                 "status": task.status, "username": task.username, "prompt": task.prompt,
@@ -977,6 +978,15 @@ def _ensure_owner(owner: str | None, user, what: str) -> None:
         return
     if (owner or "") != user.username:
         raise ImageError("IMG_FORBIDDEN", f"无权访问他人的{what}")
+
+
+def _partial_fields(task) -> dict:
+    """部分成功的统一口径（第三轮 P1-1）：预期张数 / 是否部分 / 给用户看的一句话。"""
+    expected = int(getattr(task, "image_count", 0) or 0)
+    delivered = int(getattr(task, "delivered_images", 0) or 0)
+    partial = bool(expected and delivered < expected)
+    message = (f"部分成功，预期 {expected} 张，输出 {delivered} 张" if partial else "")
+    return {"expected_images": expected, "partial": partial, "message": message}
 
 
 @router.get("/assets/{asset_id}")

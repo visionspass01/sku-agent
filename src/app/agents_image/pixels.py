@@ -96,6 +96,12 @@ def decode_png(data: bytes) -> tuple[int, int, int, bytearray]:
 def rgb_stats(data: bytes, *, white_threshold: int = 250) -> dict:
     """统计白底纯度与主体占比（对 RGBA 取前三通道，忽略 alpha）。"""
     width, height, channels, pixels = decode_png(data)
+    return stats_of(width, height, channels, pixels, white_threshold=white_threshold)
+
+
+def stats_of(width: int, height: int, channels: int, pixels: bytearray, *,
+             white_threshold: int = 250) -> dict:
+    """从原始像素算白底纯度/主体占比/留白比例（PNG 与 Pillow 解码共用同一套口径）。"""
     total = width * height
     white = 0
     subject = 0
@@ -113,6 +119,30 @@ def rgb_stats(data: bytes, *, white_threshold: int = 250) -> dict:
         "margin_ratio": round(_margin_ratio(width, height, channels, pixels,
                                             white_threshold), 4),
     }
+
+
+def decode_any(data: bytes) -> tuple[int, int, int, bytearray] | None:
+    """尽量把一张图解成原始像素（PNG 自带解码；JPEG/WebP 走可选的 Pillow）。
+
+    返回 None 表示"当前环境解不了"（没装 Pillow 且不是我们支持的 PNG）。
+    门禁据此决定是"跳过并对用户可见（warn）"还是"按不通过处理（block）"。
+    """
+    try:
+        return decode_png(data)
+    except PngDecodeError:
+        pass
+    try:                                  # 可选依赖：没装就走 None
+        from PIL import Image
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        import io
+
+        with Image.open(io.BytesIO(data)) as image:      # type: ignore[union-attr]
+            rgb = image.convert("RGB")
+            return rgb.width, rgb.height, 3, bytearray(rgb.tobytes())
+    except Exception:  # noqa: BLE001 —— 坏图/不支持的格式
+        return None
 
 
 def _margin_ratio(width: int, height: int, channels: int, pixels: bytearray,
@@ -148,17 +178,47 @@ def whiten_near_white(width: int, height: int, channels: int, pixels: bytearray,
     return encode_png(width, height, bytes(rgb))
 
 
-def crop_to_square(width: int, height: int, channels: int, pixels: bytearray) -> bytes:
-    """居中裁成正方形（`--fix`：非 1:1 时用）。"""
-    side = min(width, height)
-    offset_x = (width - side) // 2
-    offset_y = (height - side) // 2
+def _rgb_png(width: int, height: int, channels: int, pixels: bytearray) -> bytes:
+    """把任意通道数（1/2/3/4）的像素重新编码成 8 位 RGB PNG。"""
     rgb = bytearray()
-    for y in range(side):
-        for x in range(side):
+    for index in range(width * height):
+        base = index * channels
+        rgb += bytes((pixels[base], pixels[base + 1], pixels[base + 2]))
+    return encode_png(width, height, bytes(rgb))
+
+
+def crop_to_square(width: int, height: int, channels: int, pixels: bytearray) -> bytes:
+    """居中裁成正方形（`--fix`：请求比例是 1:1 时用）。"""
+    return crop_to_aspect(width, height, channels, pixels, 1.0)
+
+
+def crop_to_aspect(width: int, height: int, channels: int, pixels: bytearray,
+                   ratio: float) -> bytes:
+    """居中裁到指定宽高比（第三轮 P0-3）：`ratio = width / height`。
+
+    过去 autofix 只会裁成正方形，于是"请求 3:4/16:9 → 裁成 1:1 → 比例不符/白底不达标 → 全拦"；
+    现在按**请求比例**裁，修复后仍然满足用户要的比例。
+    """
+    target = float(ratio or 1.0)
+    if target <= 0:
+        target = 1.0
+    current = (width / height) if height else 1.0
+    if abs(current - target) <= 0.002:
+        return _rgb_png(width, height, channels, pixels)
+    if current > target:                       # 太宽 → 裁左右
+        new_width = max(1, int(round(height * target)))
+        new_height = height
+    else:                                      # 太高 → 裁上下
+        new_width = width
+        new_height = max(1, int(round(width / target)))
+    offset_x = (width - new_width) // 2
+    offset_y = (height - new_height) // 2
+    cropped = bytearray()
+    for y in range(new_height):
+        for x in range(new_width):
             base = ((y + offset_y) * width + (x + offset_x)) * channels
-            rgb += bytes((pixels[base], pixels[base + 1], pixels[base + 2]))
-    return encode_png(side, side, bytes(rgb))
+            cropped += bytes((pixels[base], pixels[base + 1], pixels[base + 2]))
+    return encode_png(new_width, new_height, bytes(cropped))
 
 
 def resize(width: int, height: int, channels: int, pixels: bytearray,
@@ -174,5 +234,5 @@ def resize(width: int, height: int, channels: int, pixels: bytearray,
     return encode_png(new_width, new_height, bytes(rgb))
 
 
-__all__ = ["PngDecodeError", "decode_png", "rgb_stats", "whiten_near_white",
-           "crop_to_square", "resize"]
+__all__ = ["PngDecodeError", "decode_png", "decode_any", "rgb_stats", "stats_of",
+           "whiten_near_white", "crop_to_square", "crop_to_aspect", "resize"]

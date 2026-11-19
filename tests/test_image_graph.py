@@ -98,7 +98,9 @@ def test_provider_failure_marks_task_failed(image_db, monkeypatch):
     async def run_until_settled():
         # 必须**在同一个事件循环里**等它落库：`asyncio.run(submit(...))` 返回后会立刻关闭
         # 循环，后台任务被取消——只是以前这条路没有 await 点才"看起来"跑完了。
-        await generator.submit(task_id)
+        # 上一行直接跑了 execute_task（失败），租约仍在这条任务上；这里 force 模拟"调度器接管"
+        # （真实链路里重试会经 reset_for_retry 清掉租约，不走 force）。
+        await generator.submit(task_id, force=True)
         for _ in range(400):
             with session_scope() as session:
                 task = task_store.get_task(session, task_id)

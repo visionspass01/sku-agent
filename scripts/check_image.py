@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from app.agents_image.pixels import (  # noqa: E402
     PngDecodeError,
+    crop_to_aspect,
     crop_to_square,
     decode_png,
     resize,
@@ -57,9 +58,20 @@ def _text_like_rows(pixels: bytearray, width: int, height: int, channels: int) -
     return edges / total if total else 0.0
 
 
-def check(path: Path, *, platform: str = "淘系", text_detect: bool = False) -> dict:
-    """返回 {ok, platform, checks[], warnings[], stats}；不抛异常（坏文件也算一条结果）。"""
-    rules = PLATFORM_RULES.get(platform) or PLATFORM_RULES["通用"]
+def check(path: Path, *, platform: str = "淘系", text_detect: bool = False,
+          aspect: str | None = None) -> dict:
+    """返回 {ok, platform, checks[], warnings[], stats}；不抛异常（坏文件也算一条结果）。
+
+    `aspect`（第三轮 P2-2）：比例基准跟随**本次请求**的比例（`3:4`/`16:9` 等），
+    与链路里的像素门禁同源；不传则用平台卡的默认比例（历史行为）。
+    """
+    rules = dict(PLATFORM_RULES.get(platform) or PLATFORM_RULES["通用"])
+    if aspect:
+        try:
+            left, right = str(aspect).split(":")
+            rules["aspect"] = float(left) / float(right)
+        except (ValueError, ZeroDivisionError) as exc:
+            raise SystemExit(f"--aspect 格式错误（示例 1:1 / 3:4 / 16:9）：{exc}") from exc
     data = path.read_bytes()
     checks: list[dict] = []
     warnings: list[str] = []
@@ -111,23 +123,32 @@ def check(path: Path, *, platform: str = "淘系", text_detect: bool = False) ->
             "checks": checks, "warnings": warnings, "stats": stats}
 
 
-def fix(path: Path, target: Path, *, platform: str = "淘系") -> dict:
-    """修复：近白归白 → 非方形居中裁切 → 长边不足则放大；返回修复后的校验结果。"""
-    rules = PLATFORM_RULES.get(platform) or PLATFORM_RULES["通用"]
+def fix(path: Path, target: Path, *, platform: str = "淘系",
+        aspect: str | None = None) -> dict:
+    """修复：近白归白 → 按请求比例裁切 → 长边不足则放大；返回修复后的校验结果。"""
+    rules = dict(PLATFORM_RULES.get(platform) or PLATFORM_RULES["通用"])
+    if aspect:
+        try:
+            left, right = str(aspect).split(":")
+            rules["aspect"] = float(left) / float(right)
+        except (ValueError, ZeroDivisionError) as exc:
+            raise SystemExit(f"--aspect 格式错误（示例 1:1 / 3:4 / 16:9）：{exc}") from exc
     data = path.read_bytes()
     width, height, channels, pixels = decode_png(data)
     # 修复用更宽的阈值（200）：把"发灰的背景"也归白；深色主体不会被误改
     fixed = whiten_near_white(width, height, channels, pixels, threshold=200)
     w, h, channels, pixels = decode_png(fixed)
-    if abs(w - h) > max(2, int(min(w, h) * ASPECT_TOLERANCE)):
-        fixed = crop_to_square(w, h, channels, pixels)
+    if abs(w / h - rules["aspect"]) > ASPECT_TOLERANCE:
+        fixed = (crop_to_square(w, h, channels, pixels)
+                 if abs(rules["aspect"] - 1.0) < 1e-6
+                 else crop_to_aspect(w, h, channels, pixels, rules["aspect"]))
         w, h, channels, pixels = decode_png(fixed)
     if max(w, h) < rules["min_px"]:
         scale = rules["min_px"] / max(w, h)
         fixed = resize(w, h, channels, pixels, int(w * scale), int(h * scale))
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(fixed)
-    result = check(target, platform=platform)
+    result = check(target, platform=platform, aspect=aspect)
     result["fixed_from"] = str(path)
     return result
 
@@ -138,6 +159,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--platform", default="淘系", choices=sorted(PLATFORM_RULES))
     parser.add_argument("--fix", default="", help="修复后的输出路径（PNG）")
     parser.add_argument("--text-detect", action="store_true", help="启用图内文字启发式")
+    parser.add_argument("--aspect", default="",
+                        help="本次请求的比例（如 3:4 / 16:9）；不传用平台卡默认值")
     parser.add_argument("--json", action="store_true", help="输出机器可读 JSON")
     args = parser.parse_args(argv)
 
@@ -145,8 +168,9 @@ def main(argv: list[str] | None = None) -> int:
     if not path.is_file():
         print(f"图片不存在：{path}", file=sys.stderr)
         return 2
-    result = fix(path, Path(args.fix), platform=args.platform) if args.fix \
-        else check(path, platform=args.platform, text_detect=args.text_detect)
+    result = fix(path, Path(args.fix), platform=args.platform, aspect=args.aspect) \
+        if args.fix else check(path, platform=args.platform, text_detect=args.text_detect,
+                               aspect=args.aspect)
 
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))

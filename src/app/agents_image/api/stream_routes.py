@@ -32,13 +32,21 @@ _MAX_STREAM_SECONDS = 120
 
 
 def _snapshot_payload(task) -> dict:
+    expected = int(getattr(task, "image_count", 0) or 0)
+    delivered = int(getattr(task, "delivered_images", 0) or 0)
+    partial = bool(expected and delivered < expected)
     return {
         "task_id": task.task_id, "batch_id": task.batch_id, "product_id": task.product_id,
         "platform": task.platform, "variant_id": getattr(task, "variant_id", "") or "",
         "color_key": getattr(task, "color_key", "") or "",
         "status": task.status, "attempts": task.attempts,
         "attempted_images": task.attempted_images,
-        "delivered_images": task.delivered_images,
+        "delivered_images": delivered,
+        "expected_images": expected,
+        "partial": partial,
+        "message": (f"部分成功，预期 {expected} 张，输出 {delivered} 张" if partial else ""),
+        "warnings": list(getattr(task, "warnings_json", None) or []),
+        "blocked": list(getattr(task, "blocked_json", None) or []),
         "backfill_status": task.backfill_status,
         "error_code": task.error_code, "slots": list(task.slots_json or []),
     }

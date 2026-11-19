@@ -31,10 +31,20 @@ class LocalGenerator:
     def in_flight(self) -> int:
         return self._in_flight
 
-    async def submit(self, task_id: str) -> str:
+    async def submit(self, task_id: str, *, force: bool = False) -> str:
+        """提交任务：先 CAS **认领**（`claim`），认领失败说明别人已经在跑。
+
+        `force=True` 只给"已经自己认领过"的调用方（看门狗的 `resume_pending`）；
+        普通建任务/重试一律走认领，避免多实例重复执行同一任务（第三轮 P0-2）。
+        """
         running = self._tasks.get(task_id)
         if running is not None and not running.done():
             return task_id
+        if not force:
+            lease = int(getattr(self.settings, "task_lease_seconds", 300) or 300)
+            with session_scope() as session:
+                if not task_store.claim(session, task_id, lease_seconds=lease):
+                    return task_id          # 已被认领/不在 queued：不重复派发
         self._tasks[task_id] = asyncio.create_task(self._run(task_id), name=f"image-task-{task_id}")
         return task_id
 
@@ -93,43 +103,42 @@ class LocalGenerator:
         return True
 
     async def resume_pending(self) -> list[str]:
-        """续跑（启动时 + 看门狗周期调用）：只拾取 `queued` 或 **租约过期** 的任务。
+        """续跑（启动时 + 看门狗周期调用）：只拾取**未被认领的 queued** 或 **租约过期的 running**。
 
         重投次数封顶：`recoveries > IMAGE_MAX_RECOVERIES` 时直接判失败并释放预留额度，
-        避免"坏任务被无限重投、每次都产生真实成本"。
+        避免"坏任务被无限重投、每次都产生真实成本"。第三轮 P0-2：只有**认领成功**的重投
+        才 +recoveries——排队中但已被认领的任务不再被反复计数（过去 90–120 秒就被误杀）。
         """
         lease = int(getattr(self.settings, "task_lease_seconds", 300) or 300)
+        grace = int(getattr(self.settings, "claim_grace_seconds", 30) or 0)
         max_recoveries = int(getattr(self.settings, "max_recoveries", 3) or 3)
         with session_scope() as session:
-            rows = task_store.list_recoverable(
-                session, timeout_seconds=self.settings.timeout_seconds,
-                lease_seconds=lease, max_recoveries=max_recoveries)
-            ids = [row.task_id for row in rows]
+            candidates = task_store.list_recoverable(
+                session, lease_seconds=lease, grace_seconds=grace)
         resumed: list[str] = []
-        for task_id in ids:
+        for candidate in candidates:
             with session_scope() as session:
-                recoveries = task_store.bump_recoveries(session, task_id)
+                if candidate.kind == "queued":
+                    claimed = task_store.claim(session, candidate.task_id, lease_seconds=lease)
+                else:
+                    claimed = task_store.claim_running(session, candidate.task_id,
+                                                       lease_seconds=lease)
+                if not claimed:
+                    continue                 # 别人抢先接管/任务已不在候选状态
+                recoveries = task_store.bump_recoveries(session, candidate.task_id)
                 if recoveries > max_recoveries:
-                    task = task_store.get_task(session, task_id)
-                    username = getattr(task, "username", "") if task else ""
-                    planned = int(getattr(task, "image_count", 0) or 0) if task else 0
                     task_store.mark_failed(
-                        session, task_id, code="IMG_RECOVERY_EXHAUSTED",
+                        session, candidate.task_id, code="IMG_RECOVERY_EXHAUSTED",
                         detail=f"看门狗已重投 {recoveries} 次仍未完成，判失败（不再重投）")
-                    if username and planned:
-                        from app.agents_image.store import quota as quota_store
+                    from app.agents_image import settlement
 
-                        try:
-                            quota_store.release(session, username, planned)
-                        except Exception:  # noqa: BLE001 —— 释放失败不影响判失败
-                            logger.warning("重投超限任务释放预留失败：%s", task_id)
+                    settlement.settle_cancel(session, candidate.task_id)
                     continue
-            await self.submit(task_id)
-            resumed.append(task_id)
-        ids = resumed
-        if ids:
-            logger.info("生图任务续跑：%d 个（%s）", len(ids), ids[:5])
-        return ids
+            await self.submit(candidate.task_id, force=True)
+            resumed.append(candidate.task_id)
+        if resumed:
+            logger.info("生图任务续跑：%d 个（%s）", len(resumed), resumed[:5])
+        return resumed
 
     async def health(self) -> dict:
         return {"ok": True, "backend": self.name, "in_flight": self.in_flight,

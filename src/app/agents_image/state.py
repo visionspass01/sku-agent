@@ -114,6 +114,9 @@ class ImageTaskState(BaseModel):
     attempted_images: int = 0
     delivered_images: int = 0
     cost_cny: float = 0.0
+    # 部分成功（第三轮 P1-1）：预期张数与"是否部分交付"，用于详情/SSE/回写统一口径
+    expected_images: int = 0
+    partial: bool = False
 
     mcp_degraded: bool = False
     warnings: list[str] = Field(default_factory=list)

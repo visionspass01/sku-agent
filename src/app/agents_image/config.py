@@ -54,6 +54,9 @@ class ImageSettings(BaseSettings):
     # 任务租约（W1）：执行期每阶段续约；只有租约过期才允许看门狗重投
     task_lease_seconds: int = Field(default=300, ge=30, le=3600)
     max_recoveries: int = Field(default=3, ge=1, le=10)  # 同一任务最多被重投几次
+    # 排队宽限（第三轮 P0-2）：queued 任务在这段时间内算「刚建、正在被提交」，看门狗不碰；
+    # 超过宽限仍未被认领（没有 lease）才可能是孤儿任务
+    claim_grace_seconds: int = Field(default=30, ge=0, le=600)
 
     # ---- 本地存储与清理（测试环境图片保留 24h）----
     images_root: str = ""             # 空 = data/images；测试/多实例时显式覆盖
@@ -79,6 +82,8 @@ class ImageSettings(BaseSettings):
     # ---- 交付前像素门禁（M5）----
     compliance_gate: str = "main"          # main（只拦主图）| all（所有出图图位）| off
     compliance_autofix: bool = True        # 不过时先归白/裁方/放大再复检
+    # 非 PNG（且没装 Pillow）时的像素门禁策略（第三轮 P1-4）：warn=交付但告警；block=按不通过处理
+    compliance_nonpng: str = "warn"
 
     # ---- 质量与成本 ----
     critic_pass_score: int = Field(default=75, ge=0, le=100)
