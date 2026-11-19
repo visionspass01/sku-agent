@@ -93,7 +93,7 @@ def _cards(session, *, runtime: dict, username: str | None = None,
     adopted = int(totals.get("adopted") or 0)               # 人工通过（采纳，仅新生成图）
     # 复用图采纳单列（P1-1）：复用图不在使用量分母里，混进分子会让上架率 >100%
     reused_adopted = int(totals.get("reused_adopted") or 0)
-    quota_used, quota_limit = _quota_totals(session)
+    quota_used, quota_limit = _quota_totals(session, department)
     return {
         "usage_images": usage_images,
         "provider_calls": provider_calls,
@@ -133,16 +133,31 @@ def _cards(session, *, runtime: dict, username: str | None = None,
     }
 
 
-def _quota_totals(session) -> tuple[int, int]:
-    """配额总量（已用/上限）：只统计有限额度的账号（管理员 unlimited 不计入分母）。"""
+def _quota_totals(session, department: str | None = None) -> tuple[int, int]:
+    """配额总量（已用/上限）：只统计有限额度的账号（管理员 unlimited 不计入分母）。
+
+    P2-2：支持按部门聚合。配额行只有 username，没有部门列，所以先用账号表把
+    username 映射成部门再过滤 —— 否则部门视图的"使用量"按部门、"配额"按全局，
+    卡片自己跟自己矛盾。
+    """
     from sqlalchemy import func, select
 
     from app.agents_image.store.models import ImageQuota
 
-    used = int(session.execute(
-        select(func.coalesce(func.sum(ImageQuota.used), 0))).scalar_one() or 0)
-    limit = int(session.execute(
-        select(func.coalesce(func.sum(ImageQuota.period_limit), 0))).scalar_one() or 0)
+    usable_users: list[str] | None = None
+    if department:
+        usable_users = [str(row.get("username") or "") for row in user_store.list_users(session)
+                        if str(row.get("department") or "") == department]
+        if not usable_users:
+            return 0, 0
+
+    used_statement = select(func.coalesce(func.sum(ImageQuota.used), 0))
+    limit_statement = select(func.coalesce(func.sum(ImageQuota.period_limit), 0))
+    if usable_users:
+        used_statement = used_statement.where(ImageQuota.username.in_(usable_users))
+        limit_statement = limit_statement.where(ImageQuota.username.in_(usable_users))
+    used = int(session.execute(used_statement).scalar_one() or 0)
+    limit = int(session.execute(limit_statement).scalar_one() or 0)
     return used, limit
 
 
@@ -177,7 +192,7 @@ async def admin_metrics(request: Request) -> JSONResponse:
         runtime = await _runtime_snapshot()
         with session_scope() as session:
             rows = usage_store.buckets(session, granularity=granularity, count=count,
-                                       username=username)
+                                       username=username, department=department)
             cards = _cards(session, runtime=runtime, username=username,
                            department=department)
             outbox = outbox_store.stats()
@@ -202,6 +217,8 @@ def admin_tasks(request: Request) -> JSONResponse:
         status = (request.query_params.get("status") or "").strip() or None
         department = (request.query_params.get("department") or "").strip() or None
         limit = int(request.query_params.get("limit") or 50)
+        # P2-3：limit 要夹紧，避免一次拉全表
+        limit = max(1, min(limit, 200))
         with session_scope() as session:
             rows = task_store.list_tasks(session, username=username, status=status,
                                          department=department, limit=limit)
@@ -214,6 +231,13 @@ def admin_tasks(request: Request) -> JSONResponse:
                         "backfill_status": row.backfill_status,
                 "listing_status": row.listing_status,
                         "error_code": row.error_code,
+                        # P2-3：列表也要能看出图位数/参考图来源/复用与重试情况
+                        "image_count": int(getattr(row, "image_count", 0) or 0),
+                        "slot_count": int(getattr(row, "slot_count", 0) or 0),
+                        "ref_source": getattr(row, "ref_source", "") or "",
+                        "reused_images": int(getattr(row, "reused_images", 0) or 0),
+                        "retries": int(getattr(row, "retries", 0) or 0),
+                        "provider_calls": int(getattr(row, "provider_calls", 0) or 0),
                         "created_at": row.created_at.isoformat() if row.created_at else ""}
                        for row in rows]
     except ImageError as exc:
@@ -232,6 +256,9 @@ def admin_task_detail(task_id: str, request: Request) -> JSONResponse:
                 raise ImageError("IMG_TASK_NOT_FOUND", f"任务不存在：{task_id}")
             outputs = [asset_payload(asset) for asset in asset_store.list_outputs(session, task_id)]
             refs = [asset_payload(asset) for asset in asset_store.get_assets(session, list(task.ref_asset_ids or []))]
+            expected = int(getattr(task, "image_count", 0) or 0)
+            delivered = int(getattr(task, "delivered_images", 0) or 0)
+            terminal = str(task.status or "") in {"done", "failed", "canceled"}
             payload = {
                 "task_id": task.task_id, "batch_id": task.batch_id,
                 "username": task.username, "department": task.department,
@@ -248,6 +275,18 @@ def admin_task_detail(task_id: str, request: Request) -> JSONResponse:
                 "listing_status": task.listing_status,
                 "listing_url": task.listing_url,
                 "slots": list(task.slots_json or []), "prompt_pack": list(task.prompt_pack_json or []),
+                # P2-1：详情要能解释"为什么少图/为什么没复用/这次打了几次第三方"
+                "warnings": list(getattr(task, "warnings_json", None) or []),
+                "blocked": list(getattr(task, "blocked_json", None) or []),
+                "copy": dict(getattr(task, "copy_json", None) or {}),
+                "expected_images": expected,
+                "partial": bool(terminal and expected and delivered < expected),
+                "in_progress": not terminal,
+                "ref_source": getattr(task, "ref_source", "") or "",
+                "retries": int(getattr(task, "retries", 0) or 0),
+                "provider_calls": int(getattr(task, "provider_calls", 0) or 0),
+                "base_task_id": getattr(task, "base_task_id", None),
+                "reused_images": int(getattr(task, "reused_images", 0) or 0),
                 "refs": refs, "assets": outputs,
                 "created_at": task.created_at.isoformat() if task.created_at else "",
                 "finished_at": task.finished_at.isoformat() if task.finished_at else "",

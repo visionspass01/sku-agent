@@ -58,13 +58,18 @@ def get_or_create(session, username: str, *, period_type: str = "day",
 
 
 def _rollover(session, row: ImageQuota) -> ImageQuota:
-    """周期已切换 → 归零（自然周期，跨天/周/月自动发生）。"""
+    """周期已切换 → 归零（自然周期，跨天/周/月自动发生）。
+
+    P2-4：`reserved` 必须一起清。上一周期没结算完的预留如果还挂着，新周期的
+    `used + reserved <= limit` 会凭空少一截可用额度（看起来像"额度莫名其妙没了"）。
+    """
     current = period_key(row.period_type)
     if row.period_type == "unlimited":
         return row
     if row.period_key != current:
         row.period_key = current
         row.used = 0
+        row.reserved = 0
         row.updated_at = dt.datetime.now()
         session.flush()
     return row
@@ -166,11 +171,12 @@ def consume(session, username: str, images: int) -> bool:
 
 def grant(session, username: str, *, period_type: str, period_limit: int,
           granted_by: str = "") -> ImageQuota:
-    """管理员给某人设/改配额（周期切换时 used 归零）。"""
+    """管理员给某人设/改配额（周期切换时 used 与 reserved 一起归零，见 P2-4）。"""
     row = get_or_create(session, username, granted_by=granted_by)
     if period_type and period_type != row.period_type:
         row.period_type = period_type
         row.used = 0
+        row.reserved = 0
         row.period_key = period_key(period_type)
     row.period_limit = int(period_limit)
     row.granted_by = granted_by or row.granted_by

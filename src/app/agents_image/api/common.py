@@ -6,6 +6,13 @@ from fastapi.responses import JSONResponse
 
 from app.core.errors import error_headers, failure_payload, normalize
 
+# 终态集合（第四轮 P1-9）：只有终态才谈"部分成功"，排队/运行中一律 in_progress
+TERMINAL_STATUSES = frozenset({"done", "failed", "canceled"})
+
+
+def is_terminal(status: str | None) -> bool:
+    return str(status or "") in TERMINAL_STATUSES
+
 
 def error_response(exc: BaseException, trace_id: str) -> JSONResponse:
     """统一错误响应：body 带 error_code/trace_id/retryable，头带 X-Error-Code/X-Trace-Id。"""

@@ -26,6 +26,7 @@ from app.agents_image.api.batch_routes import router as batch_router
 from app.agents_image.api.common import (
     asset_payload,
     error_response,
+    is_terminal,
     verify_asset_signature,
 )
 from app.agents_image.api.deps import require_user, trace_id_of
@@ -1118,12 +1119,21 @@ def _ensure_owner(owner: str | None, user, what: str) -> None:
 
 
 def _partial_fields(task) -> dict:
-    """部分成功的统一口径（第三轮 P1-1）：预期张数 / 是否部分 / 给用户看的一句话。"""
+    """部分成功的统一口径（第三轮 P1-1 + 第四轮 P1-9）：预期张数 / 是否部分 / 给用户看的一句话。
+
+    **只有终态**才判定"部分成功"：任务还在排队/运行时 delivered 必然小于预期，
+    过去照样算 partial 并拼出"部分成功，预期 X 张，输出 0 张"，等于凭空诬告。
+    非终态返回 `in_progress=True`，前端据此显示进度而不是结论。
+    """
     expected = int(getattr(task, "image_count", 0) or 0)
     delivered = int(getattr(task, "delivered_images", 0) or 0)
+    if not is_terminal(getattr(task, "status", "")):
+        return {"expected_images": expected, "partial": False, "message": "",
+                "in_progress": True}
     partial = bool(expected and delivered < expected)
     message = (f"部分成功，预期 {expected} 张，输出 {delivered} 张" if partial else "")
-    return {"expected_images": expected, "partial": partial, "message": message}
+    return {"expected_images": expected, "partial": partial, "message": message,
+            "in_progress": False}
 
 
 @router.get("/assets/{asset_id}")

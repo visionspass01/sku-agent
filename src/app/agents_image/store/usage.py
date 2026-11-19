@@ -183,8 +183,12 @@ def _row_moment(period_key: str) -> dt.datetime | None:
 
 
 def buckets(session, *, granularity: str = "day", count: int = 30,
-            username: str | None = None, now: dt.datetime | None = None) -> list[dict]:
-    """近 `count` 个周期桶（含当前桶），每桶交付/尝试/任务/失败/成本 + 按账户细分。"""
+            username: str | None = None, department: str | None = None,
+            now: dt.datetime | None = None) -> list[dict]:
+    """近 `count` 个周期桶（含当前桶），每桶交付/尝试/任务/失败/成本 + 按账户细分。
+
+    P2-2：支持按部门过滤（`image_usage.department`），与管理端卡片的部门视图同口径。
+    """
     granularity = granularity if granularity in GRANULARITIES else "day"
     count = max(1, min(int(count or 30), 120))
     moment = quota_store.now_local(now)
@@ -202,6 +206,8 @@ def buckets(session, *, granularity: str = "day", count: int = 30,
     statement = select(ImageUsage).where(ImageUsage.granularity == "hour")
     if username:
         statement = statement.where(ImageUsage.username == username)
+    if department:
+        statement = statement.where(ImageUsage.department == department)
     rows = session.execute(statement).scalars().all()
 
     buckets: dict[str, dict] = {key: {"key": key, "images": 0, "images_attempted": 0,

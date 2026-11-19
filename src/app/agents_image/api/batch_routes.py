@@ -201,6 +201,10 @@ def batch_detail(batch_id: str, request: Request) -> JSONResponse:
             delivered = attempted = reused = 0
             cost = 0.0
             listed = 0
+            partial_tasks = 0
+            warnings_count = 0
+            blocked_count = 0
+            ref_sources: set[str] = set()
             tasks = []
             for row in rows:
                 statuses[row.status] = statuses.get(row.status, 0) + 1
@@ -210,17 +214,32 @@ def batch_detail(batch_id: str, request: Request) -> JSONResponse:
                 cost += float(row.external_cost_cny or 0)
                 if (row.listing_status or "") == "listed":
                     listed += 1
+                ref_sources.add(str(getattr(row, "ref_source", "") or ""))
+                warnings_count += len(getattr(row, "warnings_json", None) or [])
+                blocked_count += len(getattr(row, "blocked_json", None) or [])
+                expected = int(getattr(row, "image_count", 0) or 0)
+                is_partial = (row.status == "done" and expected
+                              and int(row.delivered_images or 0) < expected)
+                if is_partial:
+                    partial_tasks += 1
                 tasks.append({
                     "task_id": row.task_id, "product_id": row.product_id,
                     "color_key": getattr(row, "color_key", ""),
                     "platform": row.platform, "variant_id": row.variant_id,
                     "status": row.status, "delivered_images": row.delivered_images,
                     "attempted_images": row.attempted_images,
+                    "image_count": expected,
+                    "partial": bool(is_partial),
                     "reused_images": getattr(row, "reused_images", 0),
                     "error_code": row.error_code,
                     "listing_status": row.listing_status,
                     "ref_source": row.ref_source,
+                    "warnings_count": len(getattr(row, "warnings_json", None) or []),
+                    "blocked_count": len(getattr(row, "blocked_json", None) or []),
                 })
+            # P2-2：批次里参考图来源不一致时返回 mixed，不能拿第一行当整批口径
+            single_source = next(iter(ref_sources)) if len(ref_sources) == 1 else ""
+            batch_source = single_source or ("mixed" if ref_sources else "")
             payload = {
                 "batch_id": batch_id,
                 "count": len(rows),
@@ -230,9 +249,16 @@ def batch_detail(batch_id: str, request: Request) -> JSONResponse:
                 "reused_images": reused,
                 "cost_cny": round(cost, 4),
                 "listed_tasks": listed,
-                "ref_source": rows[0].ref_source,
+                "ref_source": batch_source,
+                "ref_sources": sorted(ref_sources),
+                # P2-10：批次汇总要能解释"复用多少 / 多少任务部分成功 / 多少告警与拦截"
+                "partial_tasks": partial_tasks,
+                "warnings_count": warnings_count,
+                "blocked_count": blocked_count,
                 "products": sorted({row.product_id for row in rows if row.product_id}),
                 "platforms": sorted({row.platform for row in rows if row.platform}),
+                "note": ("交付量 = Agent 审核通过张数；复用图不计入本次生成；"
+                         "部分成功任务见 partial_tasks，被门禁拦下的图见 blocked_count"),
                 "tasks": tasks,
             }
     except ImageError as exc:

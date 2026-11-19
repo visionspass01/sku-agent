@@ -14,7 +14,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from app.agents_image.api.batch_routes import cancel_one
-from app.agents_image.api.common import asset_payload, error_response
+from app.agents_image.api.common import asset_payload, error_response, is_terminal
 from app.agents_image.api.deps import require_user, trace_id_of
 from app.agents_image.dispatch.task_dispatcher import get_dispatcher
 from app.agents_image.store import assets as asset_store
@@ -34,7 +34,9 @@ _MAX_STREAM_SECONDS = 120
 def _snapshot_payload(task) -> dict:
     expected = int(getattr(task, "image_count", 0) or 0)
     delivered = int(getattr(task, "delivered_images", 0) or 0)
-    partial = bool(expected and delivered < expected)
+    # P1-9：只有终态才谈"部分成功"；排队/运行中 delivered < expected 是正常现象
+    terminal = is_terminal(getattr(task, "status", ""))
+    partial = bool(terminal and expected and delivered < expected)
     return {
         "task_id": task.task_id, "batch_id": task.batch_id, "product_id": task.product_id,
         "platform": task.platform, "variant_id": getattr(task, "variant_id", "") or "",
@@ -54,6 +56,7 @@ def _snapshot_payload(task) -> dict:
         "delivered_images": delivered,
         "expected_images": expected,
         "partial": partial,
+        "in_progress": not terminal,
         "message": (f"部分成功，预期 {expected} 张，输出 {delivered} 张" if partial else ""),
         "warnings": list(getattr(task, "warnings_json", None) or []),
         "blocked": list(getattr(task, "blocked_json", None) or []),
