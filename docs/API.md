@@ -305,7 +305,9 @@ MCP server 现在**不碰任何数据库**：它们是「工具名 → `/api/v1/
 `IMG_UPSTREAM_INVALID`(502) · `IMG_CONTENT_BLOCKED`(422) · `IMG_SCHEMA_INVALID`(422) · `IMG_CRITIC_FAILED`(422) ·
 `IMG_BACKFILL_FAILED`(502) · `IMG_TASK_NOT_FOUND`(404) · `IMG_TASK_CONFLICT`(409) · `IMG_TIMEOUT`(504) ·
 `IMG_SIMILAR_NOT_FOUND`(422，拍立淘没搜到销量 >100 的近似款) · `IMG_LIBRARY_FULL`(422，素材库超上限) ·
-`IMG_PROVIDER_RATE_LIMITED`(429) / `IMG_PROVIDER_UNAVAILABLE`(503)（第三方限流/不可用，已自动重试 `IMAGE_PROVIDER_RETRIES` 次）
+`IMG_PROVIDER_RATE_LIMITED`(429) / `IMG_PROVIDER_UNAVAILABLE`(503)（第三方限流/不可用，已自动重试 `IMAGE_PROVIDER_RETRIES` 次） ·
+`IMG_TASK_CANCELED`(409，任务被取消) · `IMG_RECOVERY_EXHAUSTED`(409，看门狗重投超限) ·
+`IMG_REFERENCE_EXPIRED`(409，参考图已过 24h 保留期) · `IMG_USER_NOT_FOUND`(404)
 
 
 ---
@@ -340,3 +342,30 @@ MCP server 现在**不碰任何数据库**：它们是「工具名 → `/api/v1/
 | 任务详情 | 增加 `copy`（逐图位文案）、`warnings`、`blocked`、`retries`、`provider_calls` |
 | 口径（管理端 5 卡） | 使用量（+发起量、API 可用性=使用量/发起量）· 生图成功率（交付÷使用量）· 上架率（人工通过÷使用量，另给标记上架率）· 配额（used/limit）· 在途+成本（元/张） |
 | 健康检查 | `/api/image/health` 增加 `degraded` / `degraded_reason`（补列/唯一索引失败时置位）与 `context_batches` 统计 |
+
+---
+
+## v9 接口变化（生图 Agent，第三轮评审修复）
+
+| 变化 | 说明 |
+|---|---|
+| 取消结算 | 取消"未调模型"的任务会**退回预留额度**并记一次失败使用量；任务写 `IMG_TASK_CANCELED`；重复取消幂等（`image_task.settled_at` 做结算权） |
+| 任务认领 | 派发前 CAS 认领（`status=queued` 且租约空/过期）；看门狗只拾取**未被认领的 queued（超过 `IMAGE_CLAIM_GRACE_SECONDS`）** 或**租约过期的 running**，`recoveries` 只在真正重投时 +1 |
+| 部分成功 | 详情 / SSE `done` / 回写新增 `expected_images`、`partial`、`message`（固定文案「部分成功，预期 X 张，输出 Y 张」）、`warnings`、`blocked`；告警含 `IMG_SLOT_MISSING` |
+| 像素门禁 | `aspect` 以**请求比例**为基准（平台卡只给容差/阈值）；`IMAGE_COMPLIANCE_NONPNG=warn|block` 决定非 PNG 的解不了像素时是"交付+告警"还是"拦下"；跳过时打 `IMG_GATE_SKIPPED` |
+| 参考图两阶段 | `plan_*()`（只取字节，无写事务）+ `persist_refs()`（只写库）；建任务 = 读 → 取图（无事务）→ 短写事务（抢占+预留+落库+建任务），不再在事务里下载/搜图 |
+| 素材库 | 按内容 `(sha256, 账号)` 去重：重复上传返回 200 + `asset_id` + `deduped=true` |
+| 拍立淘 | 搜图输入（素材库图）同样校验归属（403）；每个商品用**自己的目标颜色**主图做查询 |
+| 迭代复用 | `reuse_map` 只保留本次 `slot_count` 内可出图的图位（窗口外历史成品不再挂进来） |
+| 建任务响应 | `reused_images` = 复用**张数**，新增 `reused_tasks` = 复用**任务数**；`iterate` 的 hint 改为"重做主图 + 差额补齐" |
+| 商品清单 | `GET /api/image/products` 返回 `colors:[{color,color_hex}]`（前端按颜色多选建任务；顺带消掉 N+1） |
+| 中台治理 | `/products/context` 增 `forbidden[]`、`/similar-by-image` 增 `filtered`：按调用方 principal 的 departments 兜底过滤 |
+| 回写补偿 | outbox 后台自动重放（`IMAGE_OUTBOX_REPLAY_SECONDS` / `_BATCH`）；入队失败写 `IMG_OUTBOX_ENQUEUE_FAILED` 告警 |
+| 管理端 | `?department=` 过滤（任务与五张卡同口径）；在途口径改为 DB running（`in_flight_scope=db`）；`/health` 的 `degraded` 反映库结构降级 |
+| 清理 | `blocked` 目录纳入 24h 清理；`library`（素材库）**不清理**，由用户显式删除 |
+
+### 拍立淘不排除"自身商品"的取舍（评审 P1-6）
+
+生产环境里"以图搜同款"销量最高的候选**通常是其他商家的同款商品**；把被搜商品本身排掉反而会
+漏掉最有价值的同款参考图（同一款在不同商家店铺的实拍差异正是拍立淘要拿的信息）。因此本实现
+不做自身排除；若某个商家/场景确实需要排除，可在 `image_find_similar` 里传 `exclude`（中台已支持）。

@@ -246,6 +246,20 @@ async def execute_task(task_id: str) -> ImageTaskState:
     cost = 0.0
     external_cost = 0.0
     outputs: list[dict] = []
+    # 第三轮补充：像素门禁 + autofix（纯 Python 解码/重编码，单图可达数百毫秒）**在事务外**算完，
+    # 事务里只做落盘入库，避免 8 个并发任务把 SQLite 写锁持有到超时（冒烟出现过 database is locked）。
+    gate_mode = str(getattr(settings, "compliance_gate", "main") or "main")
+    autofix_images = bool(getattr(settings, "compliance_autofix", True))
+    nonpng_policy = str(getattr(settings, "compliance_nonpng", "warn") or "warn")
+    gated: list[tuple[int, str, object, str]] = []
+    for image in images:
+        role = _role_of(state, image.slot)
+        verdict = compliance.gate(
+            image.data, slot=image.slot, role=role, platform_rules=rules,
+            gate_mode=gate_mode, autofix=autofix_images, aspect=state.aspect,
+            nonpng_policy=nonpng_policy,
+        )
+        gated.append((image.slot, role, verdict, image.mime or "image/png"))
     with session_scope() as session:
         task = task_store.get_task(session, task_id)
         if task is None or task.status == "canceled":
@@ -266,46 +280,37 @@ async def execute_task(task_id: str) -> ImageTaskState:
         blocked: list[dict] = []
         delivered_slots: set[int] = set()
         gate_skipped = 0
-        for image in images:
-            role = _role_of(state, image.slot)
-            # M5：交付前像素门禁（主图 blocking；autofix 先归白/按请求比例裁再复检）
-            verdict = compliance.gate(
-                image.data, slot=image.slot, role=role, platform_rules=rules,
-                gate_mode=str(getattr(settings, "compliance_gate", "main") or "main"),
-                autofix=bool(getattr(settings, "compliance_autofix", True)),
-                aspect=state.aspect,
-                nonpng_policy=str(getattr(settings, "compliance_nonpng", "warn") or "warn"),
-            )
+        for slot, role, verdict, image_mime in gated:
             if verdict.degraded:
                 gate_skipped += 1
                 state.warnings.append(
                     "IMG_GATE_SKIPPED: 图位 "
-                    f"{image.slot}（{role or '-'}）像素门禁被跳过（"
+                    f"{slot}（{role or '-'}）像素门禁被跳过（"
                     + ("；".join(verdict.reasons) or "非 PNG 且未安装 Pillow")
                     + "），该图按平台规则未做像素校验")
             if not verdict.passed:
                 asset_store.save_bytes(
-                    session, verdict.data, kind="blocked", mime=image.mime or "image/png",
-                    task_id=task_id, slot=image.slot,
+                    session, verdict.data, kind="blocked", mime=image_mime,
+                    task_id=task_id, slot=slot,
                     username=task.username, department=task.department,
                     blocked_reason=("; ".join(verdict.reasons))[:60],
                 )
-                blocked.append({"slot": image.slot, "reasons": list(verdict.reasons)})
+                blocked.append({"slot": slot, "reasons": list(verdict.reasons)})
                 state.warnings.append(
                     "IMG_CONTENT_BLOCKED: 图位 "
-                    f"{image.slot}（{role or '-'}）像素门禁未通过：" + "; ".join(verdict.reasons))
+                    f"{slot}（{role or '-'}）像素门禁未通过：" + "; ".join(verdict.reasons))
                 continue
             asset = asset_store.save_bytes(
-                session, verdict.data, kind="output", mime=image.mime or "image/png",
-                task_id=task_id, slot=image.slot,
+                session, verdict.data, kind="output", mime=image_mime,
+                task_id=task_id, slot=slot,
                 username=task.username, department=task.department,
             )
             delivered += 1 if asset is not None else 0
-            delivered_slots.add(int(image.slot))
+            delivered_slots.add(int(slot))
             if asset is not None:
                 # 只留纯数据：session 关闭后 ORM 对象不能再取属性（DetachedInstanceError）
                 outputs.append({
-                    "slot": image.slot, "mime": asset.mime or image.mime or "image/png",
+                    "slot": slot, "mime": asset.mime or image_mime,
                     "sha256": asset.sha256, "width": asset.width,
                     "height": asset.height, "bytes": asset.bytes,
                     "storage": asset.storage, "key": asset.key,

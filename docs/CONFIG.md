@@ -245,3 +245,17 @@
 | `IMAGE_PAILITAO_TOP_N` | `5` | 每个商品最多取几个相似款主图（1..5） |
 
 平台标识：**淘系 / 抖系**（`通用` 仅作中台兜底规则卡）。
+
+---
+
+## v9 新增配置（生图 Agent，第三轮评审修复）
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `IMAGE_CLAIM_GRACE_SECONDS` | `30` | 排队宽限：刚建出来的 `queued` 任务在这段时间内不被看门狗当成孤儿 |
+| `IMAGE_COMPLIANCE_NONPNG` | `warn` | 非 PNG 且没装 Pillow 时的门禁策略：`warn`（交付+`IMG_GATE_SKIPPED`）/ `block`（按不通过处理）；装了 Pillow 自动走真解码 |
+| `IMAGE_OUTBOX_REPLAY_SECONDS` | `60` | 回写补偿队列的自动重放间隔（0=关闭，仍可用管理员接口手动重放） |
+| `IMAGE_OUTBOX_REPLAY_BATCH` | `50` | 单次重放最多处理多少条 |
+
+清理口径：`refs/`、`outputs/`、`blocked/` 参与 `IMAGE_RETENTION_HOURS` 清理；
+`library/`（素材库）**不清理**，只能由用户删除。

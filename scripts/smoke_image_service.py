@@ -102,6 +102,8 @@ def main() -> int:
 
     status, products = client.call("GET", "/api/image/products?limit=5")
     expect("商品清单来自中台", status == 200 and products.get("products"), str(status))
+    expect("商品清单带颜色候选", bool((products.get("products") or [{}])[0].get("colors")),
+           str((products.get("products") or [{}])[0].get("colors")))
 
     # 1) 多色 + iterate
     status, base = client.call("POST", "/api/image/tasks", {
@@ -166,6 +168,30 @@ def main() -> int:
         "ref_source": "pailitao",
     })
     expect("拍立淘建任务", status == 201, str(pailitao)[:160])
+
+    # 4.5) 四种比例都要能交付（P0-3）+ 部分成功字段存在（P1-1）
+    for aspect in ("3:4", "16:9"):
+        status, created_aspect = client.call("POST", "/api/image/tasks", {
+            "product_ids": ["P-3001"], "prompt": "白底主图", "aspect": aspect,
+            "image_count": 1,
+        })
+        ok = status == 201
+        if ok:
+            task = (created_aspect.get("tasks") or [{}])[0].get("task_id", "")
+            deadline = time.time() + 60
+            detail = {}
+            while time.time() < deadline and task:
+                _, detail = client.call("GET", f"/api/image/tasks/{task}")
+                if detail.get("status") in {"done", "failed"}:
+                    break
+                time.sleep(0.3)
+            ok = detail.get("status") == "done" and detail.get("delivered_images") == 1
+        expect(f"比例 {aspect} 能交付", ok, str(detail)[:120] if ok else str(status))
+
+    status, sample_task = client.call("GET", f"/api/image/tasks/{base_id}")
+    expect("任务带部分成功字段", status == 200 and "expected_images" in sample_task
+           and "partial" in sample_task and "message" in sample_task,
+           str(list(sample_task))[:120])
 
     # 5) 批次汇总 + 整批取消
     status, batch = client.call("GET", f"/api/image/batches/{batch_id}")

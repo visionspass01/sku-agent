@@ -210,3 +210,5 @@ def test_gate_skipped_is_visible_in_task(env, monkeypatch):
     assert detail["status"] == "done"
     assert any("IMG_GATE_SKIPPED" in item for item in detail["warnings"]), detail["warnings"]
     assert image_metrics.snapshot()["gate_skipped"] >= 1
+    # 门禁/autofix 移出写事务后仍要保留原图 mime（不能把 JPEG 存成 image/png）
+    assert detail["assets"][0]["mime"] == "image/jpeg"
