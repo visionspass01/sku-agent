@@ -20,6 +20,7 @@ function expect(name, ok) {
 // 1) 页面结构
 for (const id of ["login-panel", "workbench", "admin-panel", "product-rows",
                   "composition-select", "scene-style-select", "count-input",
+                  "slot-count-input", "mode-select", "platform-select",
                   "aspect-select", "prompt-input", "btn-create", "progress",
                   "gallery", "metric-cards", "image-chart",
                   "ref-source-select", "library-panel", "library-grid"]) {
@@ -41,6 +42,15 @@ expect("独立登录态", js.includes("image_agent_token"));
 expect("签名 URL 直出", js.includes("signed_url"));
 expect("隐藏/显示工作台", js.includes("workbench"));
 expect("管理面板手绘 SVG", adminJs.includes("createElementNS") && adminJs.includes("polyline"));
+// 第三轮（v2）：图位数/出图张数分离、颜色多选、模式/双平台、iterate、部分成功可见
+expect("图位数与出图张数分离", js.includes("slot_count") && js.includes("image_count"));
+expect("按颜色建任务", js.includes("product_colors") || js.includes("all_colors"));
+expect("双平台开关", js.includes("platform_variant"));
+expect("iterate 入口", js.includes("attachIterateButton"));
+expect("部分成功可见", js.includes("partial") && html.includes('id="create-hint"'));
+expect("批次号可恢复", js.includes("image_agent_batch"));
+expect("页面版本 image-v2", html.includes('data-ui-build="image-v2"') &&
+  js.includes('"image-v2"'));
 
 if (failures.length) {
   console.error(`\n${failures.length} 项失败`);

@@ -291,3 +291,25 @@
   font-size: 12.5px;
   text-align: center;
 }
+
+/* ---------------------------------------------------------------- v2：颜色多选与部分成功 */
+.color-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-right: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.color-chip input:disabled {
+  opacity: 0.45;
+}
+
+.pi-name.partial {
+  color: #f0b429;
+}
+
+.iterate-btn {
+  margin-left: 8px;
+}

@@ -125,16 +125,25 @@ async def list_products(request: Request) -> JSONResponse:
             raise ImageError("IMG_INPUT_INVALID", "limit 必须是整数") from exc
         catalog = get_catalog()
         rows = await catalog.list_products(keyword=keyword, limit=max(1, min(limit, 100)))
-        # 部门过滤（P2-2）：普通账号只看到本部门商品，管理员看全部
+        # 部门过滤（P2-2）+ 颜色候选（第三轮 P1-11）：一次批量取商品上下文，
+        # 顺便消掉过去"每个商品回一次中台"的 N+1
+        products = await batch_context.get_product_batcher(catalog).get_many(
+            [row.product_id for row in rows])
         visible = []
         for row in rows:
+            data = products.get(row.product_id)
+            if data is None:
+                continue
             if not user.is_admin:
-                data = await catalog.get_product(row.product_id)
                 department = _department_of(data.category)
                 if department and user.department and department != user.department:
                     continue
-            visible.append(row)
-        payload = {"products": [row.model_dump() for row in visible], "trace_id": trace}
+            item = row.model_dump()
+            item["colors"] = [{"color": entry.get("color", ""),
+                               "color_hex": entry.get("color_hex", "")}
+                              for entry in data.colors()]
+            visible.append(item)
+        payload = {"products": visible, "trace_id": trace}
     except ImageError as exc:
         return error_response(exc, trace)
     except Exception as exc:  # noqa: BLE001

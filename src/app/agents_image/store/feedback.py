@@ -91,8 +91,11 @@ def record(session, *, task_id: str, asset_id: str, verdict: str, reason: str = 
             if reason:
                 memory.fix_summary = reason[:500]
         session.flush()
-    except Exception:  # noqa: BLE001 —— 样本归档失败不影响判断
-        pass
+    except Exception as exc:  # noqa: BLE001 —— 样本归档失败不影响判断
+        from app.agents_image import metrics as image_metrics
+
+        image_metrics.record_swallowed("feedback_memory")
+        logger.warning("样本归档失败：asset=%s %s", asset_id, exc)
 
     return {"asset_id": asset_id, "task_id": task_id, "verdict": verdict,
             "reason": row.reason, "slot": row.slot, "username": row.username}

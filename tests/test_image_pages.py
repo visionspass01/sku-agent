@@ -33,9 +33,11 @@ def test_image_page_has_required_anchors():
     html = _read("image.html")
     for element_id in ("login-panel", "workbench", "admin-panel", "product-rows",
                        "composition-select", "scene-style-select", "count-input",
+                       "slot-count-input", "mode-select", "platform-select",
                        "aspect-select", "prompt-input", "btn-create", "progress",
                        "gallery", "metric-cards", "image-chart",
-                       "ref-source-select", "library-panel", "library-grid"):
+                       "ref-source-select", "library-panel", "library-grid",
+                       "color-hint", "scope-note"):
         assert f'id="{element_id}"' in html, element_id
     # W3：上传入口只在「素材库」面板；商品清单仍然只能从中台选（不能上传商品图）
     assert 'id="library-file"' in html
@@ -61,7 +63,7 @@ def test_image_js_uses_auth_headers_and_fetch_stream():
         assert path in admin_js, path
     # 独立登录态
     assert "image_agent_token" in js
-    assert "image-v1" in js
+    assert "image-v2" in js
 
 
 def test_image_js_has_no_legacy_upload_path():

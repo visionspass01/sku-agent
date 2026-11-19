@@ -7,10 +7,11 @@
  *  - 进度走 SSE：/api/image/tasks/{id}/stream
  * ============================================================ */
 
-const IMAGE_BUILD = "image-v1";
+const IMAGE_BUILD = "image-v2";
 const TOKEN_KEY = "image_agent_token";
 const USER_KEY = "image_agent_user";
 const MAX_BATCH = 5;
+const BATCH_KEY = "image_agent_batch";
 
 const state = {
   token: "",
@@ -18,6 +19,8 @@ const state = {
   products: [],
   catalog: null,
   selected: new Set(),
+  colorsSelected: new Map(),       // product_id -> Set(color)
+  batchId: "",
   library: [],
   librarySelected: new Set(),
   streams: new Map(),
@@ -109,6 +112,8 @@ function renderIdentity() {
   setText("badge-user-value", loggedIn ? `${state.user.username}（${state.user.role}）` : "未登录");
   if (loggedIn) {
     setText("login-hint", "");
+    state.batchId = localStorage.getItem(BATCH_KEY) || "";
+    if (state.batchId) setText("batch-badge", `batch: ${state.batchId}`);
     loadQuota();
     loadProducts();
     loadCatalog();
@@ -175,13 +180,24 @@ function renderProducts() {
   rows.innerHTML = state.products.map((item) => {
     const checked = state.selected.has(item.product_id) ? "checked" : "";
     const disabled = !state.selected.has(item.product_id) && state.selected.size >= MAX_BATCH;
+    const colors = Array.isArray(item.colors) ? item.colors : [];
+    const chosen = state.colorsSelected.get(item.product_id) || new Set();
+    const colorCell = colors.length
+      ? colors.map((entry) => {
+        const name = entry.color || "默认";
+        const on = chosen.has(name) ? "checked" : "";
+        return `<label class="color-chip"><input type="checkbox" class="color-check" `
+          + `data-product="${esc(item.product_id)}" data-color="${esc(name)}" ${on} `
+          + `${checked ? "" : "disabled"} /> ${esc(name)}</label>`;
+      }).join("")
+      : '<span class="muted">无颜色维度</span>';
     return [
       `<tr class="${checked ? "selected" : ""}">`,
       `<td><input type="checkbox" class="product-check" data-product="${esc(item.product_id)}" ${checked} ${disabled ? "disabled" : ""} /></td>`,
       `<td>${esc(item.title)}</td>`,
       `<td>${esc(item.category)}</td>`,
       `<td><code>${esc(item.product_id)}</code></td>`,
-      `<td>${item.main_image_id ? '<span class="tag low">有</span>' : '<span class="tag high">无</span>'}</td>`,
+      `<td>${colorCell}</td>`,
       "</tr>",
     ].join("");
   }).join("");
@@ -197,7 +213,21 @@ function renderProducts() {
         state.selected.add(productId);
       } else {
         state.selected.delete(productId);
+        state.colorsSelected.delete(productId);
       }
+      renderProducts();
+      updateCreateHint();
+    });
+  });
+  rows.querySelectorAll(".color-check").forEach((box) => {
+    box.addEventListener("change", () => {
+      const productId = box.dataset.product;
+      const color = box.dataset.color;
+      const chosen = state.colorsSelected.get(productId) || new Set();
+      if (box.checked) chosen.add(color);
+      else chosen.delete(color);
+      if (chosen.size) state.colorsSelected.set(productId, chosen);
+      else state.colorsSelected.delete(productId);
       renderProducts();
       updateCreateHint();
     });
@@ -207,7 +237,12 @@ function renderProducts() {
 
 function updateCreateHint() {
   const count = state.selected.size;
-  setText("create-hint", count ? `已选 ${count}/${MAX_BATCH} 个商品` : "先勾选商品");
+  let colorCount = 0;
+  state.colorsSelected.forEach((set) => { colorCount += set.size; });
+  const label = count
+    ? `已选 ${count}/${MAX_BATCH} 个商品` + (colorCount ? ` · ${colorCount} 个颜色` : "（默认第一个颜色）")
+    : "先勾选商品";
+  setText("create-hint", label);
   const button = $("btn-create");
   if (button) button.disabled = count === 0;
 }
@@ -361,8 +396,10 @@ async function uploadLibraryImage() {
 
 /* ---------------------------------------------------------------- 批次操作（功能12） */
 function currentBatchId() {
-  const text = ($("batch-badge").textContent || "").replace("batch:", "").trim();
-  return text === "-" ? "" : text;
+  if (state.batchId) return state.batchId;
+  const saved = localStorage.getItem(BATCH_KEY) || "";
+  if (saved) state.batchId = saved;
+  return saved;
 }
 
 async function showBatchSummary() {
@@ -431,12 +468,35 @@ async function createTasks() {
     setText("create-hint", "请填写需求描述");
     return;
   }
+  // 第三轮 P1-11：图位数与出图张数分开、模式/双平台、按颜色建任务（过去只发 n，能力全不可达）
   const payload = {
     product_ids: productIds,
     prompt,
     aspect: $("aspect-select").value || "1:1",
-    n: Number($("count-input").value || 6),
+    slot_count: Number($("slot-count-input").value || 9),
+    image_count: Number($("count-input").value || 6),
+    mode: $("mode-select").value || "standard",
   };
+  const platform = $("platform-select").value || "淘系";
+  if (platform === "both") payload.platform_variant = true;
+  else payload.platform = platform;
+  const colorPayload = [];
+  let allColors = true;
+  state.selected.forEach((productId) => {
+    const chosen = state.colorsSelected.get(productId);
+    const product = state.products.find((item) => item.product_id === productId) || {};
+    const available = (product.colors || []).map((entry) => entry.color || "默认");
+    if (!chosen || !chosen.size || available.every((name) => chosen.has(name))) {
+      return;                              // 没勾 = 第一个颜色；全勾 = all_colors
+    }
+    allColors = false;
+    colorPayload.push({ product_id: productId, colors: Array.from(chosen) });
+  });
+  if (allColors && state.selected.size) {
+    payload.all_colors = true;             // 全部颜色都勾了：直接让中台展开
+  } else if (colorPayload.length) {
+    payload.product_colors = colorPayload;
+  }
   const composition = $("composition-select").value;
   const style = $("scene-style-select").value;
   if (composition) payload.compositions = [composition];
@@ -456,10 +516,13 @@ async function createTasks() {
   setText("create-hint", "提交中…");
   try {
     const body = await api("/api/image/tasks", { json: payload });
+    state.batchId = body.batch_id || "";
+    if (state.batchId) localStorage.setItem(BATCH_KEY, state.batchId);
     setText("batch-badge", `batch: ${body.batch_id}`);
     setText("create-hint", `已创建 ${body.tasks.length} 个任务` +
       (body.ref_source ? `（参考图：${body.ref_source}）` : "") +
-      (body.platforms ? `（平台：${body.platforms.join("/")}）` : ""));
+      (body.platforms ? `（平台：${body.platforms.join("/")}）` : "") +
+      (body.reused_tasks ? `（复用 ${body.reused_images} 张 / ${body.reused_tasks} 个任务）` : ""));
     body.tasks.forEach((task) => watchTask(task.task_id, task.product_id));
     loadQuota();
   } catch (err) {
@@ -490,6 +553,8 @@ function parseSseChunk(chunk) {
 /* SSE 用 fetch 读流（带 Authorization 头），而不是 EventSource：
  * EventSource 不能加请求头，只能把令牌放 URL——那会漏进日志与 Referer。 */
 async function openStreamWithRetry(taskId, handlers, attempt = 0) {
+  const previous = state.streams.get(taskId);
+  if (previous) previous.abort && previous.abort();      // 断线重连先停掉旧流，避免双流双画
   const controller = await openStream(taskId, {
     ...handlers,
     onError(err) {
@@ -501,6 +566,7 @@ async function openStreamWithRetry(taskId, handlers, attempt = 0) {
       setTimeout(() => openStreamWithRetry(taskId, handlers, attempt + 1), delay);
     },
   });
+  state.streams.set(taskId, controller);
   return controller;
 }
 
@@ -616,7 +682,20 @@ function watchTask(taskId, productId) {
         statusEl.textContent = data.status + (data.timed_out ? "（等待超时）" : "");
         row.className = "progress-item " + data.status;
         if (data.error_code) nameEl.textContent = data.error_code;
-        if (data.status === "done") attachListingButtons(taskId, row);
+        // 第三轮 P1-12：部分成功 / 被门禁拦下的图位必须让用户看见
+        if (data.message) {
+          nameEl.textContent = data.message;
+          nameEl.classList.add("partial");
+        } else if (data.expected_images) {
+          nameEl.textContent = `预期 ${data.expected_images} 张 / 输出 ${data.delivered_images} 张`;
+        }
+        if (Array.isArray(data.warnings) && data.warnings.length) {
+          row.title = data.warnings.join("\n");
+        }
+        if (data.status === "done") {
+          attachListingButtons(taskId, row);
+          attachIterateButton(taskId, row, data);
+        }
         loadGallery(taskId);
         loadQuota();
       } else if (event === "fatal") {
@@ -633,6 +712,49 @@ function watchTask(taskId, productId) {
     },
   });
   state.streams.set(taskId, controller);
+}
+
+/* ---------------------------------------------------------------- iterate（只改主图 + 差额补齐）
+ * 第三轮 P1-11：这条能力过去只有 API 能调，UI 上完全不可达。
+ */
+function attachIterateButton(taskId, row, data) {
+  if (!row || row.querySelector(".iterate-btn")) return;
+  const productId = data.product_id || "";
+  if (!productId) return;
+  const button = document.createElement("button");
+  button.className = "mini-btn secondary iterate-btn";
+  button.type = "button";
+  button.textContent = "只改主图（复用其它图位）";
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    setText("create-hint", "提交 iterate 任务中…");
+    const prompt = ($("prompt-input").value || "").trim() || "主图点击率低，只改主图";
+    const payload = {
+      product_ids: [productId],
+      prompt,
+      aspect: $("aspect-select").value || "1:1",
+      mode: "iterate",
+      base_task_id: taskId,
+      slot_count: Number(data.slot_count || $("slot-count-input").value || 9),
+      image_count: 1,
+    };
+    if (data.color) payload.product_colors = [{ product_id: productId, colors: [data.color] }];
+    if (data.platform) payload.platform = data.platform;
+    try {
+      const body = await api("/api/image/tasks", { json: payload });
+      state.batchId = body.batch_id || state.batchId;
+      if (state.batchId) localStorage.setItem(BATCH_KEY, state.batchId);
+      setText("batch-badge", `batch: ${body.batch_id}`);
+      setText("create-hint", `已创建 iterate 任务（复用 ${body.reused_images || 0} 张）`);
+      body.tasks.forEach((task) => watchTask(task.task_id, task.product_id));
+      loadQuota();
+    } catch (err) {
+      setText("create-hint", err.message);
+    } finally {
+      button.disabled = false;
+    }
+  });
+  row.appendChild(button);
 }
 
 /* ---------------------------------------------------------------- 画廊（懒加载 + 分页） */

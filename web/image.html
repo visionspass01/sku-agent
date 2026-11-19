@@ -14,7 +14,7 @@
   <link rel="stylesheet" href="/style.css" />
   <link rel="stylesheet" href="/image.css" />
 </head>
-<body data-page="image" data-ui-build="image-v1">
+<body data-page="image" data-ui-build="image-v2">
   <header>
     <div class="brand">
       <h1>电商生图 Agent</h1>
@@ -66,7 +66,7 @@
       <div class="image-table-wrap">
         <table class="image-table" id="product-table">
           <thead>
-            <tr><th style="width:34px"></th><th>商品</th><th>类目</th><th>商品号</th><th>参考图</th></tr>
+            <tr><th style="width:34px"></th><th>商品</th><th>类目</th><th>商品号</th><th>颜色（出图粒度）</th></tr>
           </thead>
           <tbody id="product-rows">
             <tr><td colspan="5" class="muted">加载中…</td></tr>
@@ -81,11 +81,27 @@
         <label>场景风格（中台）
           <select id="scene-style-select"></select>
         </label>
-        <label>张数
+        <label>图位数（slot_count）
+          <input id="slot-count-input" type="number" min="1" max="9" value="9" />
+        </label>
+        <label>出图张数（image_count）
           <input id="count-input" type="number" min="1" max="9" value="6" />
         </label>
         <label>比例
           <select id="aspect-select"></select>
+        </label>
+        <label>出图模式
+          <select id="mode-select">
+            <option value="standard">标准</option>
+            <option value="variant">A/B 差异化（两套）</option>
+          </select>
+        </label>
+        <label>平台
+          <select id="platform-select">
+            <option value="淘系">淘系</option>
+            <option value="抖系">抖系</option>
+            <option value="both">淘系 + 抖系（两套）</option>
+          </select>
         </label>
         <label>参考图来源
           <select id="ref-source-select">
@@ -95,6 +111,8 @@
           </select>
         </label>
       </div>
+      <p class="muted" id="color-hint">颜色：勾选即按「商品+颜色」各建一个任务；不勾 = 只用第一个颜色。</p>
+      <p class="muted" id="scope-note"></p>
 
       <section class="image-library" id="library-panel" hidden>
         <div class="row">

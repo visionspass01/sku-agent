@@ -5,6 +5,7 @@ v6 起资产只有三类：`ref`（中台商品图落地）、`output`（出图�
 
 from __future__ import annotations
 
+import logging
 import uuid
 
 from sqlalchemy import select
@@ -12,6 +13,8 @@ from sqlalchemy import select
 from app.agents_image.storage.image_storage import get_storage
 from app.agents_image.store.models import ImageAsset
 from app.core.errors import raise_image
+
+logger = logging.getLogger("sku-agent.image.assets")
 
 
 def save_bytes(session, data: bytes, *, kind: str, mime: str = "",
@@ -154,7 +157,11 @@ def delete_asset(session, asset: ImageAsset) -> None:
     """删除素材图：先删文件、再删行（文件已丢也不影响元数据清理）。"""
     try:
         get_storage(asset.storage).delete(asset.key)
-    except Exception:  # noqa: BLE001 —— 文件已丢/存储异常都不阻断元数据清理
-        pass
+    except Exception as exc:  # noqa: BLE001 —— 文件已丢/存储异常都不阻断元数据清理
+        from app.agents_image import metrics as image_metrics
+
+        image_metrics.record_swallowed("delete_asset_file")
+        logging.getLogger("sku-agent.image.assets").warning(
+            "删除素材文件失败（行仍会删）：asset=%s %s", asset.asset_id, exc)
     session.delete(asset)
     session.flush()

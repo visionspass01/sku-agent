@@ -39,6 +39,9 @@ def _snapshot_payload(task) -> dict:
         "task_id": task.task_id, "batch_id": task.batch_id, "product_id": task.product_id,
         "platform": task.platform, "variant_id": getattr(task, "variant_id", "") or "",
         "color_key": getattr(task, "color_key", "") or "",
+        "color": (str(getattr(task, "color_key", "") or "").split("#", 1)[1]
+                  if "#" in str(getattr(task, "color_key", "") or "") else ""),
+        "base_task_id": getattr(task, "base_task_id", "") or "",
         "status": task.status, "attempts": task.attempts,
         "attempted_images": task.attempted_images,
         "delivered_images": delivered,

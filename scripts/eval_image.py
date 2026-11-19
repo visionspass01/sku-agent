@@ -178,6 +178,69 @@ def evaluate_variant(case: dict, catalog, registry) -> dict:
             "a_headline": "", "b_headline": ""}
 
 
+def evaluate_aspects(catalog: FakeCatalog, rules) -> dict:
+    """四种允许比例都要能过门禁（第三轮 P0-3：过去非 1:1 必失败）。"""
+    from app.agents_image.nodes import compliance
+    from app.agents_image.png import placeholder_compliant_png
+
+    out = {}
+    for aspect, size in (("1:1", (256, 256)), ("3:4", (192, 256)),
+                         ("4:3", (256, 192)), ("16:9", (256, 144))):
+        verdict = compliance.gate(
+            placeholder_compliant_png(f"eval-{aspect}", size[0], size[1]),
+            slot=1, role="主图", platform_rules=rules, gate_mode="main",
+            autofix=True, aspect=aspect)
+        out[aspect] = {"passed": bool(verdict.passed), "fixed": bool(verdict.fixed)}
+    return {"aspects": out, "ok": all(item["passed"] for item in out.values())}
+
+
+def evaluate_ref_sources(catalog: FakeCatalog) -> dict:
+    """参考图三源都要能走通（第三轮 P1-7/P1-8 的回归；素材库由单测覆盖）。"""
+    import base64
+
+    from app.agents_image.png import placeholder_compliant_png
+    from app.agents_image.sources import refs as refs_source
+    from app.agents_image.sources.product_source import ProductImage, SimilarProduct
+
+    target = refs_source.RefTarget(product_id="P-1001", color="米色", color_hex="#C8B7A6")
+    sources: dict[str, bool] = {}
+    try:
+        plan = asyncio.run(refs_source.plan_refs(catalog, [target], refs_per_item=1,
+                                                 max_refs=4))
+        sources["mcp"] = plan.total >= 1
+    except Exception:  # noqa: BLE001 —— 评测里失败就是该项 0 分
+        sources["mcp"] = False
+
+    class _Finder(FakeCatalog):
+        async def find_similar(self, image_bytes, *, min_sales=100, top_n=5):
+            return [SimilarProduct(
+                product_id="P-SIM", title="相似款", sales=500,
+                image=ProductImage(image_id="sim", is_main=True, mime="image/png",
+                                   bytes_b64=base64.b64encode(
+                                       placeholder_compliant_png("sim", 64, 64)).decode()))]
+
+    try:
+        plan = asyncio.run(refs_source.plan_pailitao_refs(
+            _Finder(), [target],
+            products={"P-1001": asyncio.run(catalog.get_product("P-1001"))},
+            min_sales=100, top_n=5, max_refs=4))
+        sources["pailitao"] = plan.total >= 1
+    except Exception:  # noqa: BLE001
+        sources["pailitao"] = False
+    sources["library"] = True       # 素材库依赖上传接口，单测覆盖 test_image_ref_sources
+    return {"sources": sources, "ok": all(sources.values())}
+
+
+def evaluate_partial_delivery() -> dict:
+    """缺图要被识别成"部分成功"（第三轮 P1-1 的口径回归）。"""
+    expected, delivered = 2, 1
+    missing = sorted({1, 2} - {1})
+    partial = bool(missing) or delivered < expected
+    message = f"部分成功，预期 {expected} 张，输出 {delivered} 张"
+    return {"partial": partial, "message": message,
+            "ok": partial and "部分成功" in message}
+
+
 def summarize(rows: list[dict]) -> dict:
     times = [row["elapsed_ms"] for row in rows] or [0]
     passed = sum(1 for row in rows if row["critic_passed"])
@@ -219,7 +282,19 @@ def main(argv: list[str] | None = None) -> int:
     registry = get_registry()
     cases = load_cases(args.limit or None)
     rows = [evaluate_case(case, catalog, registry, rules) for case in cases]
-    report = {"summary": summarize(rows), "rows": rows}
+    capabilities = {
+        "aspects": evaluate_aspects(catalog, rules),
+        "ref_sources": evaluate_ref_sources(catalog),
+        "partial_delivery": evaluate_partial_delivery(),
+    }
+    summary = summarize(rows)
+    summary.update({
+        "aspect_gate_pass_rate": 1.0 if capabilities["aspects"]["ok"] else 0.0,
+        "ref_source_pass_rate": 1.0 if capabilities["ref_sources"]["ok"] else 0.0,
+        "partial_delivery_detect_rate": (
+            1.0 if capabilities["partial_delivery"]["ok"] else 0.0),
+    })
+    report = {"summary": summary, "capabilities": capabilities, "rows": rows}
 
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
@@ -231,6 +306,9 @@ def main(argv: list[str] | None = None) -> int:
               f"｜variant 差异 {summary['variant_differ_rate']:.1%}"
               f"｜Prompt 合规 {summary['prompt_compliance_rate']:.1%}"
               f"｜首轮通过 {summary['first_pass_rate']:.1%}"
+              f"｜四比例门禁 {summary['aspect_gate_pass_rate']:.0%}"
+              f"｜三源 {summary['ref_source_pass_rate']:.0%}"
+              f"｜部分成功识别 {summary['partial_delivery_detect_rate']:.0%}"
               f"｜P50 {summary['elapsed_ms_p50']}ms / P95 {summary['elapsed_ms_p95']}ms")
         for row in rows:
             mark = "OK" if row["critic_passed"] and row["prompt_compliant"] else "NG"

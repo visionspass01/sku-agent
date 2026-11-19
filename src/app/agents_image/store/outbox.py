@@ -7,10 +7,13 @@
 from __future__ import annotations
 
 import datetime as dt
+import logging
 
 from sqlalchemy import select
 
 from app.agents_image.store.models import ImageOutbox
+
+logger = logging.getLogger("sku-agent.image.outbox")
 
 MAX_ATTEMPTS = 5
 BASE_BACKOFF_SECONDS = 30
@@ -69,6 +72,10 @@ async def replay(session, *, catalog=None, limit: int = 20,
             mark_sent(session, row)
             sent += 1
         except Exception as exc:  # noqa: BLE001 —— 单条失败不影响其它条
+            from app.agents_image import metrics as image_metrics
+
+            image_metrics.record_swallowed("outbox_replay")
+            logger.warning("outbox 重放失败：task=%s %s", row.task_id, exc)
             mark_failed(session, row, f"{type(exc).__name__}: {exc}")
             failed += 1
     return {"sent": sent, "failed": failed, "skipped": len(rows) - sent - failed}
