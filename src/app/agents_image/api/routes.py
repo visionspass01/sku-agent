@@ -810,7 +810,11 @@ def _verdict_response(request: Request, task_id: str, asset_id: str, verdict: st
 
 @router.post("/tasks/{task_id}/assets/{asset_id}/unblock")
 def unblock_asset(task_id: str, asset_id: str, request: Request) -> JSONResponse:
-    """人工放行被像素门禁拦下的图（管理员或本人；门禁假阳性时用）。"""
+    """人工放行被像素门禁拦下的图（管理员或本人；门禁假阳性时用）。
+
+    放行必须把账补齐（P2-11）：图位从 `blocked` 移出、`delivered_images + 1`、留一条
+    `IMG_BLOCKED_RELEASED` 告警，否则“人工放行了但交付张数没变”，指标继续少算。
+    """
     trace = trace_id_of(request)
     try:
         user = require_user(request)
@@ -822,9 +826,18 @@ def unblock_asset(task_id: str, asset_id: str, request: Request) -> JSONResponse
             asset = asset_store.get_asset(session, asset_id)
             if asset is None or asset.task_id != task_id:
                 raise ImageError("IMG_TASK_NOT_FOUND", f"图片不属于该任务：{asset_id}")
+            was_blocked = asset.kind == "blocked"
             asset.kind = "output"
             asset.blocked_reason = ""
             asset.adopt_status = "pending"
+            if was_blocked:
+                blocked = [item for item in (getattr(task, "blocked_json", None) or [])
+                           if int(item.get("slot", 0) or 0) != int(asset.slot or 0)]
+                warnings = list(getattr(task, "warnings_json", None) or [])
+                warnings.append(f"IMG_BLOCKED_RELEASED: 图位 {asset.slot} 已由人工放行")
+                task_store.update_task(
+                    session, task_id, blocked_json=blocked, warnings_json=warnings,
+                    delivered_images=int(getattr(task, "delivered_images", 0) or 0) + 1)
     except ImageError as exc:
         return error_response(exc, trace)
     return JSONResponse(status_code=200, content={"ok": True, "asset_id": asset_id,
@@ -864,12 +877,16 @@ async def retry_task(task_id: str, request: Request) -> JSONResponse:
 
     - 只允许 `failed` / `canceled`；每个任务最多 `IMAGE_MAX_TASK_RETRIES` 次（默认 3）；
     - 重新**预留**额度（失败时已释放），交付成功再结算——和新建任务同一套账；
-    - 参考图沿用任务上已绑定的资产；若已过保留期被清理，执行期会按 `IMG_REFERENCE_REQUIRED` 失败。
+    - 重置 `recoveries/settled_at/warnings/blocked/listing`（第三轮 P1-10 / P2-11），
+      否则重试后的第一次看门狗扫描会按"重投超限"把任务判死。
     """
     trace = trace_id_of(request)
     try:
         user = require_user(request)
         settings = get_image_settings()
+        from app.agents_image import settlement
+        from app.agents_image.store import quota as quota_store
+
         with session_scope() as session:
             task = task_store.get_task(session, task_id)
             if task is None:
@@ -884,24 +901,16 @@ async def retry_task(task_id: str, request: Request) -> JSONResponse:
                                  f"该任务已重试 {retries} 次，达到上限 "
                                  f"{settings.max_task_retries}；请调整需求后新建任务")
             planned = int(task.image_count or 0)
-            username = task.username
-            department = task.department
-        with session_scope() as session:
-            from app.agents_image.store import quota as quota_store
-
+            # 预留与重置在**同一个事务**里：中途失败不会留下"占着额度但没排上队"的半账（P2-14）
             if not user.is_admin and planned:
-                if not quota_store.reserve(session, username, planned):
-                    quota = quota_store.check(session, username, planned)
+                if not quota_store.reserve(session, task.username, planned):
+                    quota = quota_store.check(session, task.username, planned)
                     raise ImageError(
                         "IMG_QUOTA_EXCEEDED",
                         f"配额不足：本期剩余 {quota['remaining']} 张，重试需要 {planned} 张",
                         retryable=False)
-            task_store.update_task(
-                session, task_id, status="queued", retries=retries + 1,
-                error_code="", error_detail="", finished_at=None,
-                attempts=0, attempted_images=0, delivered_images=0,
-                provider_started_at=None, cancel_requested=False, lease_until=None,
-                department=department)
+            settlement.reset_for_retry(session, task_id)
+            task_store.update_task(session, task_id, retries=retries + 1)
         try:
             await get_dispatcher().submit(task_id)
         except Exception:  # noqa: BLE001 —— 已入库，看门狗会补投

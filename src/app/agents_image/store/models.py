@@ -75,6 +75,8 @@ class ImageTask(Base):
     warnings_json: Mapped[list] = mapped_column(JSON, default=list)
     blocked_json: Mapped[list] = mapped_column(JSON, default=list)
     provider_calls: Mapped[int] = mapped_column(Integer, default=0)  # 发起量（含重试）
+    # 结算标记（第三轮 P0-1）：额度只允许被结算/释放一次；取消、失败、交付都先抢这个标记
+    settled_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
 
     trace_id: Mapped[str] = mapped_column(String(32), default="")
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=dt.datetime.now)

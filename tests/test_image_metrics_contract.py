@@ -82,14 +82,14 @@ def test_cards_follow_usage_definitions(env):
     assert usage_delta == 1                     # 使用量 = 成功生成张数
     assert calls_delta >= 1                     # 发起量 ≥ 1
     assert passed_delta == 1                    # 交付张数
-    # 比率口径：成功率 = 交付/使用量；可用性 = 使用量/发起量
+    # 比率口径（卡片按 4 位小数展示，这里允许舍入误差）
     assert after["api_availability"] == pytest.approx(
-        after["usage_images"] / after["provider_calls"], rel=1e-3)
+        after["usage_images"] / after["provider_calls"], abs=1e-4)
     assert after["agent_pass_rate"] == pytest.approx(
-        after["agent_passed"] / after["usage_images"], rel=1e-3)
+        after["agent_passed"] / after["usage_images"], abs=1e-4)
     # 上架率 = 人工通过 / 使用量
     assert after["listing_rate"] == pytest.approx(
-        after["adopted"] / after["usage_images"], rel=1e-3)
+        after["adopted"] / after["usage_images"], abs=1e-4)
     for key in ("quota_used", "quota_limit", "quota_used_rate", "in_flight",
                 "cost_cny", "cost_per_image"):
         assert key in after, key

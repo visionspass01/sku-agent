@@ -5,7 +5,7 @@ from __future__ import annotations
 import datetime as dt
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from app.agents_image.store.models import ImageTask
 
@@ -107,6 +107,21 @@ def mark_backfill(session, task_id: str, status: str) -> None:
 def mark_failed(session, task_id: str, *, code: str, detail: str = "") -> None:
     update_task(session, task_id, status="failed", finished_at=dt.datetime.now(),
                 error_code=code, error_detail=detail)
+
+
+def mark_settled(session, task_id: str) -> bool:
+    """抢占「结算权」（第三轮 P0-1）：`settled_at` 从 NULL 变成现在才返回 True。
+
+    用条件 UPDATE 而不是"先查后写"：并发下（取消 vs 失败 vs 交付）只有一个路径能结算，
+    避免同一笔预留被释放两次（第二次释放会把**别人**的预留吃掉）。
+    """
+    result = session.execute(
+        update(ImageTask)
+        .where(ImageTask.task_id == task_id, ImageTask.settled_at.is_(None))
+        .values(settled_at=dt.datetime.now())
+    )
+    session.flush()
+    return bool(result.rowcount)
 
 
 def list_tasks(session, *, username: str | None = None, limit: int = 50,

@@ -217,6 +217,11 @@ async def execute_task(task_id: str) -> ImageTaskState:
         if attempt >= max_attempts:
             _archive_failure(state, critic, signature, attempted,
                              cost=sum(float(item or 0.0) for item in image_costs))
+            # 失败也要记账（使用量=已生成张数、成本已发生），并且只结算一次
+            with session_scope() as session:
+                _cancel_settle(session, state, attempted=attempted,
+                               provider_calls=provider_calls,
+                               cost=sum(float(item or 0.0) for item in image_costs))
             raise ImageError("IMG_CRITIC_FAILED",
                              f"评审未通过（第 {attempt} 轮，score={critic.score}）："
                              f"{'；'.join(critic.issues[:3])}")
@@ -243,7 +248,7 @@ async def execute_task(task_id: str) -> ImageTaskState:
             task_store.update_task(session, task_id, status="canceled",
                                    finished_at=dt.datetime.now(),
                                    attempted_images=attempted,
-                                   error_code="IMG_TASK_CONFLICT",
+                                   error_code="IMG_TASK_CANCELED",
                                    error_detail="已提交生图模型，结果被丢弃（用户取消）")
             _cancel_settle(session, state, attempted=attempted,
                            provider_calls=provider_calls,
@@ -316,6 +321,10 @@ async def execute_task(task_id: str) -> ImageTaskState:
         if blocked and delivered == 0:
             reasons = "；".join(
                 f"图位 {item['slot']}：{'、'.join(item['reasons'])}" for item in blocked[:2])
+            # 全被门禁拦下 = 失败，但 provider 已经出过图：使用量/成本照记、额度退回（只结算一次）
+            _cancel_settle(session, state, attempted=attempted,
+                           provider_calls=provider_calls,
+                           cost=sum(float(item or 0.0) for item in image_costs))
             raise ImageError("IMG_CONTENT_BLOCKED", f"所有出图都未通过平台像素门禁：{reasons}")
         # 成本口径（P0-5）：一律用 **provider 返回的真实计费**，不再用配置单价估
         for item in image_costs:
@@ -330,8 +339,8 @@ async def execute_task(task_id: str) -> ImageTaskState:
                                     for slot in (state.slots or [])])
         task_store.update_task(session, task_id, copy_json=copy_json,
                                provider_calls=provider_calls,
-                               warnings_json=list(state.warnings or []),
                                blocked_json=list(blocked or []))
+        # 结算里会追加对账告警（IMG_QUOTA_SETTLE_MISMATCH），所以告警的落库放到结算之后
         _settle(session, state, delivered=delivered, attempted=attempted, cost=cost,
                 provider_calls=provider_calls)
     metrics.record_task_done(delivered=delivered, attempted=attempted)
@@ -347,7 +356,8 @@ def _archive_failure(state: ImageTaskState, critic: CriticResult, signature: str
                      attempted: int, cost: float = 0.0) -> None:
     """失败归档：任务 attempts 落库 + 失败签名写进 `image_memory`（下次同因优先复用修复）。
 
-    同时记一次失败使用量（Critic 超限 = 一张都没交付，额度由调度器释放）。
+    使用量/额度不在这里记：统一由 `settlement.settle_cancel()` 在调度器的失败分支结算
+    （第三轮 P1-3：一处记账，避免失败被记两次）。
     """
     patch = "；".join(critic.issues[:3]) or "未知原因"
     try:
@@ -357,11 +367,6 @@ def _archive_failure(state: ImageTaskState, critic: CriticResult, signature: str
                                    error_detail=patch[:500])
             memory_store.remember(session, signature=signature, fix_summary=patch,
                                   prompt_patch=patch, department=state.department)
-            from app.agents_image.store import usage as usage_store
-
-            usage_store.record(session, username=state.username, department=state.department,
-                               failed=1, tasks=1, attempted=attempted, delivered=attempted,
-                               cost=cost)
     except Exception:  # noqa: BLE001 —— 归档失败不改变任务结论
         logger.warning("失败归档写入出错：task=%s", state.task_id)
 
@@ -381,60 +386,22 @@ def _copy_contract(state: ImageTaskState) -> dict:
 
 def _settle(session, state: ImageTaskState, *, delivered: int, attempted: int,
             cost: float, provider_calls: int = 0) -> None:
-    """结算：把预留转成已用（只算成功出图张数），多预留的部分释放；再记使用量流水。"""
-    from app.agents_image.store import quota as quota_store
-    from app.agents_image.store import usage as usage_store
-    from app.agents_image.store import users as user_store
+    """交付结算（委托 `settlement.settle_done`）：使用量占额度、多预留释放、写告警。"""
+    from app.agents_image import settlement
 
-    try:
-        row = user_store.get_user(session, state.username)
-        is_admin = bool(row is not None and (row.role or "") == "admin")
-    except Exception:  # noqa: BLE001 —— 账号查不到按普通用户处理
-        is_admin = False
-    planned = _planned_of(session, state.task_id)
-    # 配额口径（功能8）：**使用量**（第三方成功生成的张数）占额度——被门禁拦下的图也已经花过钱，
-    # 不能因为"没交付"就白用额度；重试轮次多出的张数按本轮计划上限封顶，避免超扣。
-    charged = min(max(int(attempted), int(delivered)), planned or 0)
-    if not is_admin and planned:
-        settled = quota_store.commit_reserve(session, state.username, charged)
-        if not settled:
-            state.warnings.append(
-                "IMG_QUOTA_SETTLE_MISMATCH: 预留额度与结算张数不一致"
-                f"（计划 {planned} 张 / 结算 {charged} 张），已按剩余预留释放")
-            logger.warning("配额结算对账不一致：task=%s planned=%s charged=%s",
-                           state.task_id, planned, charged)
-        quota_store.release(session, state.username, max(0, planned - charged))
-    usage_store.record(session, username=state.username, department=state.department,
-                       delivered=attempted, attempted=attempted, tasks=1, cost=cost,
-                       provider_calls=provider_calls, agent_passed=delivered)
+    settlement.settle_done(session, state.task_id, delivered=delivered,
+                           attempted=attempted, cost=cost,
+                           provider_calls=provider_calls, warnings=state.warnings)
 
 
 def _cancel_settle(session, state: ImageTaskState, *, attempted: int,
                    provider_calls: int = 0, cost: float = 0.0) -> None:
-    """取消/失败结算：预留全部释放，尝试张数照记（成本已在 provider 侧发生）。"""
-    from app.agents_image.store import quota as quota_store
-    from app.agents_image.store import usage as usage_store
-    from app.agents_image.store import users as user_store
+    """取消/失败结算（委托 `settlement.settle_cancel`）：额度全退，使用量/成本照记。"""
+    from app.agents_image import settlement
 
-    try:
-        row = user_store.get_user(session, state.username)
-        is_admin = bool(row is not None and (row.role or "") == "admin")
-    except Exception:  # noqa: BLE001
-        is_admin = False
-    planned = _planned_of(session, state.task_id)
-    if not is_admin and planned:
-        quota_store.release(session, state.username, planned)
-    # 取消/失败也要落使用量与成本：provider 已经跑过、钱已经花掉，不记就低估了成本
-    usage_store.record(session, username=state.username, department=state.department,
-                       failed=1, tasks=1, attempted=attempted, delivered=attempted,
-                       provider_calls=provider_calls, cost=cost)
-
-
-def _planned_of(session, task_id: str) -> int:
-    task = task_store.get_task(session, task_id)
-    if task is None:
-        return 0
-    return int(getattr(task, "image_count", 0) or getattr(task, "n", 0) or 0)
+    settlement.settle_cancel(session, state.task_id, attempted=attempted,
+                             provider_calls=provider_calls, cost=cost,
+                             warnings=state.warnings)
 
 
 async def _plan_policy(state: ImageTaskState):
@@ -502,13 +469,17 @@ async def _backfill(state: ImageTaskState, *, outputs_by_slot: list[dict]) -> st
     try:
         with session_scope() as session:
             task_store.mark_backfill(session, state.task_id, status)
+            # 回写阶段才产生的告警（IMG_BACKFILL_FAILED / IMG_OUTBOX_ENQUEUE_FAILED）也要落库，
+            # 否则任务详情里永远看不到"回写失败、等待重放"（P1-3）
+            task_store.update_task(session, state.task_id,
+                                   warnings_json=list(state.warnings or []))
     except Exception:  # noqa: BLE001 —— 状态写失败不阻塞
         logger.warning("回写状态落库失败：task=%s", state.task_id)
     return status
 
 
 def _enqueue_outbox(state: ImageTaskState, payload: dict) -> None:
-    """回写失败进 outbox（D12 的重放扫它）；这里只做最小投递，失败只记日志。"""
+    """回写失败进 outbox（重放扫它）；入队失败要留痕，否则这批结果就真的丢了。"""
     try:
         from app.agents_image.store import outbox as outbox_store
 
@@ -517,6 +488,9 @@ def _enqueue_outbox(state: ImageTaskState, payload: dict) -> None:
                                  error="backfill failed")
     except Exception as exc:  # noqa: BLE001
         logger.warning("outbox 入队失败：task=%s %s", state.task_id, exc)
+        state.warnings.append(
+            f"IMG_OUTBOX_ENQUEUE_FAILED: 回写补偿入队失败（{type(exc).__name__}），"
+            "本次结果元数据可能丢失，请人工核对中台")
 
 
 def _role_of(state: ImageTaskState, slot: int) -> str:

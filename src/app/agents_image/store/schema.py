@@ -39,6 +39,7 @@ _COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("image_task", "blocked_json", "JSON"),
     ("image_task", "retries", "INTEGER DEFAULT 0"),
     ("image_task", "provider_calls", "INTEGER DEFAULT 0"),
+    ("image_task", "settled_at", "DATETIME"),
     ("image_task", "listing_status", "VARCHAR(16) DEFAULT 'not_listed'"),
     ("image_task", "listing_url", "TEXT"),
     ("image_task", "listed_at", "DATETIME"),

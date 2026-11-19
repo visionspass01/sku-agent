@@ -56,6 +56,8 @@ async def _cancel_dispatch(task_id: str) -> bool:
 
 async def retry_one(user, task_id: str) -> dict:
     """重试单个任务：重新排队 + 重新预留额度（与被取消/失败的额度释放配对）。"""
+    from app.agents_image import settlement
+
     settings = get_image_settings()
     with session_scope() as session:
         task = task_store.get_task(session, task_id)
@@ -71,18 +73,15 @@ async def retry_one(user, task_id: str) -> dict:
             raise ImageError("IMG_TASK_CONFLICT",
                              f"该任务已重试 {retries} 次，达到上限 {settings.max_task_retries}")
         planned = int(task.image_count or 0)
-        username = task.username
-    with session_scope() as session:
-        if not user.is_admin and planned and not quota_store.reserve(session, username, planned):
-            quota = quota_store.check(session, username, planned)
+        # 预留 + 重置同一事务（P2-14）；重置会清 recoveries/settled_at/warnings/blocked/listing
+        if not user.is_admin and planned and not quota_store.reserve(session, task.username,
+                                                                   planned):
+            quota = quota_store.check(session, task.username, planned)
             raise ImageError("IMG_QUOTA_EXCEEDED",
                              f"配额不足：本期剩余 {quota['remaining']} 张，重试需要 {planned} 张",
                              retryable=False)
-        task_store.update_task(
-            session, task_id, status="queued", retries=retries + 1,
-            error_code="", error_detail="", finished_at=None, attempts=0,
-            attempted_images=0, delivered_images=0, provider_started_at=None,
-            cancel_requested=False, lease_until=None)
+        settlement.reset_for_retry(session, task_id)
+        task_store.update_task(session, task_id, retries=retries + 1)
     try:
         await get_dispatcher().submit(task_id)
     except Exception:  # noqa: BLE001 —— 已入库，看门狗会补投

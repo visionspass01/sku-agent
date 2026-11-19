@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import logging
 
 from app.agents_image.config import get_image_settings
@@ -46,36 +47,46 @@ class LocalGenerator:
                 if task is None or task.status in {"canceled", "done", "failed"}:
                     return
                 task_store.mark_running(session, task_id)
+                # 拿到并发槽位后再续一次租约：排队时间再长也不会被别的实例/看门狗抢走
+                task_store.renew_lease(
+                    session, task_id,
+                    seconds=int(getattr(self.settings, "task_lease_seconds", 300) or 300))
             self._in_flight += 1
             try:
                 await execute_task(task_id)
             except Exception as exc:  # noqa: BLE001 —— 任务失败必须落库，不能只打日志
                 logger.warning("生图任务执行失败 %s：%s", task_id, exc)
+                from app.agents_image import settlement
                 from app.core.errors import normalize
 
                 err = normalize(exc)
                 with session_scope() as session:
                     task_store.mark_failed(session, task_id, code=err.code, detail=err.detail)
-                    # 失败要释放创建任务时预留的额度（否则额度会被永久占住）
-                    try:
-                        from app.agents_image.store import quota as quota_store
-
-                        task = task_store.get_task(session, task_id)
-                        planned = int(getattr(task, "image_count", 0) or 0) if task else 0
-                        if planned:
-                            quota_store.release(session, task.username, planned)
-                    except Exception:  # noqa: BLE001 —— 释放失败不影响失败落库
-                        logger.warning("失败任务释放预留额度出错：%s", task_id)
+                    # 释放预留 + 记失败使用量（图已经生成过，钱已经花掉）；
+                    # 若 graph 内部已经结算过（如全被门禁拦下），这里会被 settled_at 拦掉
+                    settlement.settle_cancel(session, task_id)
             finally:
                 self._in_flight -= 1
                 self._tasks.pop(task_id, None)
 
     async def cancel(self, task_id: str) -> bool:
+        """取消任务：未调模型 → 释放预留额度并记一次失败；已结束的任务取消返回 False。"""
+        from app.agents_image import settlement
+
         with session_scope() as session:
             task = task_store.get_task(session, task_id)
             if task is None or task.status in {"done", "failed"}:
                 return False
-            task_store.update_task(session, task_id, status="canceled")
+            already_canceled = task.status == "canceled"
+            if not already_canceled:
+                task_store.update_task(session, task_id, status="canceled",
+                                       finished_at=dt.datetime.now(),
+                                       error_code="IMG_TASK_CANCELED",
+                                       error_detail="用户在调用生图模型前取消")
+            # 关键：额度必须在这里退回（过去只改状态，预留永远占着 → P0-1）
+            settlement.settle_cancel(session, task_id, code="IMG_TASK_CANCELED",
+                                     detail="用户在调用生图模型前取消",
+                                     mark_canceled=False)
         running = self._tasks.pop(task_id, None)
         if running is not None and not running.done():
             running.cancel()

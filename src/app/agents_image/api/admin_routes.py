@@ -275,6 +275,9 @@ async def admin_update_user(username: str, request: Request) -> JSONResponse:
         body = await request.json()
         body = body if isinstance(body, dict) else {}
         with session_scope() as session:
+            if user_store.get_user(session, username) is None:
+                # 更新一个不存在的账号不该"返回 ok 其实什么也没做"
+                raise ImageError("IMG_USER_NOT_FOUND", f"账号不存在：{username}")
             if body.get("password"):
                 if len(str(body["password"])) < 6:
                     raise ImageError("IMG_INPUT_INVALID", "密码至少 6 位")

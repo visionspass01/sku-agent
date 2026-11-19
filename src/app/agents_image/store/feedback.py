@@ -7,11 +7,14 @@
 from __future__ import annotations
 
 import datetime as dt
+import logging
 
 from sqlalchemy import select
 
 from app.agents_image.store.models import ImageAsset, ImageFeedback, ImageMemory
 from app.core.errors import raise_image
+
+logger = logging.getLogger("sku-agent.image.feedback")
 
 VERDICTS = {"adopted": "adopted", "rejected": "rejected"}
 
@@ -22,7 +25,11 @@ def _usage_kind(verdict: str) -> str:
 
 def record(session, *, task_id: str, asset_id: str, verdict: str, reason: str = "",
            username: str = "", slot: int = 0) -> dict:
-    """记录一次人工判断（同一张图只能有一种结论，重复提交按覆盖处理）。"""
+    """记录一次人工判断（同一张图只能有一种结论，重复提交按覆盖处理）。
+
+    使用量口径（第三轮 P1-9）：只有**首次判断**或**结论变化**才 +1；同一张图被点两次"采纳"
+    不该把 `adopted` 记成 2（否则上架率/采纳率会虚高，甚至 >100%）。
+    """
     verdict = (verdict or "").strip().lower()
     if verdict not in VERDICTS:
         raise_image("IMG_INPUT_INVALID", f"不支持的判断：{verdict}（adopted / rejected）")
@@ -32,6 +39,7 @@ def record(session, *, task_id: str, asset_id: str, verdict: str, reason: str = 
     row = session.execute(
         select(ImageFeedback).where(ImageFeedback.asset_id == asset_id)
     ).scalars().first()
+    previous = (row.verdict if row is not None else "") or ""
     if row is None:
         row = ImageFeedback(task_id=task_id, asset_id=asset_id, slot=slot or asset.slot,
                             verdict=verdict, reason=reason[:500], username=username,
@@ -45,16 +53,20 @@ def record(session, *, task_id: str, asset_id: str, verdict: str, reason: str = 
     asset.adopt_reason = reason[:500]
     session.flush()
 
-    # 采纳/驳回都会更新使用量（成本早已按 provider 成功计入，不返还）
-    try:
-        from app.agents_image.store import usage as usage_store
+    # 采纳/驳回更新使用量：成本早已按 provider 成功计入，不返还；重复提交不重复计数
+    changed = previous != verdict
+    if changed:
+        try:
+            from app.agents_image.store import usage as usage_store
 
-        with_usage = usage_store.record(
-            session, username=username or asset.username, department=asset.department,
-            **{_usage_kind(verdict): 1})
-        _ = with_usage
-    except Exception:  # noqa: BLE001 —— 统计失败不影响判断落库
-        pass
+            usage_store.record(session, username=username or asset.username,
+                               department=asset.department,
+                               **{_usage_kind(verdict): 1})
+        except Exception as exc:  # noqa: BLE001 —— 统计失败不影响判断落库
+            from app.agents_image import metrics as image_metrics
+
+            image_metrics.record_swallowed("feedback_usage")
+            logger.warning("人工判断的使用量记账失败：asset=%s %s", asset_id, exc)
 
     # 正/负样本进 image_memory（Reflexion 优先用负样本规避同类问题）
     try:
