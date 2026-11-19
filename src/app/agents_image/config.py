@@ -39,6 +39,8 @@ class ImageSettings(BaseSettings):
     max_tasks_per_request: int = Field(default=60, ge=1, le=200)  # 颜色×平台×变体后的任务上限
     max_batch_products: int = Field(default=5, ge=1, le=10)   # 一次批量最多选几个商品
     max_total_images: int = Field(default=9, ge=1, le=9)
+    # 需求描述长度上限（P2-6）：超长截断并落 IMG_PROMPT_TRUNCATED，避免把巨长文本塞给 provider
+    max_prompt_chars: int = Field(default=500, ge=50, le=4000)
     concurrency: int = Field(default=8, ge=1, le=32)          # 本机任务并发
     provider_concurrency: int = Field(default=10, ge=1, le=64)  # 调第三方生图 API 的并发上限
     timeout_seconds: int = Field(default=60, ge=5, le=600)

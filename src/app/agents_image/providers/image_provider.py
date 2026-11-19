@@ -91,6 +91,30 @@ def get_provider(name: str | None = None) -> ImageProvider:
     return factory()
 
 
+def effective_max_refs(settings=None, provider=None) -> int:
+    """参考图上限 = `min(IMAGE_MAX_REFS, provider.caps.max_refs)`（第四轮裁决 ③）。
+
+    配置上限留弹性（可配到 12），但真正生效的上限必须与当前 provider 的能力对齐：
+    否则 `IMAGE_MAX_REFS=12` + provider `caps.max_refs=6` 时，创建期放行、执行期才在
+    `validate_request` 里炸（用户等到出图才看到 IMG_TOO_MANY_REFS）。现在创建期就报
+    `IMG_REFS_BUDGET`，错误提前且可解释；`/health` 也会暴露这个生效值。
+    """
+    from app.agents_image.config import get_image_settings
+
+    settings = settings or get_image_settings()
+    cap = int(getattr(settings, "max_refs", 6) or 6)
+    provider_cap = 0
+    try:
+        inst = provider if provider is not None else get_provider(None)
+        caps = getattr(inst, "caps", None)
+        provider_cap = int(getattr(caps, "max_refs", 0) or 0)
+    except Exception:  # noqa: BLE001 —— provider 不可用时退回配置值（health 另有告警）
+        provider_cap = 0
+    if provider_cap > 0:
+        cap = min(cap, provider_cap)
+    return max(1, cap)
+
+
 def validate_request(req: ImageRequest, caps: ProviderCaps) -> None:
     """与 provider 能力对齐的通用校验（供应商无关）。"""
     if not caps.supports_reference:

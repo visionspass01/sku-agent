@@ -259,3 +259,23 @@
 
 清理口径：`refs/`、`outputs/`、`blocked/` 参与 `IMAGE_RETENTION_HOURS` 清理；
 `library/`（素材库）**不清理**，只能由用户删除。
+
+---
+
+## v10 新增配置（生图 Agent，第四轮评审修复）
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `IMAGE_MAX_PROMPT_CHARS` | `500` | 需求描述长度上限：超长截断到该字数，并给任务落 `IMG_PROMPT_TRUNCATED` 告警（50..4000） |
+| `IMAGE_OUTBOX_CLAIM_SECONDS` | `120` | outbox 重放占位时长：重放期间把 `next_retry_at` 推后这么久，防并发重发同一批（5..3600） |
+| `IMAGE_OUTBOX_KEEP_HOURS` | `72` | 已回写（`sent`）的 outbox 记录保留时长，过期由清理任务删除；`pending/failed` 不删 |
+| `IMAGE_MAX_REFS` | `6` | **配置上限**（1..12）；真正生效的上限 = `min(IMAGE_MAX_REFS, provider.caps.max_refs)`，见下 |
+
+`max_refs` 生效规则（第四轮裁决 ③）：配置可以留弹性（配到 12），但创建任务时按
+`min(IMAGE_MAX_REFS, provider.caps.max_refs)` 校验，超额在**创建期**报 `IMG_REFS_BUDGET`
+（不会等到执行期才炸 `IMG_TOO_MANY_REFS`）。`GET /api/image/health` 返回
+`max_refs`（配置值）与 `max_refs_effective`（生效值），创建任务的响应 `limits` 里也同时给出。
+
+`thumbs` 目录：**当前为预留**（缩略图能力未启用），清理任务不扫描它；保留目录只为
+后续接入缩略图时不改存储布局。
+

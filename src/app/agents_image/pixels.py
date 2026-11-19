@@ -145,6 +145,51 @@ def decode_any(data: bytes) -> tuple[int, int, int, bytearray] | None:
         return None
 
 
+def autofix_nonpng(data: bytes, *, ratio: float = 1.0, min_px: int = 800,
+                   white_threshold: int = 200) -> bytes | None:
+    """非 PNG（JPEG/WebP 等）的自动修复：**有 Pillow** 时归白 → 按比例裁 → 补长边 → 转 PNG。
+
+    第四轮 P2-15：过去 `_autofix` 只走 `decode_png`，JPEG/WebP 一进来就 PngDecodeError，
+    于是"有 Pillow 也修不了"，只能降级成 `IMG_GATE_SKIPPED`。这里用 Pillow 补齐：
+    - 没有 Pillow → 返回 None（调用方保持 `degraded` 可见降级，不假装校验过）；
+    - 修复后仍是**真像素**，上层复检 `_check` 即可当普通 PNG 处理。
+    """
+    try:
+        from PIL import Image
+    except Exception:  # noqa: BLE001 —— 没装 Pillow：保持降级
+        return None
+    try:
+        import io
+
+        with Image.open(io.BytesIO(data)) as source:      # type: ignore[union-attr]
+            image = source.convert("RGB")
+            # 1) 近白归白（只抬阈值以下的近白像素，不动主体）
+            image = image.point(lambda value: 255 if value >= white_threshold else value)
+            # 2) 按请求比例居中裁切
+            width, height = image.size
+            target = float(ratio or 1.0)
+            if target > 0 and height and abs(width / height - target) > 0.002:
+                if width / height > target:
+                    new_width = max(1, int(round(height * target)))
+                    left = (width - new_width) // 2
+                    image = image.crop((left, 0, left + new_width, height))
+                else:
+                    new_height = max(1, int(round(width / target)))
+                    top = (height - new_height) // 2
+                    image = image.crop((0, top, width, top + new_height))
+            # 3) 长边不足平台下限时放大
+            width, height = image.size
+            if int(min_px) > 0 and max(width, height) < int(min_px):
+                scale = int(min_px) / max(width, height)
+                image = image.resize((max(1, int(width * scale)), max(1, int(height * scale))),
+                                     Image.NEAREST)
+            buffer = io.BytesIO()
+            image.save(buffer, format="PNG")
+            return buffer.getvalue()
+    except Exception:  # noqa: BLE001 —— 坏图/不支持的格式：交回调用方按降级处理
+        return None
+
+
 def _margin_ratio(width: int, height: int, channels: int, pixels: bytearray,
                   threshold: int) -> float:
     """四周留白比例：边框一圈里"接近白"的像素占比（越低说明商品顶到边）。"""
@@ -235,4 +280,5 @@ def resize(width: int, height: int, channels: int, pixels: bytearray,
 
 
 __all__ = ["PngDecodeError", "decode_png", "decode_any", "rgb_stats", "stats_of",
-           "whiten_near_white", "crop_to_square", "crop_to_aspect", "resize"]
+           "whiten_near_white", "crop_to_square", "crop_to_aspect", "resize",
+           "autofix_nonpng"]

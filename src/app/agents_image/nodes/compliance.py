@@ -14,6 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.agents_image.pixels import (
+    autofix_nonpng,
     crop_to_aspect,
     crop_to_square,
     decode_any,
@@ -130,6 +131,20 @@ def gate(data: bytes, *, slot: int, role: str, platform_rules=None,
     thresholds = _thresholds(platform_rules, aspect)
     passed, reasons, stats, degraded = _check(data, thresholds)
     if degraded:
+        # P2-15：非 PNG（JPEG/WebP）在装了 Pillow 时也能修：归白 → 按比例裁 → 补长边 → 转 PNG，
+        # 然后按普通 PNG 复检。没装 Pillow 仍然保持 degraded（可见降级，不假装校验过）。
+        if autofix:
+            fixed = autofix_nonpng(data, ratio=float(thresholds.get("aspect", 1.0) or 1.0),
+                                   min_px=int(thresholds.get("min_px", 800) or 0))
+            if fixed is not None:
+                fixed_passed, fixed_reasons, fixed_stats, fixed_degraded = _check(
+                    fixed, thresholds)
+                if fixed_passed and not fixed_degraded:
+                    return Verdict(passed=True, reasons=[], data=fixed, fixed=True,
+                                   stats=fixed_stats)
+                if not fixed_degraded:
+                    return Verdict(passed=False, reasons=fixed_reasons, data=fixed,
+                                   fixed=True, stats=fixed_stats)
         policy = str(nonpng_policy or "warn").strip().lower()
         if policy == "block":
             return Verdict(passed=False, reasons=reasons or ["pixel_check_unavailable"],

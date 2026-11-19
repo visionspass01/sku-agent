@@ -11,6 +11,7 @@ v6 契约（重要）：
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from types import SimpleNamespace
@@ -35,7 +36,7 @@ from app.agents_image.dispatch.task_dispatcher import get_dispatcher
 from app.agents_image.ids import new_batch_id, new_task_id
 from app.agents_image.nodes import plan_slots
 from app.agents_image.nodes import validate as validate_node
-from app.agents_image.providers.image_provider import providers
+from app.agents_image.providers.image_provider import effective_max_refs, providers
 from app.agents_image.sources import batch_context
 from app.agents_image.sources import refs as refs_source
 from app.agents_image.sources.product_source import get_catalog, registered_catalogs
@@ -73,6 +74,9 @@ def image_health() -> dict:
         "provider_concurrency": settings.provider_concurrency,
         "provider_in_flight": _provider_in_flight(),
         "max_refs": settings.max_refs,
+        # P1-7：真正生效的参考图上限（配置上限与 provider 能力取小），创建期按它校验
+        "max_refs_effective": effective_max_refs(settings),
+        "max_prompt_chars": int(getattr(settings, "max_prompt_chars", 0) or 0),
         "max_batch_products": settings.max_batch_products,
         "secret_is_default": settings.secret_is_default,
         "context_batches": _context_batches(),
@@ -300,6 +304,14 @@ async def create_tasks(request: Request) -> JSONResponse:
         prompt = str(body.get("prompt") or "").strip()
         if not prompt:
             raise ImageError("IMG_INPUT_INVALID", "需求描述不能为空")
+        # P2-6：需求描述长度上限（超长截断并告警，不静默丢）
+        max_prompt_chars = int(getattr(settings, "max_prompt_chars", 0) or 0)
+        prompt_warnings: list[str] = []
+        if max_prompt_chars and len(prompt) > max_prompt_chars:
+            prompt_warnings.append(
+                f"IMG_PROMPT_TRUNCATED: 需求描述 {len(prompt)} 字超过上限 {max_prompt_chars} 字，"
+                f"已截断到 {max_prompt_chars} 字")
+            prompt = prompt[:max_prompt_chars]
         # W3：参考图三源（互斥）——mcp（中台商品图，默认）/ library（人工素材库）/ pailitao（拍立淘）
         ref_source = str(body.get("ref_source") or "mcp").strip().lower() or "mcp"
         if ref_source not in REF_SOURCES:
@@ -328,11 +340,11 @@ async def create_tasks(request: Request) -> JSONResponse:
         products = await batch_context.get_product_batcher(catalog).get_many(product_ids)
         targets = await _resolve_targets(catalog, body, product_ids, products=products)
         platforms = _platform_list(body)
-        params_by_platform = {
-            platform: await _resolve_request_parameters(
-                catalog, {**body, "platform": platform}, settings)
-            for platform in platforms
-        }
+        # P2-5：双平台参数解析并发（过去串行 2×4 次 MCP 调用，首屏明显变慢）
+        resolved = await asyncio.gather(*(
+            _resolve_request_parameters(catalog, {**body, "platform": platform}, settings)
+            for platform in platforms))
+        params_by_platform = dict(zip(platforms, resolved, strict=True))
         variants = _variant_matrix(
             params_by_platform[platforms[0]]["policy"], body,
             base_variant=str(getattr(base_task, "variant_id", "") or "") if base_task else "")
@@ -442,11 +454,13 @@ async def create_tasks(request: Request) -> JSONResponse:
         # 阶段 B：取参考图（第三轮 P1-5 —— **不在写事务里做网络 IO**）
         # 读库/读文件（素材库归属校验、拍立淘 query 图）在只读会话里完成，随后关闭；
         # 下载/搜图完全是网络阶段，事务只覆盖"预留 + 落库 + 建任务"。
+        # P1-7：三个来源统一走「配置上限 ∩ provider 能力」的生效上限，超额在创建期报 IMG_REFS_BUDGET
+        max_refs = effective_max_refs(settings)
         if ref_source == "library":
             with session_scope() as read_session:
                 ref_plan = await refs_source.plan_library_refs(
                     targets, session=read_session, username=user.username,
-                    asset_ids=library_asset_ids, max_refs=settings.max_refs,
+                    asset_ids=library_asset_ids, max_refs=max_refs,
                     is_admin=user.is_admin, products=products)
         elif ref_source == "pailitao":
             with session_scope() as read_session:
@@ -456,12 +470,12 @@ async def create_tasks(request: Request) -> JSONResponse:
             ref_plan = await refs_source.plan_pailitao_refs(
                 catalog, targets, products=products, query_bytes=query_bytes,
                 min_sales=settings.pailitao_min_sales, top_n=settings.pailitao_top_n,
-                max_refs=settings.max_refs,
+                max_refs=max_refs,
                 timeout_seconds=settings.mcp_timeout_seconds)
         else:
             ref_plan = await refs_source.plan_refs(
                 catalog, targets, products=products,
-                refs_per_item=settings.refs_per_item, max_refs=settings.max_refs,
+                refs_per_item=settings.refs_per_item, max_refs=max_refs,
                 timeout_seconds=settings.mcp_timeout_seconds,
             )
 
@@ -507,7 +521,7 @@ async def create_tasks(request: Request) -> JSONResponse:
                 task_warnings = _reuse_miss_warnings(
                     base_task if _reuse_targets(target, platform, variant) else None,
                     base_task_id_hint, target, platform, str(state.variant_id or ""),
-                    reuse_map)
+                    reuse_map) + list(prompt_warnings)
                 task = task_store.create_task(
                     session, task_id=new_task_id(), username=user.username,
                     department=user.department, batch_id=batch_id,
@@ -550,10 +564,12 @@ async def create_tasks(request: Request) -> JSONResponse:
                 "variants": [item.get("id", "") for item in variants],
                 "slot_count": base_params["slot_count"],
                 "image_count": base_params["image_count"],
-                "limits": {"max_refs": settings.max_refs,
+                "limits": {"max_refs": max_refs,
+                           "max_refs_configured": settings.max_refs,
                            "refs_per_item": settings.refs_per_item,
                            "max_batch_products": settings.max_batch_products,
                            "max_tasks_per_request": settings.max_tasks_per_request,
+                           "max_prompt_chars": max_prompt_chars,
                            "refs_truncated": resolution.truncated},
                 "planned_images": planned_images,
                 "ref_source": ref_source,
