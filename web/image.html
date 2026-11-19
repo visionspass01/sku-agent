@@ -1,7 +1,8 @@
 <!DOCTYPE html>
 <!--
   电商生图 Agent 演示页（/image.html）
-  结构约定：一页一 Agent —— 本页只加载 /image.js（+ 管理员加载 /image_admin.js），
+  结构约定：一页一 Agent —— 本页只加载 /image_payload.js（纯函数选色拼装）
+  + /image.js（+ 管理员加载 /image_admin.js），
   不依赖 app.js；登录态与 SKU 页互不影响（独立 token key：image_agent_token）。
   参数来源：商品清单 / 构图 / 场景风格 / 张数 / 平台规则 全部来自后端 → MCP → 数据中台。
   用户只能「批量选中商品 + 写需求」，没有上传参考图的入口。
@@ -112,7 +113,6 @@
         </label>
       </div>
       <p class="muted" id="color-hint">颜色：勾选即按「商品+颜色」各建一个任务；不勾 = 只用第一个颜色。</p>
-      <p class="muted" id="scope-note"></p>
 
       <section class="image-library" id="library-panel" hidden>
         <div class="row">
@@ -189,6 +189,7 @@
     </section>
   </main>
 
+  <script src="/image_payload.js"></script>
   <script src="/image.js"></script>
   <script src="/image_admin.js"></script>
 </body>

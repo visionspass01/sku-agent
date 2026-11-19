@@ -19,14 +19,17 @@ def test_image_page_is_served_with_versioned_assets(app_client):
     assert resp.status_code == 200
     html = resp.text
     assert "/image.js?v=" in html
+    assert "/image_payload.js?v=" in html
     assert "/image.css?v=" in html
     assert "/image_admin.js?v=" in html
     assert "/style.css?v=" in html
     # 一页一 Agent：本页不加载看板脚本
     assert "/app.js" not in html
     # CSP 只允许外链脚本，不允许内联
-    assert html.count("<script") == 2
+    assert html.count("<script") == 3
     assert "<script>" not in html
+    # P0-1：选色拼装脚本必须先加载，image.js 才能在 createTasks 里用上纯函数
+    assert html.index("/image_payload.js") < html.index("/image.js")
 
 
 def test_image_page_has_required_anchors():
@@ -37,8 +40,10 @@ def test_image_page_has_required_anchors():
                        "aspect-select", "prompt-input", "btn-create", "progress",
                        "gallery", "metric-cards", "image-chart",
                        "ref-source-select", "library-panel", "library-grid",
-                       "color-hint", "scope-note"):
+                       "color-hint"):
         assert f'id="{element_id}"' in html, element_id
+    # P2-12：空的 scope-note 占位已删除，避免页面上留下永远不填的空段落
+    assert 'id="scope-note"' not in html
     # W3：上传入口只在「素材库」面板；商品清单仍然只能从中台选（不能上传商品图）
     assert 'id="library-file"' in html
     assert 'type="file"' in html
@@ -110,7 +115,7 @@ def test_static_asset_versions_include_image_assets():
     from app.static_assets import asset_versions
 
     versions = asset_versions()
-    for name in ("image.js", "image_admin.js", "image.css"):
+    for name in ("image.js", "image_payload.js", "image_admin.js", "image.css"):
         assert name in versions
         assert versions[name] != "missing"
 

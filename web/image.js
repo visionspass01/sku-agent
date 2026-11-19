@@ -42,6 +42,24 @@ function setText(id, value) {
   if (el) el.textContent = value;
 }
 
+/* 选色标签：空串 = 商品没有颜色维度/默认主图，展示成「默认」（纯函数在 image_payload.js） */
+function colorLabelOf(name) {
+  const lib = window.ImagePayload;
+  if (lib && typeof lib.colorLabel === "function") return lib.colorLabel(name);
+  return name ? String(name) : "默认";
+}
+
+/* P0-1：把「选中商品 + 已选颜色」交给纯函数拼参数（图片页不自己拼 all_colors） */
+function buildColorPlan(productIds) {
+  const lib = window.ImagePayload;
+  if (!lib || typeof lib.buildTaskPayload !== "function") return null;
+  return lib.buildTaskPayload({
+    selected: productIds,
+    products: state.products,
+    colorsMap: state.colorsSelected,
+  });
+}
+
 function setHint(selector, text, tone) {
   const el = typeof selector === "string" ? $(selector) : selector;
   if (!el) return;
@@ -180,15 +198,18 @@ function renderProducts() {
   rows.innerHTML = state.products.map((item) => {
     const checked = state.selected.has(item.product_id) ? "checked" : "";
     const disabled = !state.selected.has(item.product_id) && state.selected.size >= MAX_BATCH;
+    // P0-1：选色状态存**原始颜色名**（空串 = 默认主图），只有标签显示成「默认」；
+    // 这样勾选集合与中台颜色名一一对应，拼 payload 时不会因「默认」对不上而丢色。
     const colors = Array.isArray(item.colors) ? item.colors : [];
     const chosen = state.colorsSelected.get(item.product_id) || new Set();
     const colorCell = colors.length
       ? colors.map((entry) => {
-        const name = entry.color || "默认";
+        const raw = entry && typeof entry === "object" ? entry.color : entry;
+        const name = raw == null ? "" : String(raw);
         const on = chosen.has(name) ? "checked" : "";
         return `<label class="color-chip"><input type="checkbox" class="color-check" `
           + `data-product="${esc(item.product_id)}" data-color="${esc(name)}" ${on} `
-          + `${checked ? "" : "disabled"} /> ${esc(name)}</label>`;
+          + `${checked ? "" : "disabled"} /> ${esc(colorLabelOf(name))}</label>`;
       }).join("")
       : '<span class="muted">无颜色维度</span>';
     return [
@@ -480,22 +501,18 @@ async function createTasks() {
   const platform = $("platform-select").value || "淘系";
   if (platform === "both") payload.platform_variant = true;
   else payload.platform = platform;
-  const colorPayload = [];
-  let allColors = true;
-  state.selected.forEach((productId) => {
-    const chosen = state.colorsSelected.get(productId);
-    const product = state.products.find((item) => item.product_id === productId) || {};
-    const available = (product.colors || []).map((entry) => entry.color || "默认");
-    if (!chosen || !chosen.size || available.every((name) => chosen.has(name))) {
-      return;                              // 没勾 = 第一个颜色；全勾 = all_colors
-    }
-    allColors = false;
-    colorPayload.push({ product_id: productId, colors: Array.from(chosen) });
-  });
-  if (allColors && state.selected.size) {
-    payload.all_colors = true;             // 全部颜色都勾了：直接让中台展开
-  } else if (colorPayload.length) {
-    payload.product_colors = colorPayload;
+  // P0-1：逐商品显式给颜色（纯函数在 web/image_payload.js），
+  // 不再用「全局 allColors + 每商品 return」那套全有或全无的逻辑：
+  // 混合选择时既不会多买颜色（资损），也不会把某商品已选颜色静默丢掉。
+  const colorPlan = buildColorPlan(productIds);
+  if (!colorPlan) {
+    setText("create-hint", "缺少选色脚本（image_payload.js 未加载），请强刷页面（Ctrl+F5）后重试");
+    return;
+  }
+  if (colorPlan.all_colors) {
+    payload.all_colors = true;             // 每个选中商品的颜色都勾满了：让中台整体展开
+  } else if (colorPlan.product_colors.length) {
+    payload.product_colors = colorPlan.product_colors;
   }
   const composition = $("composition-select").value;
   const style = $("scene-style-select").value;
@@ -735,7 +752,8 @@ function attachIterateButton(taskId, row, data) {
       aspect: $("aspect-select").value || "1:1",
       mode: "iterate",
       base_task_id: taskId,
-      slot_count: Number(data.slot_count || $("slot-count-input").value || 9),
+      // P1-10：图位数取快照里的真实值，不再回落到 UI 输入框（输入框可能已被改过）
+      slot_count: Number(data.slot_count || data.image_count || 9) || 9,
       image_count: 1,
     };
     if (data.color) payload.product_colors = [{ product_id: productId, colors: [data.color] }];

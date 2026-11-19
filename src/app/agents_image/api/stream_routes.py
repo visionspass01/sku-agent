@@ -43,6 +43,13 @@ def _snapshot_payload(task) -> dict:
                   if "#" in str(getattr(task, "color_key", "") or "") else ""),
         "base_task_id": getattr(task, "base_task_id", "") or "",
         "status": task.status, "attempts": task.attempts,
+        # P1-10：图位数/出图张数/参考图来源/重试/发起量都进快照，
+        # 前端 iterate 才能用任务的真实参数，而不是回读 UI 输入框
+        "slot_count": int(getattr(task, "slot_count", 0) or 0),
+        "image_count": expected,
+        "ref_source": getattr(task, "ref_source", "") or "",
+        "retries": int(getattr(task, "retries", 0) or 0),
+        "provider_calls": int(getattr(task, "provider_calls", 0) or 0),
         "attempted_images": task.attempted_images,
         "delivered_images": delivered,
         "expected_images": expected,
