@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import time
+from types import SimpleNamespace
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
@@ -308,6 +309,21 @@ async def create_tasks(request: Request) -> JSONResponse:
         library_asset_ids = _dedupe([str(item) for item in (body.get("library_asset_ids") or [])])
 
         catalog = get_catalog()
+        # P1-3：iterate 必须先读基座任务 —— 平台/变体/颜色都要跟基座对齐，
+        # 否则 A/B 变体基座或抖系基座永远命中不了复用（key 是 (颜色, 平台, 变体) 三元组）
+        base_task = None
+        mode_hint = str(body.get("mode") or "standard").strip().lower()
+        base_task_id_hint = str(body.get("base_task_id") or "").strip()
+        if mode_hint == "iterate" and base_task_id_hint:
+            with session_scope() as session:
+                row = task_store.get_task(session, base_task_id_hint)
+                if row is None:
+                    raise ImageError("IMG_TASK_NOT_FOUND", f"基础任务不存在：{base_task_id_hint}")
+                if not user.is_admin and row.username != user.username:
+                    raise ImageError("IMG_FORBIDDEN", "无权复用他人的任务")
+                # 会话关闭后 ORM 属性会失效（DetachedInstanceError）：先取成纯数据
+                base_task = _base_snapshot(row)
+            body = _inherit_from_base(body, base_task)
         # W2：商品上下文一次批量取回（窗口内合并 MCP 请求：3 秒内的多次取数合成一次调用）
         products = await batch_context.get_product_batcher(catalog).get_many(product_ids)
         targets = await _resolve_targets(catalog, body, product_ids, products=products)
@@ -317,7 +333,9 @@ async def create_tasks(request: Request) -> JSONResponse:
                 catalog, {**body, "platform": platform}, settings)
             for platform in platforms
         }
-        variants = _variant_matrix(params_by_platform[platforms[0]]["policy"], body)
+        variants = _variant_matrix(
+            params_by_platform[platforms[0]]["policy"], body,
+            base_variant=str(getattr(base_task, "variant_id", "") or "") if base_task else "")
         matrix = [(target, platform, variant)
                   for target in targets for platform in platforms for variant in variants]
         if len(matrix) > settings.max_tasks_per_request:
@@ -485,6 +503,11 @@ async def create_tasks(request: Request) -> JSONResponse:
                 validate_node.validate(state, settings=settings)
                 # 复用只保留本次图位窗口内的 slot（第三轮 P1-2）
                 reuse_map = _reuse_window(state, _reuse_of(target, platform, variant))
+                # P1-3/P1-4：iterate 但一张图位都复用不到时必须解释清楚（基座 + 目标三元组）
+                task_warnings = _reuse_miss_warnings(
+                    base_task if _reuse_targets(target, platform, variant) else None,
+                    base_task_id_hint, target, platform, str(state.variant_id or ""),
+                    reuse_map)
                 task = task_store.create_task(
                     session, task_id=new_task_id(), username=user.username,
                     department=user.department, batch_id=batch_id,
@@ -506,6 +529,7 @@ async def create_tasks(request: Request) -> JSONResponse:
                     else None,
                     reuse_asset_ids=reuse_map,
                     reused_images=len(reuse_map),
+                    warnings=task_warnings,
                 )
                 asset_store.bind_refs_to_task(session, task.ref_asset_ids, task.task_id)
                 created.append({"task_id": task.task_id, "product_id": target.product_id,
@@ -651,15 +675,19 @@ def _platform_list(body: dict) -> list[str]:
     return chosen
 
 
-def _variant_matrix(policy, body: dict) -> list[dict]:
-    """mode=standard/variant/iterate → 变体列表（variant 输出 A/B 两套差异化方案）。"""
+def _variant_matrix(policy, body: dict, base_variant: str = "") -> list[dict]:
+    """mode=standard/variant/iterate → 变体列表（variant 输出 A/B 两套差异化方案）。
+
+    P1-3：iterate 必须**继承基座变体**——过去固定返回 `id=""`，而 A/B 变体基座的 key 是
+    `(颜色, 平台, "A"/"B")`，两者永远对不上，于是"永不命中复用"且 `base_task_id` 血统丢失。
+    """
     mode = str(body.get("mode") or "standard").strip().lower()
     if mode not in {"standard", "variant", "iterate"}:
         raise ImageError(
             "IMG_INPUT_INVALID",
             "不支持的 mode：" + mode + "（可选 standard / variant / iterate）")
     if mode == "iterate":
-        return [{"id": "", "label": "只改主图",
+        return [{"id": str(base_variant or "").strip(), "label": "只改主图",
                  "hint": "重做主图；其余图位能复用就复用，缺失的图位按差额补齐"}]
     if mode != "variant":
         return [{"id": "", "label": "", "hint": ""}]
@@ -698,6 +726,59 @@ def _ensure_department(product, user) -> None:
                          f"无权操作 {department} 部门的商品（当前账号：{user.department}）")
 
 
+def _base_snapshot(task) -> SimpleNamespace:
+    """把基座任务取成纯数据（会话关闭后 ORM 属性会失效，不能跨 session 读）。"""
+    return SimpleNamespace(
+        task_id=str(getattr(task, "task_id", "") or ""),
+        username=str(getattr(task, "username", "") or ""),
+        department=getattr(task, "department", None),
+        product_id=str(getattr(task, "product_id", "") or ""),
+        platform=str(getattr(task, "platform", "") or ""),
+        variant_id=str(getattr(task, "variant_id", "") or ""),
+        color_key=str(getattr(task, "color_key", "") or ""),
+        status=str(getattr(task, "status", "") or ""),
+    )
+
+
+def _inherit_from_base(body: dict, base) -> dict:
+    """iterate 时把基座任务的平台/颜色继承下来（P1-3）。
+
+    只补「请求里根本没给」的维度：显式给了就以请求为准（运维仍可手动改平台/颜色）。
+    过去缺平台时默认落到淘系、缺颜色时落到第一个颜色，于是抖系基座或非首色基座
+    永远对不上复用 key，复用链等于失效。
+    """
+    merged = dict(body)
+    if not (merged.get("platform") or merged.get("platforms") or merged.get("platform_variant")):
+        merged["platform"] = str(getattr(base, "platform", "") or "淘系")
+    if not (merged.get("product_colors") or merged.get("all_colors")):
+        color_key = str(getattr(base, "color_key", "") or "")
+        color = color_key.split("#", 1)[1] if "#" in color_key else ""
+        product_id = str(getattr(base, "product_id", "") or "")
+        if product_id:
+            merged["product_colors"] = [
+                {"product_id": product_id, "colors": [color] if color else []}]
+    return merged
+
+
+def _reuse_miss_warnings(base, base_task_id: str, target, platform: str,
+                         variant_id: str, reuse_map: dict) -> list[str]:
+    """iterate 一张图位都复用不到时落 `IMG_REUSE_SKIPPED`（P1-3）。
+
+    只对「本来该复用这个基座」的目标记账，避免多色/双平台任务之间互相误报；
+    告警里带基座与目标的三元组，运营据此一眼能看出为什么没复用上。
+    """
+    if base is None or reuse_map:
+        return []
+    base_key = (f"{str(getattr(base, 'color_key', '') or '无颜色')}"
+                f"/{str(getattr(base, 'platform', '') or '-')}"
+                f"/{str(getattr(base, 'variant_id', '') or '-')}")
+    target_key = f"{target.color_key or '无颜色'}/{platform}/{variant_id or '-'}"
+    return [
+        f"IMG_REUSE_SKIPPED: 基座 {base_task_id}（{base_key}）与目标 {target_key} "
+        "没有可复用的图位（基座成品可能被驳回/已过保留期/本任务窗口更小），已按差额全量重出"
+    ]
+
+
 async def _reuse_plan(session, user, body: dict, targets) -> dict | None:
     """C2/W4：`mode=iterate` + `base_task_id` → 主图重做，其余 generate 图位能复用就复用。
 
@@ -726,6 +807,11 @@ async def _reuse_plan(session, user, body: dict, targets) -> dict | None:
     for asset in outputs:
         if int(asset.slot) == 1:
             continue                      # 主图要重做
+        # P1-4：被人工驳回的成品不能再当复用源（否则驳回的图会顺着复用链复活）
+        if str(getattr(asset, "adopt_status", "") or "") == "rejected":
+            continue
+        if getattr(asset, "purged_at", None) is not None:
+            continue                      # 已被清理
         reuse_map[str(asset.slot)] = asset.asset_id
     # 复用只对"同一 (颜色, 平台, 变体)"的目标生效：否则多色/双平台 iterate 会串色串平台
     key = (base.color_key or "", base.platform or "",

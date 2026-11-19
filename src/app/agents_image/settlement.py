@@ -42,9 +42,14 @@ def _is_admin(session, username: str | None) -> bool:
 
 
 def _write_warnings(session, task_id: str, warnings: list[str] | None) -> None:
+    """把本轮告警写回任务（**合并**而不是覆盖，见 `task_store.merge_warnings`）。
+
+    建任务阶段也会写告警（例如 iterate 命中不了复用的 `IMG_REUSE_SKIPPED`），
+    结算时如果直接覆盖，这些"为什么没复用/为什么少图"的说明会在任务完成那一刻凭空消失。
+    """
     if warnings is None:
         return
-    task_store.update_task(session, task_id, warnings_json=list(warnings))
+    task_store.merge_warnings(session, task_id, warnings)
 
 
 def settle_done(session, task_id: str, *, delivered: int, attempted: int, cost: float,

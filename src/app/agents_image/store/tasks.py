@@ -22,7 +22,8 @@ def create_task(session, *, task_id: str, username: str, department: str | None,
                 image_count: int | None = None, slot_count: int | None = None,
                 copy: dict | None = None, base_task_id: str | None = None,
                 reuse_asset_ids: dict | None = None,
-                reused_images: int = 0) -> ImageTask:
+                reused_images: int = 0,
+                warnings: list[str] | None = None) -> ImageTask:
     task = ImageTask(
         task_id=task_id, request_id=request_id, batch_id=(batch_id or None),
         username=username, department=department, product_id=product_id,
@@ -38,6 +39,7 @@ def create_task(session, *, task_id: str, username: str, department: str | None,
         slot_count=int(slot_count if slot_count is not None else len(slots or [])),
         image_count=int(image_count if image_count is not None else n),
         slots_json=list(slots or []), prompt_pack_json=list(prompt_pack or []),
+        warnings_json=list(warnings or []),
         status="queued", trace_id=trace_id,
     )
     session.add(task)
@@ -62,6 +64,27 @@ def update_task(session, task_id: str, **fields: Any) -> ImageTask | None:
 
 def mark_running(session, task_id: str) -> None:
     update_task(session, task_id, status="running", started_at=dt.datetime.now())
+
+
+def merge_warnings(session, task_id: str, warnings: list[str] | None) -> list[str]:
+    """把新告警**合并**进 `warnings_json`（去重保序），返回合并后的列表。
+
+    建任务阶段就可能带告警（例如 iterate 命中不了复用的 `IMG_REUSE_SKIPPED`），
+    结算/回写阶段如果直接覆盖，这些"为什么没复用/为什么少图"的说明会在任务完成那一刻
+    凭空消失（第四轮 P1-3 实测）。所以所有"补告警"的地方统一走这里。
+    """
+    task = get_task(session, task_id)
+    if task is None:
+        return []
+    if warnings is None:
+        return list(getattr(task, "warnings_json", None) or [])
+    merged: list[str] = []
+    for item in [*list(getattr(task, "warnings_json", None) or []), *warnings]:
+        text = str(item)
+        if text and text not in merged:
+            merged.append(text)
+    update_task(session, task_id, warnings_json=merged)
+    return merged
 
 
 def mark_done(session, task_id: str, *, attempted: int, delivered: int, cost: float,

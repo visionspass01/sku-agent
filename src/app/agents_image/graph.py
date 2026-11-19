@@ -322,6 +322,14 @@ async def execute_task(task_id: str) -> ImageTaskState:
             base_asset = asset_store.get_asset(session, asset_id)
             if base_asset is None:
                 continue
+            # P1-4：建任务到执行之间可能被人工驳回/清理 —— 复用前后都要校验，
+            # 被驳回的成品不许顺着复用链复活（跳过并留告警，该图位按差额补齐）
+            if (str(getattr(base_asset, "adopt_status", "") or "") == "rejected"
+                    or getattr(base_asset, "purged_at", None) is not None):
+                state.warnings.append(
+                    f"IMG_REUSE_REJECTED: 图位 {slot} 的复用源已被人工驳回或清理，"
+                    "已跳过复用（该图位按差额补齐）")
+                continue
             try:
                 data = asset_store.read_asset_bytes(base_asset)
             except Exception as exc:  # noqa: BLE001 —— 历史成品已被 24h 清理
@@ -519,9 +527,9 @@ async def _backfill(state: ImageTaskState, *, outputs_by_slot: list[dict],
         with session_scope() as session:
             task_store.mark_backfill(session, state.task_id, status)
             # 回写阶段才产生的告警（IMG_BACKFILL_FAILED / IMG_OUTBOX_ENQUEUE_FAILED）也要落库，
-            # 否则任务详情里永远看不到"回写失败、等待重放"（P1-3）
-            task_store.update_task(session, state.task_id,
-                                   warnings_json=list(state.warnings or []))
+            # 否则任务详情里永远看不到"回写失败、等待重放"（P1-3）；
+            # 用 merge 而不是覆盖，建任务阶段的告警（如 IMG_REUSE_SKIPPED）不能被抹掉
+            task_store.merge_warnings(session, state.task_id, state.warnings)
     except Exception:  # noqa: BLE001 —— 状态写失败不阻塞
         logger.warning("回写状态落库失败：task=%s", state.task_id)
     return status
