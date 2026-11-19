@@ -121,22 +121,25 @@ def settle_cancel(session, task_id: str, *, attempted: int = 0, provider_calls: 
 
 
 def reset_for_retry(session, task_id: str) -> bool:
-    """重试前把任务重置成"可再次执行"的干净状态（P1-10 / P2-11）。
+    """重试前把任务重置成"可再次执行"的干净状态（P1-10 / P2-11 / P2-9）。
 
     - `recoveries=0`：否则重试后第一次看门狗扫描就会按"重投超限"判失败（P1-10）；
     - `settled_at=None`：额度会重新预留，重试后的结算必须能再次记账；
-    - 清掉上一轮的 warnings/blocked/reused/listing，避免残留状态骗人。
+    - 清掉上一轮的 warnings/blocked/reused/listing 与 `started_at`/`copy_json`/
+      `prompt_pack_json`（P2-9）：否则任务详情里还挂着上一轮的时间、文案契约与提示词，
+      重试后的结果看起来"没跑过"。
     """
     task = _task_of(session, task_id)
     if task is None:
         return False
     task_store.update_task(
         session, task_id, status="queued",
-        error_code="", error_detail="", finished_at=None,
+        error_code="", error_detail="", finished_at=None, started_at=None,
         attempts=0, attempted_images=0, delivered_images=0,
         provider_started_at=None, cancel_requested=False, lease_until=None,
         recoveries=0, settled_at=None, provider_calls=0,
         warnings_json=[], blocked_json=[], reused_images=0,
+        copy_json={}, prompt_pack_json=[],
         listing_status="not_listed", listed_at=None, listing_url="",
     )
     return True

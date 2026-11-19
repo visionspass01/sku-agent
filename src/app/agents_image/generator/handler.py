@@ -66,11 +66,35 @@ def _retryable(exc: BaseException) -> bool:
     return False
 
 
+def _set_provider_calls(exc: BaseException, calls: int) -> None:
+    """把"真实发起的第三方调用次数"挂到异常上（P1-6：失败路径也要能记发起量）。
+
+    发起量是 API 可用性的分母（使用量/发起量）。provider 抛错时过去只丢一句"失败"，
+    重试次数全部蒸发，指标里的可用率就会虚高（显示 100% 实际打了 3 次）。
+    """
+    extra = getattr(exc, "extra", None)
+    if isinstance(extra, dict):
+        extra["provider_calls"] = max(0, int(calls))
+
+
+def _provider_calls_of(exc: BaseException) -> int:
+    extra = getattr(exc, "extra", None)
+    if isinstance(extra, dict):
+        try:
+            return max(0, int(extra.get("provider_calls") or 0))
+        except (TypeError, ValueError):
+            return 0
+    return 0
+
+
 async def _generate_with_retry(provider, request) -> tuple[Any, int]:
     """调一次 provider；限流/超时/5xx 按 `IMAGE_PROVIDER_RETRIES` 退避重试。
 
     返回 `(result, provider_calls)`：`provider_calls` 是**真实发起次数**（含重试），
     对应「发起量」口径；使用量（成功张数）仍只看最终结果。
+
+    失败时把本次已发起的次数挂到异常的 `extra["provider_calls"]` 上（P1-6），
+    由 `run()` 聚合成整轮的真实发起量再往外抛。
     """
     from app.agents_image.config import get_image_settings
 
@@ -78,22 +102,27 @@ async def _generate_with_retry(provider, request) -> tuple[Any, int]:
     attempts = max(1, int(getattr(settings, "provider_retries", 2) or 0) + 1)
     backoff = max(0.0, float(getattr(settings, "provider_retry_backoff_seconds", 0.2) or 0.0))
     last_exc: BaseException | None = None
-    for attempt in range(1, attempts + 1):
-        try:
-            return await provider.generate(request), attempt
-        except ImageError as exc:
-            last_exc = exc
-            if attempt >= attempts or not _retryable(exc):
-                raise
-            logger.warning("生图调用失败（第 %d/%d 次，可重试）：%s", attempt, attempts,
-                           exc.code)
-        except Exception as exc:  # noqa: BLE001 —— 未分类异常一律不重试（避免放大故障）
-            raise ImageError("IMG_PROVIDER_UNAVAILABLE",
-                             f"生图调用异常：{type(exc).__name__}: {exc}") from exc
-        if backoff > 0:
-            await asyncio.sleep(backoff * attempt)
-    raise last_exc if last_exc is not None else ImageError("IMG_PROVIDER_UNAVAILABLE",
-                                                          "生图调用失败")
+    attempt = 0
+    try:
+        for attempt in range(1, attempts + 1):
+            try:
+                return await provider.generate(request), attempt
+            except ImageError as exc:
+                last_exc = exc
+                if attempt >= attempts or not _retryable(exc):
+                    raise
+                logger.warning("生图调用失败（第 %d/%d 次，可重试）：%s", attempt, attempts,
+                               exc.code)
+            except Exception as exc:  # noqa: BLE001 —— 未分类异常一律不重试（避免放大故障）
+                raise ImageError("IMG_PROVIDER_UNAVAILABLE",
+                                 f"生图调用异常：{type(exc).__name__}: {exc}") from exc
+            if backoff > 0:
+                await asyncio.sleep(backoff * attempt)
+        raise last_exc if last_exc is not None else ImageError("IMG_PROVIDER_UNAVAILABLE",
+                                                              "生图调用失败")
+    except BaseException as exc:  # noqa: BLE001 —— 失败也要带上真实发起次数
+        _set_provider_calls(exc, max(1, attempt))
+        raise
 
 
 async def run(payload: dict[str, Any]) -> dict[str, Any]:
@@ -109,30 +138,37 @@ async def run(payload: dict[str, Any]) -> dict[str, Any]:
 
     slots = payload.get("slots") or [{"slot": 1, "prompt": payload.get("prompt", "")}]
     results: list[dict[str, Any]] = []
-    for slot in slots:
-        request = ImageRequest(
-            prompt=slot.get("prompt") or payload.get("prompt", ""),
-            negative=slot.get("negative_prompt", ""),
-            init_images=refs,
-            width=int(payload.get("width") or 1024),
-            height=int(payload.get("height") or 1024),
-            n=int(slot.get("n") or 1),
-            seed=payload.get("seed"),
-            preserve=list(payload.get("preserve") or []),
-        )
-        async with _provider_semaphore():
-            result, provider_calls = await _generate_with_retry(provider, request)
-        results.append({
-            "slot": int(slot.get("slot") or 1),
-            "provider_calls": int(provider_calls),
-            "images": result.images,
-            "mime": result.mime,
-            "provider": result.provider,
-            "model": result.model,
-            "cost_cny": result.cost_cny,
-            "latency_ms": result.latency_ms,
-            "meta": result.meta,
-        })
+    provider_calls = 0
+    try:
+        for slot in slots:
+            request = ImageRequest(
+                prompt=slot.get("prompt") or payload.get("prompt", ""),
+                negative=slot.get("negative_prompt", ""),
+                init_images=refs,
+                width=int(payload.get("width") or 1024),
+                height=int(payload.get("height") or 1024),
+                n=int(slot.get("n") or 1),
+                seed=payload.get("seed"),
+                preserve=list(payload.get("preserve") or []),
+            )
+            async with _provider_semaphore():
+                result, calls = await _generate_with_retry(provider, request)
+            provider_calls += int(calls)
+            results.append({
+                "slot": int(slot.get("slot") or 1),
+                "provider_calls": int(calls),
+                "images": result.images,
+                "mime": result.mime,
+                "provider": result.provider,
+                "model": result.model,
+                "cost_cny": result.cost_cny,
+                "latency_ms": result.latency_ms,
+                "meta": result.meta,
+            })
+    except BaseException as exc:  # noqa: BLE001 —— P1-6：失败也要把发起量带出去
+        # 已经成功跑完的图位 + 失败图位自己的发起次数 = 整轮真实发起量
+        _set_provider_calls(exc, provider_calls + _provider_calls_of(exc))
+        raise
     return {"slots": results, "provider": provider.name,
             "provider_calls": sum(int(item.get("provider_calls") or 0) for item in results),
             "model": results[0]["model"] if results else ""}

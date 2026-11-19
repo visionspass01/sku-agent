@@ -70,11 +70,16 @@ class LocalGenerator:
                 from app.core.errors import normalize
 
                 err = normalize(exc)
+                # P1-6：失败路径也要记发起量（provider 真实打了几次，含限流重试），
+                # 否则"使用量/发起量"的 API 可用率会虚高
+                calls = int((getattr(err, "extra", {}) or {}).get("provider_calls") or 0)
                 with session_scope() as session:
                     task_store.mark_failed(session, task_id, code=err.code, detail=err.detail)
+                    if calls:
+                        task_store.update_task(session, task_id, provider_calls=calls)
                     # 释放预留 + 记失败使用量（图已经生成过，钱已经花掉）；
                     # 若 graph 内部已经结算过（如全被门禁拦下），这里会被 settled_at 拦掉
-                    settlement.settle_cancel(session, task_id)
+                    settlement.settle_cancel(session, task_id, provider_calls=calls)
             finally:
                 self._in_flight -= 1
                 self._tasks.pop(task_id, None)

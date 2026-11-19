@@ -224,6 +224,44 @@ def test_retry_forbidden_for_other_user(env):
     assert resp.status_code == 403
 
 
+def test_retry_clears_previous_run_state(env, monkeypatch):
+    """P2-9：重试要清掉上一轮的 started_at / 文案契约 / 提示词包，否则详情看起来"没跑过"。"""
+    import datetime as dt
+
+    submitted: list[str] = []
+
+    class _StubDispatcher:
+        async def submit(self, task_id: str) -> str:
+            submitted.append(task_id)      # 不立刻执行，避免这里就被真实跑一遍
+            return task_id
+
+    monkeypatch.setattr("app.agents_image.api.routes.get_dispatcher",
+                        lambda: _StubDispatcher())
+    headers = login(env)
+    task_id = "20261118000000cc04"
+    with session_scope() as session:
+        task_store.create_task(session, task_id=task_id, username="admin",
+                               department=None, prompt="白底主图", platform="淘系",
+                               aspect="1:1", n=1, ref_asset_ids=[], product_id="P-3001",
+                               image_count=1)
+        task_store.mark_failed(session, task_id, code="IMG_TIMEOUT", detail="超时")
+        task_store.update_task(
+            session, task_id,
+            started_at=dt.datetime.now(), copy_json={"slots": [{"slot": 1}]},
+            prompt_pack_json=[{"slot": 1, "prompt": "旧提示词"}],
+            warnings_json=["IMG_SLOT_MISSING: 预期 1 张，输出 0 张"],
+            retained_note="")
+    resp = env.post(f"/api/image/tasks/{task_id}/retry", headers=headers)
+    assert resp.status_code == 200, resp.text
+    with session_scope() as session:
+        task = task_store.get_task(session, task_id)
+        assert task.status == "queued"
+        assert task.started_at is None
+        assert dict(task.copy_json or {}) == {}
+        assert list(task.prompt_pack_json or []) == []
+        assert list(task.warnings_json or []) == []
+
+
 # ---------------------------------------------------------------- 功能5：iterate 差额补齐
 def test_iterate_fills_gap_and_charges_only_generated(env):
     """基础任务只出了 1 张（主图）→ iterate 不能"复用不了就报错"，要按差额重做并只按差额计额度。"""

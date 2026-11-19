@@ -262,13 +262,31 @@ async def execute_task(task_id: str) -> ImageTaskState:
         gated.append((image.slot, role, verdict, image.mime or "image/png"))
     with session_scope() as session:
         task = task_store.get_task(session, task_id)
-        if task is None or task.status == "canceled":
+        if task is None:
+            return state
+        if task.status == "canceled":
+            # P2-11 取消竞态：provider 已经跑过、钱已经花掉，但任务先被取消了。
+            # 未结算 → 这里必须补结算（否则成本漏记）；已结算 → 不能再记一次，但要留痕。
+            spent = sum(float(item or 0.0) for item in image_costs)
+            if getattr(task, "settled_at", None) is None:
+                _cancel_settle(session, state, attempted=attempted,
+                               provider_calls=provider_calls, cost=spent)
+                task_store.update_task(session, task_id, attempted_images=attempted,
+                                       provider_calls=provider_calls)
+            else:
+                task_store.merge_warnings(
+                    session, task_id,
+                    [f"IMG_CANCELED_COST_UNRECORDED: 任务在生图过程中被取消且已由其它路径结算，"
+                     f"本次 {provider_calls} 次调用 / ¥{round(spent, 4)} 可能未计入，请人工核对"])
+            metrics.record_task_failed()
+            state.touch("canceled", attempted=attempted)
             return state
         # 取消语义（P1-6）：provider 已返回但用户已请求取消 → 丢弃结果，不交付
         if getattr(task, "cancel_requested", False):
             task_store.update_task(session, task_id, status="canceled",
                                    finished_at=dt.datetime.now(),
                                    attempted_images=attempted,
+                                   provider_calls=provider_calls,
                                    error_code="IMG_TASK_CANCELED",
                                    error_detail="已提交生图模型，结果被丢弃（用户取消）")
             _cancel_settle(session, state, attempted=attempted,
