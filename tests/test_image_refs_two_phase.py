@@ -183,6 +183,21 @@ def test_pailitao_query_asset_requires_ownership(env):
     assert resp.json()["error_code"] == "IMG_FORBIDDEN"
 
 
+def test_pailitao_query_bytes_searches_once_for_all_products():
+    """P2-8：勾了素材库图时所有商品用同一张搜图输入 → 只搜一次（过去 N 个商品搜 N 次）。"""
+    catalog = _ColorCatalog()
+    targets = [
+        refs_source.RefTarget(product_id="P-A", color="黑色", color_hex="#111111"),
+        refs_source.RefTarget(product_id="P-B", color="雾蓝", color_hex="#5A8FBF"),
+    ]
+    products = {pid: asyncio.run(catalog.get_product(pid)) for pid in ("P-A", "P-B")}
+    plan = asyncio.run(refs_source.plan_pailitao_refs(
+        catalog, targets, products=products, query_bytes=b"same-query-image",
+        min_sales=100, top_n=5, max_refs=6))
+    assert len(catalog.queries) == 1, catalog.queries
+    assert plan.total == 2                       # 两个目标各 1 张，复用同一次搜索结果
+
+
 # ---------------------------------------------------------------- P2-10：素材库按内容去重
 def test_library_upload_dedupes_same_image(env):
     headers = login(env)

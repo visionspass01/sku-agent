@@ -293,11 +293,27 @@ async def plan_pailitao_refs(
                     "当前商品数据源不支持拍立淘搜图（需要中台 MCP 图像搜索能力）",
                     retryable=False)
 
+    def _rank(items) -> list:
+        picked = [item for item in items if int(item.sales) > int(min_sales)]
+        picked.sort(key=lambda item: -int(item.sales))
+        return picked
+
+    # P2-8：勾了素材库图（query_bytes 非空）时，所有商品用的是**同一张**搜图输入 ——
+    # 搜一次就够；过去每个商品各搜一次（N 次搜索 + N 行重复资产）。
+    shared_similar = None
+    if query_bytes:
+        shared_similar = _rank(await finder(query_bytes, min_sales=int(min_sales),
+                                            top_n=int(top_n)))
+        if not shared_similar:
+            raise_image("IMG_SIMILAR_NOT_FOUND", f"未搜到销量超{int(min_sales)}的近似商品")
+
     plan = RefPlan(products=unique)
+    payload_cache: dict[str, bytes] = {}     # 同一张相似款主图只下载一次
     for product_id in unique:
         data = unique[product_id]
-        raw = query_bytes
-        if not raw:
+        if shared_similar is not None:
+            similar = shared_similar
+        else:
             # 用**该商品自己**的目标颜色选图（P1-7）
             color = next((target.color for target in targets
                           if target.product_id == product_id), "")
@@ -307,16 +323,20 @@ async def plan_pailitao_refs(
                 raise_image("IMG_REFERENCE_REQUIRED",
                             f"商品 {product_id} 没有可用于搜图的图片（也没勾选素材库图）")
             raw = await _fetch(usable[0], timeout=timeout_seconds, catalog=catalog)
-        similar = await finder(raw, min_sales=int(min_sales), top_n=int(top_n))
-        similar = [item for item in similar if int(item.sales) > int(min_sales)]
-        similar.sort(key=lambda item: -int(item.sales))
+            similar = _rank(await finder(raw, min_sales=int(min_sales), top_n=int(top_n)))
         picked: list[PlannedRef] = []
         for item in similar:
             if len(picked) >= max(1, int(max_refs)):
                 break
             if item.image is None or not item.image.has_payload:
                 continue
-            payload = await _fetch(item.image, timeout=timeout_seconds, catalog=catalog)
+            image_key = str(getattr(item.image, "image_id", "")
+                            or getattr(item.image, "sha256", "") or "")
+            payload = payload_cache.get(image_key)
+            if payload is None:
+                payload = await _fetch(item.image, timeout=timeout_seconds, catalog=catalog)
+                if image_key:
+                    payload_cache[image_key] = payload
             picked.append(PlannedRef(data=payload, mime=item.image.mime or "image/png",
                                      source="pailitao", product_id=product_id,
                                      color_hex=item.image.color_hex,

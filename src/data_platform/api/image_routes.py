@@ -52,11 +52,25 @@ def _preset_out(item: dict) -> isc.PresetOut:
 def list_products(request: Request,
                   keyword: str = Query(default=""),
                   limit: int = Query(default=20, ge=1, le=100)):
-    """商品清单（Agent 前端据此多选；用户只能从这里选，不能上传图片）。"""
+    """商品清单（Agent 前端据此多选；用户只能从这里选，不能上传图片）。
+
+    P1-8：这里过去**没有部门过滤**（context / similar 都有），部门账号能直接把别的部门的
+    商品拉进清单。现在与另两个读接口同口径：越权行过滤掉，并在 `filtered` 与审计里说明。
+    """
     rows = image_mock.list_products(keyword=keyword, limit=limit)
-    out = [isc.ProductSummaryOut(**row) for row in rows]
-    request.state.audit_detail = f"image.products n={len(out)}"
-    return isc.ProductsOut(products=out, count=len(out))
+    principal = resolve_principal(request)
+    out: list[isc.ProductSummaryOut] = []
+    filtered = 0
+    for row in rows:
+        if principal is not None and not principal.department_allowed(
+                department_of(row.get("category"))):
+            filtered += 1
+            continue
+        out.append(isc.ProductSummaryOut(**row))
+    request.state.audit_detail = (
+        f"image.products n={len(out)} filtered={filtered} "
+        f"dept={getattr(principal, 'departments', None)}")
+    return isc.ProductsOut(products=out, count=len(out), filtered=filtered)
 
 
 @router.get("/products/{product_id}/context", response_model=isc.ProductContextOut,
@@ -206,13 +220,59 @@ def platform_rules(platform: str):
     return isc.PlatformRulesOut(**rules)
 
 
+def _apply_result(row, payload: isc.ResultsIn, item, now: dt.datetime) -> None:
+    """把一条回写结果写到 row 上（新建与覆盖共用，避免两套字段名漂移）。"""
+    row.request_id = payload.request_id
+    row.batch_id = payload.batch_id
+    row.product_id = payload.product_id
+    row.task_id = payload.task_id
+    row.slot = item.slot
+    row.role = item.role
+    row.prompt = item.prompt
+    row.negative_prompt = item.negative_prompt
+    row.model = item.model
+    row.params_json = payload.params or {}
+    row.prompt_pack_json = list(payload.prompt_pack or [])
+    row.sha256 = item.sha256
+    row.mime = item.mime
+    row.width = item.width
+    row.height = item.height
+    row.bytes = item.bytes
+    row.storage = item.storage
+    row.storage_key = item.storage_key
+    row.critic_score = item.critic_score
+    row.critic_issues = list(item.critic_issues or [])
+    row.cost_cny = item.cost_cny
+    row.elapsed_ms = item.elapsed_ms
+    row.status = item.status
+    row.copy_json = dict(item.copy_json or payload.copy_json or {})
+    row.reused = 1 if item.reused else 0
+    row.blocked_json = list(payload.blocked or [])
+    row.warnings_json = list(payload.warnings or [])
+    row.partial = 1 if payload.partial else 0
+    row.expected_images = int(payload.expected_images or 0)
+    row.variant_id = str(getattr(payload, "variant_id", "") or "")
+    row.variant_direction = str(getattr(payload, "variant_direction", "") or "")
+    row.ref_source = str(getattr(payload, "ref_source", "") or "mcp")
+    row.trace_id = payload.trace_id
+    row.created_at = now
+
+
 @router.post("/results", response_model=isc.ResultsOut,
              dependencies=[Depends(require_scope("write"))])
 def save_results(payload: isc.ResultsIn, request: Request):
-    """回写结果元数据：`(task_id, slot)` 重复提交只记 deduped，不覆盖已有行。"""
+    """回写结果元数据：`(task_id, slot)` **upsert**。
+
+    P2-14：过去同 `(task_id, slot)` 一律跳过（算 deduped），于是"Agent 重试后重发的结果"
+    会被静默丢掉，中台永远留着上一轮的旧图。现在分三种情况：
+    - 不存在 → 新建（`saved`）；
+    - 已存在且 `sha256` 相同 → `deduped`（真的重复）；
+    - 已存在但内容变了 → 覆盖并 `updated`（重试后的新结果必须能落到中台）。
+    """
     now = dt.datetime.now()
     saved = 0
     deduped = 0
+    updated = 0
     with session_scope() as session:
         existing_request = session.get(ImageRequest, payload.request_id) \
             if payload.request_id else None
@@ -227,38 +287,25 @@ def save_results(payload: isc.ResultsIn, request: Request):
             ))
             session.flush()
         for item in payload.results:
-            if session.execute(
+            existing = session.execute(
                 select(ImageResult).where(ImageResult.task_id == payload.task_id,
-                                         ImageResult.slot == item.slot)
-            ).scalars().first() is not None:
-                deduped += 1
+                                          ImageResult.slot == item.slot)
+            ).scalars().first()
+            if existing is not None:
+                if (existing.sha256 or "") == (item.sha256 or ""):
+                    deduped += 1
+                    continue
+                _apply_result(existing, payload, item, now)
+                updated += 1
                 continue
-            session.add(ImageResult(
-                request_id=payload.request_id, batch_id=payload.batch_id,
-                product_id=payload.product_id, task_id=payload.task_id, slot=item.slot,
-                role=item.role, prompt=item.prompt, negative_prompt=item.negative_prompt,
-                model=item.model, params_json=payload.params or {},
-                prompt_pack_json=list(payload.prompt_pack or []),
-                sha256=item.sha256, mime=item.mime, width=item.width, height=item.height,
-                bytes=item.bytes, storage=item.storage, storage_key=item.storage_key,
-                critic_score=item.critic_score, critic_issues=list(item.critic_issues or []),
-                cost_cny=item.cost_cny, elapsed_ms=item.elapsed_ms, status=item.status,
-                copy_json=dict(item.copy_json or payload.copy_json or {}),
-                reused=1 if item.reused else 0,
-                blocked_json=list(payload.blocked or []),
-                warnings_json=list(payload.warnings or []),
-                partial=1 if payload.partial else 0,
-                expected_images=int(payload.expected_images or 0),
-                variant_id=str(getattr(payload, "variant_id", "") or ""),
-                variant_direction=str(getattr(payload, "variant_direction", "") or ""),
-                ref_source=str(getattr(payload, "ref_source", "") or "mcp"),
-                trace_id=payload.trace_id, created_at=now,
-            ))
+            row = ImageResult()
+            _apply_result(row, payload, item, now)
+            session.add(row)
             saved += 1
         session.flush()
     request.state.audit_detail = (f"image.results task={payload.task_id} "
-                                  f"saved={saved} deduped={deduped}")
-    return isc.ResultsOut(saved=saved, deduped=deduped,
+                                  f"saved={saved} updated={updated} deduped={deduped}")
+    return isc.ResultsOut(saved=saved, deduped=deduped, updated=updated,
                           request_id=payload.request_id, task_id=payload.task_id)
 
 

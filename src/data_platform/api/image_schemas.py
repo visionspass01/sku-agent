@@ -19,6 +19,8 @@ class ProductSummaryOut(Envelope):
 class ProductsOut(Envelope):
     products: list[ProductSummaryOut] = Field(default_factory=list)
     count: int = 0
+    # 因部门作用域被过滤掉的条数（第四轮 P1-8：清单过去完全不按部门过滤）
+    filtered: int = 0
 
 
 class ProductImageOut(Envelope):
@@ -183,6 +185,8 @@ class ResultsIn(Envelope):
 class ResultsOut(Envelope):
     saved: int = 0
     deduped: int = 0
+    # 同 (task_id, slot) 但内容变了 → 覆盖（第四轮 P2-14：重试后重发不能丢新结果）
+    updated: int = 0
     request_id: str = ""
     task_id: str = ""
 
