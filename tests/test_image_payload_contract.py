@@ -138,7 +138,7 @@ def _task_stub(**overrides):
 def test_snapshot_carries_task_parameters():
     from app.agents_image.api.stream_routes import _snapshot_payload
 
-    snapshot = _snapshot_payload(_task_stub())
+    snapshot = _snapshot_payload(_task_stub(status="done"))
     assert snapshot["slot_count"] == 9
     assert snapshot["image_count"] == 6
     assert snapshot["ref_source"] == "mcp"
@@ -147,6 +147,12 @@ def test_snapshot_carries_task_parameters():
     # 原有字段不能被顺手改掉
     assert snapshot["expected_images"] == 6
     assert snapshot["partial"] is True
+    assert snapshot["in_progress"] is False
+
+    # 第四轮 P1-9：运行中的任务不算"部分成功"
+    running = _snapshot_payload(_task_stub(status="running"))
+    assert running["partial"] is False and running["message"] == ""
+    assert running["in_progress"] is True
 
 
 # ---------------------------------------------------------------- 源码契约

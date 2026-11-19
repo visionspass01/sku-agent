@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import uuid
+
 import pytest
 
 from app.agents_image import metrics as image_metrics
@@ -48,38 +50,49 @@ def login(client, username="admin", password="hhw123") -> dict:
     return {"Authorization": f"Bearer {resp.json()['token']}"}
 
 
-def test_grant_period_switch_clears_used_and_reserved(env):
+def _fresh_user(prefix: str) -> str:
+    """专属账号：测试库是 session 级的，用固定账号会被别的用例的 used/reserved 污染。"""
+    username = f"{prefix}-{uuid.uuid4().hex[:8]}"
     with session_scope() as session:
-        quota_store.grant(session, "worker2", period_type="day", period_limit=10)
-        quota_store.reserve(session, "worker2", 4)
-        quota_store.consume(session, "worker2", 2)
-        before = quota_store.check(session, "worker2", 0)
+        user_store.create_user(session, username=username, password="pw-quota-123")
+    return username
+
+
+def test_grant_period_switch_clears_used_and_reserved(env):
+    user = _fresh_user("u-grant")
+    with session_scope() as session:
+        quota_store.grant(session, user, period_type="day", period_limit=10)
+        quota_store.reserve(session, user, 4)
+        quota_store.consume(session, user, 2)
+        before = quota_store.check(session, user, 0)
         assert before["remaining"] == 10 - 2 - 4
 
-        quota_store.grant(session, "worker2", period_type="week", period_limit=30)
-        after = quota_store.check(session, "worker2", 0)
+        quota_store.grant(session, user, period_type="week", period_limit=30)
+        after = quota_store.check(session, user, 0)
     assert after["period_type"] == "week"
     assert after["remaining"] == 30, "换周期必须把 used 与 reserved 一起归零"
 
 
 def test_rollover_clears_reserved(env):
+    user = _fresh_user("u-roll")
     with session_scope() as session:
-        row = quota_store.get_or_create(session, "worker1")
+        row = quota_store.get_or_create(session, user)
         row.period_key = "2000-01-01"          # 模拟上一周期
         row.used = 3
         row.reserved = 5
         session.flush()
-        state = quota_store.check(session, "worker1", 0)
+        state = quota_store.check(session, user, 0)
     assert state["period_key"] != "2000-01-01"
     assert state["remaining"] == state["limit"], "滚周期后预留不能继续占额度"
 
 
 def test_admin_grant_api_reports_full_remaining(env):
     headers = login(env)
+    user = _fresh_user("u-grant-api")
     with session_scope() as session:
-        quota_store.grant(session, "worker1", period_type="day", period_limit=10)
-        quota_store.reserve(session, "worker1", 6)
-    resp = env.put("/api/image/admin/quota/worker1", headers=headers,
+        quota_store.grant(session, user, period_type="day", period_limit=10)
+        quota_store.reserve(session, user, 6)
+    resp = env.put(f"/api/image/admin/quota/{user}", headers=headers,
                    json={"period_type": "month", "period_limit": 100})
     assert resp.status_code == 200, resp.text
     body = resp.json()

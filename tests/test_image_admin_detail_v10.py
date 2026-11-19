@@ -107,24 +107,34 @@ def test_admin_tasks_zero_limit_is_clamped_up(env):
 
 # ---------------------------------------------------------------- P2-2：部门口径一致
 def test_cards_and_buckets_respect_department(env):
+    """用一个专属部门名 + 专属账号隔离计数（测试库是 session 级的，固定部门会被别的用例污染）。"""
+    import uuid
+
     headers = login(env)
+    department = f"测试部-{uuid.uuid4().hex[:6]}"
+    first = f"u-dept-a-{uuid.uuid4().hex[:8]}"
+    second = f"u-dept-b-{uuid.uuid4().hex[:8]}"
     with session_scope() as session:
-        quota_store.grant(session, "worker1", period_type="day", period_limit=10)
-        quota_store.grant(session, "worker2", period_type="day", period_limit=20)
-        usage_store.record(session, username="worker1", department="男装",
+        user_store.create_user(session, username=first, password="pw-dept-123",
+                               department=department)
+        user_store.create_user(session, username=second, password="pw-dept-123",
+                               department=department)
+        quota_store.grant(session, first, period_type="day", period_limit=10)
+        quota_store.grant(session, second, period_type="day", period_limit=20)
+        usage_store.record(session, username=first, department=department,
                            delivered=2, attempted=2, tasks=1, agent_passed=2)
-        usage_store.record(session, username="worker2", department="女装",
+        usage_store.record(session, username=second, department=department,
                            delivered=5, attempted=5, tasks=1, agent_passed=5)
 
-    male = env.get("/api/image/admin/metrics?granularity=day&count=7&department=男装",
+    body = env.get(f"/api/image/admin/metrics?granularity=day&count=7&department={department}",
                    headers=headers).json()
-    assert male["cards"]["usage_images"] == 2
-    assert male["cards"]["quota_limit"] == 10, "配额上限必须按部门聚合"
-    assert male["cards"]["quota_used"] == 0
-    bucket_users = {name for bucket in male["buckets"] for name in bucket["by_user"]}
-    assert bucket_users <= {"worker1"}
+    assert body["cards"]["usage_images"] == 7
+    assert body["cards"]["quota_limit"] == 30, "配额上限必须按部门聚合"
+    bucket_users = {name for bucket in body["buckets"] for name in bucket["by_user"]}
+    assert bucket_users == {first, second}
 
-    female = env.get("/api/image/admin/metrics?granularity=day&count=7&department=女装",
-                     headers=headers).json()
-    assert female["cards"]["usage_images"] == 5
-    assert female["cards"]["quota_limit"] == 20
+    # 别的部门不能看到这两个账号的数据
+    other = env.get("/api/image/admin/metrics?granularity=day&count=7&department=男装",
+                    headers=headers).json()
+    other_users = {name for bucket in other["buckets"] for name in bucket["by_user"]}
+    assert first not in other_users and second not in other_users

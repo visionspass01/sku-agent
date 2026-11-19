@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import uuid
 
 import pytest
 
@@ -18,6 +19,7 @@ from app.agents_image.config import reset_image_settings
 from app.agents_image.generator import handler as generator_handler
 from app.agents_image.sources import batch_context
 from app.agents_image.sources import product_source as ps
+from app.agents_image.store import quota as quota_store
 from app.agents_image.store import tasks as task_store
 from app.agents_image.store import usage as usage_store
 from app.agents_image.store import users as user_store
@@ -129,9 +131,13 @@ def test_failed_task_records_provider_calls(env, monkeypatch):
         raise_image("IMG_PROVIDER_UNAVAILABLE", "5xx")
 
     monkeypatch.setattr(FakeProvider, "generate", down)
-    headers = login(env)
+    # 用专属账号隔离计数（测试库是 session 级的，全局 totals 会被别的用例污染）
+    user = f"u-pcf-{uuid.uuid4().hex[:8]}"
+    password = "pw-pcf-123"
     with session_scope() as session:
-        before = usage_store.totals(session)
+        user_store.create_user(session, username=user, password=password, role="user")
+        quota_store.grant(session, user, period_type="day", period_limit=10)
+    headers = login(env, user, password)
     created = env.post("/api/image/tasks", headers=headers,
                        json={"product_ids": ["P-3001"], "prompt": "白底主图", "image_count": 1})
     assert created.status_code == 201, created.text
@@ -141,12 +147,12 @@ def test_failed_task_records_provider_calls(env, monkeypatch):
     assert detail["provider_calls"] >= 2, detail
 
     with session_scope() as session:
-        after = usage_store.totals(session)
+        mine = usage_store.totals(session, username=user)
         task_calls = int(task_store.get_task(session, task_id).provider_calls or 0)
     assert task_calls >= 2
-    assert after["provider_calls"] - before["provider_calls"] >= 2
-    # 失败没有成功出图 → 使用量不涨，但发起量涨了：可用率必须 < 1
-    assert after["images"] == before["images"]
-    cards = env.get("/api/image/admin/metrics?granularity=day&count=7",
-                    headers=headers).json()["cards"]
-    assert cards["api_availability"] < 1.0
+    assert mine["provider_calls"] >= 2
+    # 失败没有成功出图 → 使用量 0，但发起量 > 0：可用率必须是 0
+    assert mine["images"] == 0
+    cards = env.get(f"/api/image/admin/metrics?granularity=day&count=7&username={user}",
+                    headers=login(env)).json()["cards"]
+    assert cards["api_availability"] == 0.0
