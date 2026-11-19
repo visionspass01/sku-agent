@@ -51,6 +51,7 @@ _COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("image_quota", "reserved", "INTEGER DEFAULT 0"),
     ("image_usage", "adopted", "INTEGER DEFAULT 0"),
     ("image_usage", "rejected", "INTEGER DEFAULT 0"),
+    ("image_usage", "reused_adopted", "INTEGER DEFAULT 0"),
     ("image_memory", "sample_kind", "VARCHAR(16) DEFAULT 'auto'"),
     ("image_memory", "adopt_count", "INTEGER DEFAULT 0"),
 )

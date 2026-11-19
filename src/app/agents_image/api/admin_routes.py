@@ -90,7 +90,9 @@ def _cards(session, *, runtime: dict, username: str | None = None,
     usage_images = int(totals.get("images") or 0)          # 使用量：第三方成功生成张数
     provider_calls = int(totals.get("provider_calls") or 0)  # 发起量：第三方调用发起次数
     agent_passed = int(totals.get("agent_passed") or 0)     # 交付张数：Agent 审核通过
-    adopted = int(totals.get("adopted") or 0)               # 人工通过（采纳）
+    adopted = int(totals.get("adopted") or 0)               # 人工通过（采纳，仅新生成图）
+    # 复用图采纳单列（P1-1）：复用图不在使用量分母里，混进分子会让上架率 >100%
+    reused_adopted = int(totals.get("reused_adopted") or 0)
     quota_used, quota_limit = _quota_totals(session)
     return {
         "usage_images": usage_images,
@@ -100,7 +102,10 @@ def _cards(session, *, runtime: dict, username: str | None = None,
         "agent_passed": agent_passed,
         "agent_pass_rate": (round(agent_passed / usage_images, 4)
                             if usage_images else 0.0),
-        "listing_rate": (round(adopted / usage_images, 4) if usage_images else 0.0),
+        # 上架率 = 新生成图采纳 / 使用量；分子取 min(adopted, 使用量) 兜住历史脏账（
+        # 旧版把复用图也算进 adopted，那一版留下的行会让比率虚高，这里不让它 >100%）
+        "listing_rate": (round(min(adopted, usage_images) / usage_images, 4)
+                         if usage_images else 0.0),
         "listing_reported_rate": _listing_rate(session),
         "quota_used": quota_used,
         "quota_limit": quota_limit,
@@ -119,6 +124,7 @@ def _cards(session, *, runtime: dict, username: str | None = None,
         "images_delivered": int(delivered_sum),
         "images_attempted": int(attempted_sum),
         "adopted": adopted,
+        "reused_adopted": reused_adopted,
         "rejected": int(totals.get("rejected") or 0),
         "first_pass_rate": round(first_pass / done_total, 4) if done_total else 0.0,
         "tasks_done": done_total,

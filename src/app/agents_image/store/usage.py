@@ -39,6 +39,7 @@ def record(session, *, username: str, department: str | None = None,
         "failed": max(0, int(failed)),
         "tokens": max(0, int(tokens)),
         "adopted": max(0, int(kwargs.pop("adopted", 0) or 0)),
+        "reused_adopted": max(0, int(kwargs.pop("reused_adopted", 0) or 0)),
         "rejected": max(0, int(kwargs.pop("rejected", 0) or 0)),
     }
     del kwargs
@@ -66,6 +67,7 @@ def record(session, *, username: str, department: str | None = None,
                      agent_passed=increments["agent_passed"],
                      tasks=increments["tasks"], failed=increments["failed"],
                      tokens=increments["tokens"], adopted=increments["adopted"],
+                     reused_adopted=increments["reused_adopted"],
                      rejected=increments["rejected"], cost_cny=max(0.0, float(cost)))
     session.add(row)
     try:
@@ -89,6 +91,47 @@ def record(session, *, username: str, department: str | None = None,
                                      ImageUsage.granularity == "hour")
         ).scalars().first()
     return row
+
+
+def shift(session, *, username: str, department: str | None = None,
+          now: dt.datetime | None = None, **deltas: int) -> bool:
+    """对当前小时行做**可正可负**的增量（字段下限 0），用于「同一张图结论翻转」的回退。
+
+    为什么需要它（第四轮 P1-2）：adopt → reject → adopt 过去每换一次态就 +1，
+    `adopted` 被重复计成 2，采纳数不再等于「当前处于采纳态的图」，上架率随之虚高。
+    现在统一按**当前终态**记账：先减旧态、再加新态；减到 0 为止（`CASE WHEN`，非负）。
+
+    只更新已存在的小时行：没有行说明当时那一桶没记过账，负增量无处可退（返回 False）；
+    但正增量仍会补建行，避免"新态的账没落"。
+    """
+    from sqlalchemy import case
+
+    key = hour_key(now)
+    raw = {field: int(deltas.get(field, 0) or 0)
+           for field in ("adopted", "rejected", "reused_adopted")}
+    if not any(raw.values()):
+        return False
+    values = {}
+    for field, delta in raw.items():
+        if not delta:
+            continue
+        column = getattr(ImageUsage, field)
+        values[field] = case((column + delta < 0, 0), else_=column + delta)
+    updated = session.execute(
+        update(ImageUsage)
+        .where(ImageUsage.username == username,
+               ImageUsage.period_key == key,
+               ImageUsage.granularity == "hour")
+        .values(**values, updated_at=dt.datetime.now())
+    )
+    if updated.rowcount:
+        session.flush()
+        return True
+    positive = {field: delta for field, delta in raw.items() if delta > 0}
+    if not positive:
+        return False
+    record(session, username=username, department=department, now=now, **positive)
+    return True
 
 
 def _bucket_key(moment: dt.datetime, granularity: str) -> str:
@@ -212,10 +255,11 @@ def totals(session, *, username: str | None = None,
         "cost_cny": round(sum(float(row.cost_cny or 0.0) for row in rows), 4),
         "tokens": sum(int(row.tokens or 0) for row in rows),
         "adopted": sum(int(row.adopted or 0) for row in rows),
+        "reused_adopted": sum(int(getattr(row, "reused_adopted", 0) or 0) for row in rows),
         "rejected": sum(int(row.rejected or 0) for row in rows),
         "provider_calls": sum(int(getattr(row, "provider_calls", 0) or 0) for row in rows),
         "agent_passed": sum(int(getattr(row, "agent_passed", 0) or 0) for row in rows),
     }
 
 
-__all__ = ["GRANULARITIES", "hour_key", "record", "buckets", "totals"]
+__all__ = ["GRANULARITIES", "hour_key", "record", "shift", "buckets", "totals"]

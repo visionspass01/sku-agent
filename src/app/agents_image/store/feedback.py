@@ -17,18 +17,31 @@ from app.core.errors import raise_image
 logger = logging.getLogger("sku-agent.image.feedback")
 
 VERDICTS = {"adopted": "adopted", "rejected": "rejected"}
+REUSE_SOURCE = "reuse"
 
 
-def _usage_kind(verdict: str) -> str:
-    return "adopted" if verdict == "adopted" else "rejected"
+def _usage_field(verdict: str, *, reused: bool) -> str:
+    """判断结论落在使用量的哪个字段（第四轮 P1-1）。
+
+    - 新生成图采纳 → `adopted`（上架率分子，分母是使用量=新生成张数）；
+    - 复用图采纳 → `reused_adopted`（复用图不在使用量分母里，混进 `adopted` 会让上架率 >100%）；
+    - 驳回一律 `rejected`（负样本计数，不进上架率分子）。
+    """
+    if verdict == "adopted":
+        return "reused_adopted" if reused else "adopted"
+    return "rejected"
 
 
 def record(session, *, task_id: str, asset_id: str, verdict: str, reason: str = "",
            username: str = "", slot: int = 0) -> dict:
     """记录一次人工判断（同一张图只能有一种结论，重复提交按覆盖处理）。
 
-    使用量口径（第三轮 P1-9）：只有**首次判断**或**结论变化**才 +1；同一张图被点两次"采纳"
-    不该把 `adopted` 记成 2（否则上架率/采纳率会虚高，甚至 >100%）。
+    口径（第三/四轮）：
+    - **按当前终态记账**：adopt→reject→adopt 不再每换一次就 +1（P1-2），
+      而是先减掉旧态、再加上新态，字段下限 0；
+    - 只有交付产出图（`kind=output`）能采纳/驳回：被像素门禁拦下的图（`kind=blocked`）
+      必须走 unblock 人工放行后才算交付（P2-13），否则"被拦的图直接上架"；
+    - 复用图采纳单独记 `reused_adopted`，不计入上架率（P1-1）。
     """
     verdict = (verdict or "").strip().lower()
     if verdict not in VERDICTS:
@@ -36,10 +49,17 @@ def record(session, *, task_id: str, asset_id: str, verdict: str, reason: str = 
     asset = session.get(ImageAsset, asset_id)
     if asset is None:
         raise_image("IMG_TASK_NOT_FOUND", f"图片不存在：{asset_id}")
+    kind = (asset.kind or "").strip()
+    if kind != "output":
+        raise_image(
+            "IMG_INPUT_INVALID",
+            f"只有交付产出图能采纳/驳回（当前 kind={kind or '未知'}）；"
+            "被门禁拦下的图请先调用 unblock 人工放行")
     row = session.execute(
         select(ImageFeedback).where(ImageFeedback.asset_id == asset_id)
     ).scalars().first()
     previous = (row.verdict if row is not None else "") or ""
+    first_created_at = row.created_at if row is not None else None
     if row is None:
         row = ImageFeedback(task_id=task_id, asset_id=asset_id, slot=slot or asset.slot,
                             verdict=verdict, reason=reason[:500], username=username,
@@ -56,12 +76,18 @@ def record(session, *, task_id: str, asset_id: str, verdict: str, reason: str = 
     # 采纳/驳回更新使用量：成本早已按 provider 成功计入，不返还；重复提交不重复计数
     changed = previous != verdict
     if changed:
+        reused = (asset.source or "") == REUSE_SOURCE
+        target_user = username or asset.username
         try:
             from app.agents_image.store import usage as usage_store
 
-            usage_store.record(session, username=username or asset.username,
-                               department=asset.department,
-                               **{_usage_kind(verdict): 1})
+            # 回退旧态写回它当时落账的那个小时桶；新态记在当前小时桶
+            if previous:
+                rollback = {_usage_field(previous, reused=reused): -1}
+                usage_store.shift(session, username=target_user, department=asset.department,
+                                  now=first_created_at, **rollback)
+            usage_store.shift(session, username=target_user, department=asset.department,
+                              **{_usage_field(verdict, reused=reused): 1})
         except Exception as exc:  # noqa: BLE001 —— 统计失败不影响判断落库
             from app.agents_image import metrics as image_metrics
 

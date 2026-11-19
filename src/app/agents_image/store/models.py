@@ -224,6 +224,9 @@ class ImageUsage(Base):
     # 交付张数（功能8 口径）：Agent 审核（Critic + 像素门禁）通过、真正交付给用户的张数
     agent_passed: Mapped[int] = mapped_column(Integer, default=0)  # 尝试张数
     adopted: Mapped[int] = mapped_column(Integer, default=0)           # 采纳张数（正样本）
+    # 复用图采纳（第四轮 P1-1）：复用图不在使用量分母里，采纳只能单独记，
+    # 否则 上架率 = adopted/使用量 会 >100%（探针实测 166.7%）
+    reused_adopted: Mapped[int] = mapped_column(Integer, default=0)
     rejected: Mapped[int] = mapped_column(Integer, default=0)          # 驳回张数（负样本）
     tasks: Mapped[int] = mapped_column(Integer, default=0)
     failed: Mapped[int] = mapped_column(Integer, default=0)

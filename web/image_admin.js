@@ -65,7 +65,7 @@ const ImageAdmin = (() => {
         hint: `交付 ${fmt(data.agent_passed)} / 使用量 ${fmt(data.usage_images)}` },
       { label: "上架率（人工通过 / 使用量）",
         value: pct(data.listing_rate),
-        hint: `采纳 ${fmt(data.adopted)} / 驳回 ${fmt(data.rejected)} · 标记上架 ${pct(data.listing_reported_rate)}` },
+        hint: `采纳 ${fmt(data.adopted)} / 驳回 ${fmt(data.rejected)} · 复用图采纳 ${fmt(data.reused_adopted)} 张（不计入上架率） · 标记上架 ${pct(data.listing_reported_rate)}` },
       { label: "配额（已用 / 上限）",
         value: `${fmt(data.quota_used)} / ${fmt(data.quota_limit)}`,
         hint: `用量占比 ${pct(data.quota_used_rate)}` },
