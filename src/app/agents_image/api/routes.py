@@ -357,10 +357,23 @@ async def create_tasks(request: Request) -> JSONResponse:
             for target, platform, variant in matrix
         ]
 
+        def _reuse_window(state: ImageTaskState, reuse_map: dict[str, str]) -> dict[str, str]:
+            """复用只保留**本次图位窗口**内的 slot（第三轮 P1-2）。
+
+            基础任务可能有 9 个图位，本次只请求 2 个；过去会把 3..9 的成品也挂过来，
+            导致"slot_count=2 的任务里出现 slot 7 的图"。
+            """
+            if not reuse_map:
+                return {}
+            valid = {int(slot.slot) for slot in (state.slots or [])
+                     if plan_slots.is_generatable(slot)}
+            return {str(slot): asset_id for slot, asset_id in reuse_map.items()
+                    if int(slot) in valid}
+
         def _gap_of(item) -> int:
             target, platform, variant, state = item
             params = params_by_platform[platform]
-            reuse_map = _reuse_of(target, platform, variant)
+            reuse_map = _reuse_window(state, _reuse_of(target, platform, variant))
             generatable = [slot for slot in state.slots if plan_slots.is_generatable(slot)]
             if not reuse_map:
                 return min(len(generatable), int(params["image_count"]))
@@ -399,6 +412,33 @@ async def create_tasks(request: Request) -> JSONResponse:
                              f"¥{settings.cost_budget_cny}（{planned_images} 张）；"
                              "请减少张数/颜色，或调大 IMAGE_COST_BUDGET_CNY", retryable=False)
 
+        # 阶段 B：取参考图（第三轮 P1-5 —— **不在写事务里做网络 IO**）
+        # 读库/读文件（素材库归属校验、拍立淘 query 图）在只读会话里完成，随后关闭；
+        # 下载/搜图完全是网络阶段，事务只覆盖"预留 + 落库 + 建任务"。
+        if ref_source == "library":
+            with session_scope() as read_session:
+                ref_plan = await refs_source.plan_library_refs(
+                    targets, session=read_session, username=user.username,
+                    asset_ids=library_asset_ids, max_refs=settings.max_refs,
+                    is_admin=user.is_admin, products=products)
+        elif ref_source == "pailitao":
+            with session_scope() as read_session:
+                query_bytes = refs_source.load_pailitao_query(
+                    read_session, username=user.username, is_admin=user.is_admin,
+                    asset_ids=library_asset_ids)
+            ref_plan = await refs_source.plan_pailitao_refs(
+                catalog, targets, products=products, query_bytes=query_bytes,
+                min_sales=settings.pailitao_min_sales, top_n=settings.pailitao_top_n,
+                max_refs=settings.max_refs,
+                timeout_seconds=settings.mcp_timeout_seconds)
+        else:
+            ref_plan = await refs_source.plan_refs(
+                catalog, targets, products=products,
+                refs_per_item=settings.refs_per_item, max_refs=settings.max_refs,
+                timeout_seconds=settings.mcp_timeout_seconds,
+            )
+
+        # 阶段 C：短写事务（幂等抢占 + 预留 + 参考图落库 + 建任务）
         with session_scope() as session:
             from sqlalchemy.exc import IntegrityError
 
@@ -424,27 +464,8 @@ async def create_tasks(request: Request) -> JSONResponse:
                                      f"配额不足：本期剩余 {quota['remaining']} 张，"
                                      f"本次需要 {planned_images} 张", retryable=False)
 
-            if ref_source == "library":
-                resolution = await refs_source.resolve_library_refs(
-                    targets, session=session, username=user.username,
-                    asset_ids=library_asset_ids, max_refs=settings.max_refs,
-                    is_admin=user.is_admin, products=products)
-            elif ref_source == "pailitao":
-                resolution = await refs_source.resolve_pailitao_refs(
-                    catalog, targets, session=session, username=user.username,
-                    department=user.department, products=products,
-                    query_asset_ids=library_asset_ids,
-                    min_sales=settings.pailitao_min_sales,
-                    top_n=settings.pailitao_top_n, max_refs=settings.max_refs,
-                    timeout_seconds=settings.mcp_timeout_seconds)
-            else:
-                resolution = await refs_source.resolve_refs(
-                    catalog, targets, session=session,
-                    username=user.username, department=user.department,
-                    refs_per_item=settings.refs_per_item, max_refs=settings.max_refs,
-                    timeout_seconds=settings.mcp_timeout_seconds,
-                    products=products,
-                )
+            resolution = refs_source.persist_refs(session, ref_plan, username=user.username,
+                                                  department=user.department)
             batch_id = new_batch_id()
             created: list[dict] = []
             first_slots: list[dict] = []
@@ -453,7 +474,8 @@ async def create_tasks(request: Request) -> JSONResponse:
                 # 参考图在事务内落库后再绑定到 state（复用预演出来的图位与身份锁定）
                 state.refs = resolution.refs_of(target.color_key)
                 validate_node.validate(state, settings=settings)
-                reuse_map = _reuse_of(target, platform, variant)
+                # 复用只保留本次图位窗口内的 slot（第三轮 P1-2）
+                reuse_map = _reuse_window(state, _reuse_of(target, platform, variant))
                 task = task_store.create_task(
                     session, task_id=new_task_id(), username=user.username,
                     department=user.department, batch_id=batch_id,
@@ -502,8 +524,11 @@ async def create_tasks(request: Request) -> JSONResponse:
                            "refs_truncated": resolution.truncated},
                 "planned_images": planned_images,
                 "ref_source": ref_source,
-                "reused_images": sum(1 for target, platform, variant in matrix
-                                     if _reuse_of(target, platform, variant)),
+                # 复用口径（P2-8）：`reused_images` 是**图片张数**，`reused_tasks` 是**任务数**
+                "reused_images": sum(len(_reuse_window(state, _reuse_of(target, platform, variant)))
+                                     for (target, platform, variant, state) in planned_states),
+                "reused_tasks": sum(1 for (target, platform, variant, state) in planned_states
+                                    if _reuse_window(state, _reuse_of(target, platform, variant))),
                 "trace_id": trace, "idempotent": False,
             }
             if idempotency_key:

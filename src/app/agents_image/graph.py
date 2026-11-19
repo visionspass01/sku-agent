@@ -51,7 +51,14 @@ def _load_refs(session, ref_ids: list[str]) -> list[dict]:
         if asset is None:
             raise ImageError("IMG_REFERENCE_INVALID", f"参考图不存在：{asset_id}")
         assert isinstance(asset, ImageAsset)
-        refs.append({"asset_id": asset.asset_id, "data": storage.get(asset.key),
+        try:
+            data = storage.get(asset.key)
+        except Exception as exc:  # noqa: BLE001 —— 行还在、文件被 24h 清理掉了
+            raise ImageError(
+                "IMG_REFERENCE_EXPIRED",
+                "参考图已过保留期（本地存储 24 小时）被清理，请重新建任务"
+                f"（asset={asset_id}）") from exc
+        refs.append({"asset_id": asset.asset_id, "data": data,
                      "mime": asset.mime, "sha256": asset.sha256})
     return refs
 

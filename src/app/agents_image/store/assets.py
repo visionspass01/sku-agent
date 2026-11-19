@@ -23,6 +23,7 @@ def save_bytes(session, data: bytes, *, kind: str, mime: str = "",
     storage = get_storage()
     ref = storage.put(data, kind=kind, mime=mime)
     # ref 去重：同账号重复解析同一商品的同一张图，复用已有行（不重复占盘，也不跨账号串号）；
+    # 素材库（第三轮 P2-10）按 (sha256, 账号) 去重：同一张图重复上传不该占两次额度；
     # output 必须按 task 独立成行，否则两次任务产出同样字节会被并成一条、任务查不到自己的图。
     existing = None
     if kind == "ref":
@@ -32,6 +33,12 @@ def save_bytes(session, data: bytes, *, kind: str, mime: str = "",
                                      ImageAsset.username == username,
                                      ImageAsset.product_id == product_id,
                                      ImageAsset.color_key == (color_key or ""))
+        ).scalars().first()
+    elif kind == "library":
+        existing = session.execute(
+            select(ImageAsset).where(ImageAsset.sha256 == ref.sha256,
+                                     ImageAsset.kind == kind,
+                                     ImageAsset.username == username)
         ).scalars().first()
     if existing is not None:
         return existing
@@ -129,6 +136,18 @@ def count_library(session, username: str) -> int:
         select(func.count()).select_from(ImageAsset)
         .where(ImageAsset.kind == "library", ImageAsset.username == username)
     ).scalar_one())
+
+
+def find_library_by_sha(session, username: str, data: bytes) -> ImageAsset | None:
+    """素材库按内容去重（第三轮 P2-10）：同一张图重复上传返回已有行。"""
+    from app.core.artifacts import sha256_bytes
+
+    digest = sha256_bytes(data)
+    return session.execute(
+        select(ImageAsset).where(ImageAsset.sha256 == digest,
+                                 ImageAsset.kind == "library",
+                                 ImageAsset.username == username)
+    ).scalars().first()
 
 
 def delete_asset(session, asset: ImageAsset) -> None:

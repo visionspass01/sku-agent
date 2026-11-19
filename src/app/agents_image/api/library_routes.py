@@ -64,6 +64,14 @@ async def upload_library_image(request: Request) -> JSONResponse:
         with session_scope() as session:
             used = asset_store.count_library(session, user.username)
             limit = int(settings.library_max_images)
+            already = asset_store.find_library_by_sha(session, user.username, raw)
+            if already is not None:
+                # 重复上传同一张图：复用已有素材（不占额度、不产生重复行，P2-10）
+                payload = asset_payload(already)
+                payload.update({"username": already.username,
+                                "created_at": _iso(already.created_at),
+                                "deduped": True, "trace_id": trace})
+                return JSONResponse(status_code=200, content=payload)
             if used >= limit and not user.is_admin:
                 raise ImageError("IMG_LIBRARY_FULL",
                                  f"素材库已满（每人最多 {limit} 张），请先删除不用的图")

@@ -210,7 +210,9 @@ def test_iterate_only_reuses_same_color_target(env):
     assert by_color["黑色"]["base_task_id"] is None
     # 计划张数按复用扣减（1 + 3），不是 3×2
     assert payload["planned_images"] == 4
-    assert payload["reused_images"] == 1
+    # 复用口径（P2-8）：reused_images=图片张数，reused_tasks=被复用的任务数
+    assert payload["reused_images"] == 2
+    assert payload["reused_tasks"] == 1
 
 
 def test_platform_variant_forces_both_platforms(env):
