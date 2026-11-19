@@ -17,7 +17,7 @@
 - 部门权限隔离与写操作人工确认（HITL），审批与售后为单条原子操作
 - 全链路可观测（每轮运行详情、延迟分位、工具可靠性、trace_id 贯通）
 
-工程侧同时提供 1500 条离线测试、12 道 CI 门禁、11 个评测脚本与 4 个基准脚本，所有对外数字均可一条命令复现。
+工程侧同时提供 1500+ 条离线测试、12 道 CI 门禁、11 个评测脚本与 4 个基准脚本，所有对外数字均可一条命令复现。
 
 ---
 
@@ -33,7 +33,7 @@
 | **数据库** | SQLite / MySQL 8.0 | 本地零依赖启动，容器部署使用 MySQL |
 | **缓存与队列** | Redis 7 / fakeredis | TTL 抖动缓存、巡检 Stream 消费组、分布式锁 |
 | **检索** | BM25 + 512 维哈希向量 + RRF + 可插拔重排 | 可选腾讯云 TokenHub Embedding + Qdrant |
-| **测试与质量** | pytest + coverage、ruff、Node DOM 冒烟、GitHub Actions | 1500 条离线用例，覆盖率 89% |
+| **测试与质量** | pytest + coverage、ruff、Node DOM 冒烟、GitHub Actions | 1500+ 条离线用例，覆盖率 89% |
 | **部署** | Docker Compose | 六服务编排，4C4G 单机可运行 |
 
 ---
@@ -197,7 +197,7 @@ sku-agent-demo/
 ├── docs/                               # 8 份工程文档（架构 / API / 配置 / 部署 / RAG / UI / 简介 / 一页纸）
 ├── PYTHON_BACKEND_GUIDE.md             # 逐模块代码导读（11 章）
 ├── scripts/                            # 初始化 / 评测 / 基准 / 校验 / 演示脚本
-├── tests/                              # 1500 条离线测试（1076 收集）
+├── tests/                              # 1500+ 条离线测试（收集数随用例增长，以 CI 为准）
 ├── docker/                             # Dockerfile、compose 编排、nginx、初始化 SQL
 ├── AGENTS.md                           # L2 工作区基线（运行时注入系统提示）
 ├── data/kb/                            # 14 篇知识库（67 个片段：通用 9 篇 SOP + 男装 2 + 女装 2 + 历史案例 1）
@@ -352,7 +352,7 @@ Redis、Qdrant、Embedding、数据中台、模型五类依赖均有降级阶梯
 
 ### 10. 对外数字可复现
 
-1500 条离线测试、12 道 CI 门禁、11 个评测脚本与 4 个基准脚本；检索、权限、治理、口径、降级、并发等指标均提供单条命令与固定题集，文档中的数值标注为实测口径。
+1500+ 条离线测试、12 道 CI 门禁、11 个评测脚本与 4 个基准脚本；检索、权限、治理、口径、降级、并发等指标均提供单条命令与固定题集，文档中的数值标注为实测口径。
 
 ---
 
@@ -360,7 +360,7 @@ Redis、Qdrant、Embedding、数据中台、模型五类依赖均有降级阶梯
 
 | 指标 | 结果 | 命令 |
 |------|------|------|
-| 离线测试 | 1500 passed / 1500 收集，覆盖率 89% | `pytest --cov=src/app --cov=src/data_platform` |
+| 离线测试 | 1500+ 收集全绿，覆盖率 89% | `pytest --cov=src/app --cov=src/data_platform` |
 | Agent 路由 | 100%（26/26） | `scripts/eval_routing.py --min-accuracy 0.9` |
 | 工具部门作用域 | 100%（34/34） | `scripts/eval_permissions.py --min-pass 1.0` |
 | 中台治理 | 100%（30/30） | `scripts/eval_platform_governance.py` |

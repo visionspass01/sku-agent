@@ -369,3 +369,54 @@ MCP server 现在**不碰任何数据库**：它们是「工具名 → `/api/v1/
 生产环境里"以图搜同款"销量最高的候选**通常是其他商家的同款商品**；把被搜商品本身排掉反而会
 漏掉最有价值的同款参考图（同一款在不同商家店铺的实拍差异正是拍立淘要拿的信息）。因此本实现
 不做自身排除；若某个商家/场景确实需要排除，可在 `image_find_similar` 里传 `exclude`（中台已支持）。
+
+---
+
+## v10 接口变化（生图 Agent，第四轮评审修复）
+
+### 1. 建任务与快照
+
+| 变化 | 说明 |
+|---|---|
+| 颜色拼装 | 前端改为纯函数 `web/image_payload.js` 逐商品产出 `product_colors`；`all_colors=true` **仅当**每个选中商品的颜色都勾满（混合选择不再多买颜色，也不再丢弃已勾满商品的颜色） |
+| 快照字段 | SSE `snapshot` / `done` 新增 `slot_count`、`image_count`、`ref_source`、`retries`、`provider_calls`、`in_progress`；前端 iterate 不再回读 UI 输入框 |
+| 部分成功 | 只有**终态**（done/failed/canceled）才判定 `partial` 并给 `message`；排队/运行中返回 `partial=false, message="", in_progress=true` |
+| 参考图上限 | 生效上限 = `min(IMAGE_MAX_REFS, provider.caps.max_refs)`；创建期超额报 `IMG_REFS_BUDGET`（不再等到执行期炸 `IMG_TOO_MANY_REFS`）。响应 `limits` 同时给 `max_refs`（生效）与 `max_refs_configured`（配置）；`/health` 新增 `max_refs_effective` |
+| 需求描述 | 超过 `IMAGE_MAX_PROMPT_CHARS`（默认 500）截断，任务落 `IMG_PROMPT_TRUNCATED` 告警 |
+| iterate 复用 | `mode=iterate` 会继承基座任务的**平台 / 变体 / 颜色**（复用 key 是「颜色 × 平台 × 变体」三元组）；被驳回（`adopt_status=rejected`）或已清理的成品不再被复用；一张都复用不到时任务落 `IMG_REUSE_SKIPPED`（含基座与目标三元组），执行期二次校验拦下时落 `IMG_REUSE_REJECTED` |
+| 双平台 | 两个平台的参数解析并发（`asyncio.gather`），首屏不再串行 2×4 次 MCP 调用 |
+
+### 2. 采纳与指标
+
+| 变化 | 说明 |
+|---|---|
+| 上架率 | 分子只算**新生成图**的采纳（`adopted`），分母仍是使用量；复用图采纳单列 `image_usage.reused_adopted`，只在卡片 hint 展示「复用图采纳 N 张（不计入上架率）」，上架率恒 ≤ 100% |
+| 终态记账 | 采纳按**当前终态**记账：adopt → reject → adopt 只算 1 次采纳（先减旧态再加新态，字段非负）；重复点「采纳」不加计 |
+| 采纳资格 | 只有 `kind=output` 的交付图能采纳/驳回；被像素门禁拦下的图（`kind=blocked`）必须先 `POST /tasks/{id}/assets/{asset}/unblock` 人工放行，否则 `IMG_INPUT_INVALID` |
+| 发起量 | provider 失败/重试、以及取消竞态下的真实调用次数都会计入 `provider_calls`（「发起量」口径），API 可用率不再虚高 |
+| 取消竞态 | provider 已产出但任务先被取消：未结算则补结算（成本/发起量照记）；已结算则落 `IMG_CANCELED_COST_UNRECORDED` 告警，不重复记账 |
+| 配额 | 周期切换（管理员改周期或自然滚周期）同时清 `used` 与 `reserved`，新周期剩余额度是完整上限 |
+
+### 3. 管理端与批次
+
+| 变化 | 说明 |
+|---|---|
+| 任务详情 | `GET /api/image/admin/tasks/{id}` 补 `warnings` / `blocked` / `copy` / `expected_images` / `partial` / `in_progress` / `ref_source` / `retries` / `provider_calls` / `reused_images` / `base_task_id` |
+| 任务列表 | `GET /api/image/admin/tasks` 的 `limit` 夹到 1..200，并补 `image_count` / `slot_count` / `ref_source` / `reused_images` / `retries` / `provider_calls` |
+| 部门口径 | 折线桶（`usage.buckets`）与配额总量（`_quota_totals`）都按 `?department=` 过滤：部门视图不再出现「使用量按部门、配额按全局」的自相矛盾 |
+| 批次汇总 | `GET /api/image/batches/{id}` 的 `ref_source` 在同批次来源不一致时返回 `mixed`（并给 `ref_sources` 列表），补 `partial_tasks` / `warnings_count` / `blocked_count` 与口径 `note`；任务级补 `partial` / `image_count` / `warnings_count` / `blocked_count` |
+| outbox 重放 | `POST /api/image/admin/replay-outbox` 与后台定时重放都改**三段式**：读 → 占位 → 网络回写 → 收尾，网络 IO 不持有数据库会话；返回增 `claimed`（本次占位条数） |
+
+### 4. 中台（数据中台 `/api/v1/image/*`）
+
+| 变化 | 说明 |
+|---|---|
+| 商品清单 | `GET /products` 增加部门过滤（与 `/products/context`、`/similar-by-image` 同口径），`ProductsOut` 增 `filtered`（被过滤条数），审计记 `filtered` |
+| 结果回写 | `POST /results` 的 `(task_id, slot)` 改 **upsert**：不存在 → `saved`；同 `sha256` → `deduped`；内容变了 → 覆盖并 `updated`（重试后重发的新结果不再被静默丢弃）。`ResultsOut` 增 `updated` |
+| 拍立淘 | 勾了素材库图（`query_bytes` 相同）时**只搜一次**并把结果复用到全部目标，相似款主图按 `image_id` 缓存下载（不再 N 次搜索 + N 行重复资产） |
+
+### 5. 配置与文档
+
+新增/变更的 `IMAGE_*` 变量（默认值与生效规则见 [CONFIG.md](CONFIG.md) v10 段）：
+`IMAGE_MAX_PROMPT_CHARS`、`IMAGE_OUTBOX_CLAIM_SECONDS`、`IMAGE_OUTBOX_KEEP_HOURS`；
+`IMAGE_MAX_REFS` 的语义改为「配置上限」，真正生效值取 `min(配置, provider.caps.max_refs)`。

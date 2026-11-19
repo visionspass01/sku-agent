@@ -74,7 +74,7 @@ src/data_platform/        # 轻量数据中台（FastAPI :8001）
 web/                      # 前端页面（原生 JS，无构建）：SKU 监管 Agent 演示页（index.html）+ Agent 目录页（agents.html）+ 项目简介（about.html ← /about.md）
 docs/                     # 本目录（一页纸/简介/架构/接口/配置/部署/UI 指南/检索，共 8 份）
 scripts/                  # 数据初始化、评测、演示、运维脚本
-tests/                    # 1075 条离线测试（1076 收集；缺 node 的环境会多跳 3 条前端渲染断言）
+tests/                    # 1500+ 条离线测试（收集数随用例增长，以 CI 为准；缺 node 的环境会多跳几条前端渲染断言）
 docker/                   # Dockerfile / compose / nginx / initdb
 data/kb/                  # 14 篇知识库（13 篇 SOP + 1 篇历史案例，提交）
 data/eval/                # RAG 评测题集（提交）
