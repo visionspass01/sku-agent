@@ -67,6 +67,22 @@ def _count_tasks(username: str) -> int:
         return len(task_store.list_tasks(session, username=username, limit=200))
 
 
+def _wait_settled(username: str, timeout: float = 10.0) -> None:
+    """等上一个用例派发的后台任务结算完。
+
+    测试库/调度器是 session 级共享的：上一条用例建的任务可能还在跑，
+    结算会改 `used`，让"本次请求不该产生用量"这类断言变成看时序的偶然。
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        with session_scope() as session:
+            statuses = [str(row.status) for row in
+                        task_store.list_tasks(session, username=username, limit=200)]
+        if not any(status in {"queued", "running"} for status in statuses):
+            return
+        time.sleep(0.02)
+
+
 # ---------------------------------------------------------------- 幂等
 def test_idempotency_key_replays_first_response(env):
     headers = login(env)
@@ -309,6 +325,7 @@ def test_failed_request_leaves_no_idempotency_row(env):
     from app.agents_image.store.models import ImageRequest
 
     headers = login(env, "worker2", "hhw222")
+    _wait_settled("worker2")
     _set_quota("worker2", 1)
     failed = env.post("/api/image/tasks",
                       headers={**headers, "Idempotency-Key": "idem-retry-1"},
@@ -325,6 +342,7 @@ def test_failed_request_leaves_no_idempotency_row(env):
 def test_reserved_quota_released_once_when_request_rolls_back(env):
     """建任务事务中途失败（部门越权）→ 回滚撤销预留，预留不得泄漏也不得二次释放。"""
     headers = login(env, "worker2", "hhw222")
+    _wait_settled("worker2")
     _set_quota("worker2", 10)
     before = _quota_row("worker2")
     before_tasks = _count_tasks("worker2")

@@ -207,7 +207,10 @@ def test_recoveries_exhausted_marks_failed_and_releases_quota(env):
                                recoveries=int(get_image_settings().max_recoveries))
 
     generator = LocalGenerator()
-    assert asyncio.run(generator.resume_pending()) == []
+    # 测试库是 session 级共享的：别的用例可能留下"排队中/租约过期"的任务，
+    # 看门狗会顺手把它们也拾起来。这里只断言**本任务**没有被重投。
+    resumed = asyncio.run(generator.resume_pending())
+    assert "20261118000000aa33" not in resumed
     with session_scope() as session:
         task = task_store.get_task(session, "20261118000000aa33")
         status, code = task.status, task.error_code
