@@ -711,10 +711,18 @@ def _cancel_settle(session, state: ImageTaskState, *, attempted: int,
 
 
 async def _plan_policy(state: ImageTaskState):
-    """取中台图位策略（含 copy_table / variant_directions）；不可用同样直接失败（P1-1）。"""
+    """取中台图位策略（含 copy_table / variant_directions）；不可用同样直接失败（P1-1）。
+
+    P1-2（第十轮）：必须带 **category** —— 建任务期（`planning.resolve_request_parameters`）
+    是按 (platform, category) 取策略的；执行期过去只传 platform，等于换了一份参数：
+    ① 若中台按类目返回不同 copy_table，实际出图文案会偏离建任务期口径；
+    ② MCP 读工具按参数缓存，参数不同 → 每个任务都白打一次中台。
+    category 从任务 attrs 取（中台商品属性里带），与创建期同参数。
+    """
     from app.agents_image.sources.product_source import get_catalog
 
-    return await get_catalog().get_plan_policy(platform=state.platform)
+    category = str((state.attrs or {}).get("category") or "").strip()
+    return await get_catalog().get_plan_policy(platform=state.platform, category=category)
 
 
 async def _backfill(state: ImageTaskState, *, outputs_by_slot: list[dict],

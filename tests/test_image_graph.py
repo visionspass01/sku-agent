@@ -133,6 +133,24 @@ def test_planned_image_count_is_single_source_of_truth(image_db):
     assert "IMG_SLOT_MISSING" not in " ".join(state.warnings)
 
 
+def test_plan_policy_uses_task_category(image_db, monkeypatch):
+    """P1-2（第十轮）：执行期取图位策略必须带任务 attrs 的 category（与建任务期同参）。"""
+    from app.agents_image.sources.fake_catalog import FakeCatalog
+
+    seen: dict = {}
+    real = FakeCatalog.get_plan_policy
+
+    async def spy(self, **kwargs):
+        seen.update(kwargs)
+        return await real(self, **kwargs)
+
+    monkeypatch.setattr(FakeCatalog, "get_plan_policy", spy)
+    task_id, _refs = _seed_task(n=1)
+    asyncio.run(execute_task(task_id))
+    assert seen.get("platform") == "淘系"
+    assert seen.get("category") == "女装", "执行期必须带上任务类目（否则策略口径与创建期不一致）"
+
+
 def test_recovery_requeues_stale_task(image_db):
     """看门狗重投 stale queued 任务，并且任务能真正跑完。
 
