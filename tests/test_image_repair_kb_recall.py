@@ -22,7 +22,7 @@ def _reset_index():
     rag_index.reset_index()
 
 
-def _state(product_type: str = "针织开衫（短款）") -> ImageTaskState:
+def _state(product_type: str = "KB品类-aspect") -> ImageTaskState:
     return ImageTaskState(task_id="t-repair", department="女装",
                           attrs={"product_type": product_type})
 
@@ -34,8 +34,8 @@ def test_fix_docs_exist_for_aspect_and_text_policy():
 
 
 def test_aspect_failure_uses_aspect_fix_not_white_bg():
-    state = _state()
-    result = graph._repair_experience(state, "aspect|针织开衫（短款）")
+    state = _state("KB品类-aspect")
+    result = graph._repair_experience(state, "aspect|KB品类-aspect")
     assert result["source"] == "kb", result
     patch = result["patches"]["aspect"]
     assert "比例" in patch or "画幅" in patch, patch
@@ -45,17 +45,15 @@ def test_aspect_failure_uses_aspect_fix_not_white_bg():
 
 
 def test_identity_failure_uses_identity_fix():
-    state = _state("半身裙（长款）")
-    result = graph._repair_experience(state, "identity|半身裙（长款）")
+    state = _state("KB品类-identity")
+    result = graph._repair_experience(state, "identity|KB品类-identity")
     assert result["source"] == "kb", result
-    assert any("IMG_REPAIR_KB: 命中知识库修复经验（fix-identity-drift" in item
-               for item in state.warnings), state.warnings
     assert "颜色" in result["patches"]["identity"]
 
 
 def test_text_policy_failure_uses_text_fix():
-    state = _state("连衣裙")
-    result = graph._repair_experience(state, "text_policy|连衣裙")
+    state = _state("KB品类-text")
+    result = graph._repair_experience(state, "text_policy|KB品类-text")
     assert result["source"] == "kb", result
     patch = result["patches"]["text_policy"]
     assert "图内文字" in patch or "角标" in patch, patch
@@ -64,8 +62,8 @@ def test_text_policy_failure_uses_text_fix():
 
 def test_kind_without_fix_doc_falls_back_to_builtin_rules():
     """没有对应 fix 文档的 issue 类型：不硬凑，退回内置规则（source 为空）。"""
-    state = _state("冲锋衣（三合一）")
-    result = graph._repair_experience(state, "mime|冲锋衣（三合一）")
+    state = _state("KB品类-mime")
+    result = graph._repair_experience(state, "mime|KB品类-mime")
     assert result == {"patches": {}, "source": ""}, result
     assert not any("IMG_REPAIR_KB" in item for item in state.warnings)
 

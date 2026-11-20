@@ -494,3 +494,20 @@ MCP server 现在**不碰任何数据库**：它们是「工具名 → `/api/v1/
 | 收口 | 模型输出一律交给 `schemas.parse_attrs`（容忍 JSON 围栏、schema 不合规退回启发式），`source` 标为 `llm` / `vision` |
 | 降级 | 无 Key / 网络错 / 坏 JSON → 启发式 + `IMG_LLM_PARSE_DEGRADED` / `IMG_VISION_DISABLED` / `IMG_SCHEMA_INVALID`，不阻塞出图 |
 | 用量 | 调用量与 token 进 `image_llm_calls_total` / `image_llm_tokens_total`，五张卡的 `llm_calls` / `llm_tokens` 不再是常量 0 |
+
+---
+
+## v12 接口变化（生图 Agent，第六轮复审修复）
+
+| 编号 | 变化 | 说明 |
+|---|---|---|
+| P0-1 | **MySQL 索引补齐** | `ensure_image_schema` 不再用 `CREATE INDEX IF NOT EXISTS`（MySQL 不支持 → 之前 MySQL 上索引全建不上、`/health.degraded` 永久为真）。改为按方言查已有索引名（SQLite `PRAGMA index_list` / MySQL `information_schema.statistics`）再普通 CREATE；MySQL 1061 / SQLite already exists 视为正常 |
+| P1-1 | **health 不再泄露账号名单** | `/api/image/health` 只返回 `users_without_department` 计数；具体账号走管理员接口 `GET /admin/users` |
+| P1-2 | **视觉解析能读到参考图** | 按 `asset_id → ImageAsset.key` 读字节（过去取 `ref.key`，`RefImage` 无此字段 → 视觉路径 100% 降级）；新增 `IMAGE_VISION_TIMEOUT_SECONDS`（默认 15s） |
+| P1-3 | **LLM 解析真正可达** | 触发改为 `IMAGE_LLM_PARSE_MODE=off\|fallback\|always`（默认 fallback：中台字段不全才解析）；合并时**中台字段优先、模型只补空位**；补全结果写回 `attrs_json` |
+| P1-4 | **KB 修法必须同类** | Critic 失败时检索 `fixes/` 增加 issue 类型相关性匹配（tags/标题/正文）+ `rag_min_score`；没有同类文档就退回内置规则，不注入不相关修法。新增语料 `fixes/aspect-ratio.md`、`fixes/text-layer.md` |
+| P1-5 | **前端失败原因可见** | done 事件按 `error_code → partial message → 输出/预期` 优先级显示，错误码不再被覆盖 |
+| P1-6 | **发起量/成本与使用量同源** | `record_provider_calls` 移到 `settlement`（交付/失败/取消三路径都经过，`settled_at` CAS 保证只记一次）；`/metrics` 与 `image_usage.provider_calls` 口径一致 |
+| P1-7 | **阶段耗时标签修正** | `image_stage_seconds{stage}` 记的是**该阶段自身**耗时（过去错位一格，generate 被算到 critic 名下）；timeline 增 `prev_stage` 字段 |
+
+> P2 级问题不进本轮接口契约，已登记在 `docs/myself/技术债.md`（不在仓库提交范围内）。

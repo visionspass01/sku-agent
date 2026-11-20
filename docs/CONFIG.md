@@ -306,3 +306,21 @@
 | 召回缓存后端 | `REDIS_URL` 为空时是 fakeredis（进程内），多副本各自缓存；`/health.cache_backend` 可见 |
 | 登录限流 | 仍是进程内滑动窗口（`/health.throttle_scope=instance`），多副本各自计数 |
 
+---
+
+## v12 新增/变更配置（生图 Agent，第六轮复审修复）
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `IMAGE_LLM_PARSE_MODE` | `fallback` | 解析触发策略：`off`（从不）/ `fallback`（中台字段不全才解析）/ `always`（总是补一遍）。无论哪种模式，**中台字段都是权威、模型只补空位** |
+| `IMAGE_VISION_TIMEOUT_SECONDS` | `15.0` | 视觉解析请求超时（1..120）。带图 payload 比纯文本慢，5s 的 MCP 默认超时不够 |
+
+### 第六轮行为变化
+
+| 变化 | 说明 |
+|---|---|
+| MySQL 索引补齐 | `ensure_image_schema` 按方言查已有索引名再建（不再用 MySQL 不支持的 `IF NOT EXISTS`）；MySQL 部署不再永久 `degraded` |
+| health 不再泄露账号名单 | `/api/image/health` 只给 `users_without_department` 计数，名单走管理员接口 |
+| 修复经验检索收紧 | Critic 失败时只用**同类** fix 文档（tags 匹配 + `IMAGE_RAG_MIN_SCORE`），否则退回内置规则 |
+| 前端失败可见 | 进度行「错误码 · 输出 X / 预期 Y 张」；错误码不再被输出张数覆盖 |
+
