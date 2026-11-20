@@ -201,8 +201,13 @@ def test_blocked_asset_requires_unblock_before_adopt(env):
 
     before = _cards(env, headers)
     assert env.post(f"{path}/unblock", headers=headers).status_code == 200
-    # 放行只补交付张数，不额外记使用量（unblock 已计入交付）
-    assert _cards(env, headers)["usage_images"] == before["usage_images"]
+    after_unblock = _cards(env, headers)
+    # 放行只补交付张数，不额外记使用量（第三方没有多生成）
+    assert after_unblock["usage_images"] == before["usage_images"]
+    # P1-4（第八轮）：放行也算交付 —— 使用量流水的 agent_passed 必须同步 +1，
+    # 否则卡片「交付张数」(usage.agent_passed) 与任务台账 (images_delivered) 永久对不上。
+    assert after_unblock["agent_passed"] - before["agent_passed"] == 1
+    assert after_unblock["images_delivered"] - before["images_delivered"] == 1
 
     assert env.post(f"{path}/adopt", headers=headers).status_code == 200
     assert _cards(env, headers)["adopted"] - before["adopted"] == 1

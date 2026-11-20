@@ -1082,6 +1082,17 @@ def unblock_asset(task_id: str, asset_id: str, request: Request) -> JSONResponse
                 task_store.update_task(
                     session, task_id, blocked_json=blocked, warnings_json=warnings,
                     delivered_images=int(getattr(task, "delivered_images", 0) or 0) + 1)
+                # P1-4（第八轮）：放行也算"交付"，使用量流水里的 agent_passed 必须同步 +1，
+                # 否则卡片的「交付张数」（usage.agent_passed）与任务台账（delivered_images）
+                # 从此永久对不上，上架率分子也少一张。
+                try:
+                    from app.agents_image.store import usage as usage_store
+
+                    usage_store.shift(session, username=task.username,
+                                      department=task.department, agent_passed=1)
+                except Exception as exc:  # noqa: BLE001 —— 记账失败不影响放行
+                    metrics.record_swallowed("unblock_usage")
+                    logger.warning("人工放行的使用量记账失败：task=%s %s", task_id, exc)
     except ImageError as exc:
         return error_response(exc, trace)
     return JSONResponse(status_code=200, content={"ok": True, "asset_id": asset_id,

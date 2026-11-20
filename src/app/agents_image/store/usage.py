@@ -112,7 +112,7 @@ def shift(session, *, username: str, department: str | None = None,
 
     key = hour_key(now)
     raw = {field: int(deltas.get(field, 0) or 0)
-           for field in ("adopted", "rejected", "reused_adopted")}
+           for field in ("adopted", "rejected", "reused_adopted", "agent_passed")}
     if not any(raw.values()):
         return False
     values = {}
