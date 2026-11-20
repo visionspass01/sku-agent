@@ -110,6 +110,13 @@ def image_health() -> dict:
         # P1-9：召回缓存后端（redis / fakeredis / memory）与登录限流作用域（进程内）
         "cache_backend": _cache_backend(),
         "throttle_scope": "instance",
+        # P2-6（第十轮）：限流/SSE/任务截止/模板加载错误都进了健康位，降级信号集中一处
+        "rate_limit_enabled": bool(getattr(settings, "rate_limit_enabled", True)),
+        "rate_limit_per_minute": int(getattr(settings, "rate_limit_per_minute", 60) or 60),
+        "sse_max_seconds": int(getattr(settings, "sse_max_seconds", 360) or 360),
+        "sse_max_connections": int(getattr(settings, "sse_max_connections", 32) or 32),
+        "task_max_seconds": int(getattr(settings, "task_max_seconds", 360) or 360),
+        "registry_errors": _registry_errors(),
         **_department_health(),
         **_degraded_state(),
         **metrics.snapshot(),
@@ -122,6 +129,16 @@ _DEPT_HEALTH_TTL = 60.0
 
 def reset_department_health_cache() -> None:
     _DEPT_HEALTH_CACHE.clear()
+
+
+def _registry_errors() -> list[str]:
+    """模板/manifest 加载错误（P2-6）：过去只在日志里，健康位看不到。"""
+    try:
+        from app.agents_image.registry import get_registry
+
+        return list(get_registry().errors or [])
+    except Exception:  # noqa: BLE001
+        return []
 
 
 def _department_health() -> dict:
@@ -292,7 +309,10 @@ def _request_fingerprint(body: dict) -> str:
     import hashlib
     import json
 
-    payload = {key: value for key, value in (body or {}).items() if key not in {"trace_id"}}
+    # P2-1（第十轮）：request_id/trace_id 是"键的载体"而不是业务参数——
+    # 同一组参数用 body.request_id 或 Idempotency-Key 头传入属于同一个请求，不能判成"参数不一致"。
+    payload = {key: value for key, value in (body or {}).items()
+               if key not in {"trace_id", "request_id"}}
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str,
                      separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()

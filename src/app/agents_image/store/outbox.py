@@ -37,7 +37,28 @@ def _session():
     return session_scope()
 
 
+def _payload_digest(payload: dict) -> str:
+    import hashlib
+    import json
+
+    raw = json.dumps(payload or {}, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+
+
 def enqueue(session, *, task_id: str, payload: dict, error: str = "") -> ImageOutbox:
+    """入队一条回写补偿。
+
+    P2-8（第十轮）：同一 task 的**同一份 payload** 已在 pending 队列里时不再重复入队
+    （重试任务会再跑一次 backfill，过去会排进第二条重复记录，重放时白打一次中台）。
+    """
+    digest = _payload_digest(payload)
+    existing = session.execute(
+        select(ImageOutbox).where(ImageOutbox.task_id == task_id,
+                                  ImageOutbox.status == "pending")
+    ).scalars().all()
+    for row in existing:
+        if _payload_digest(dict(row.payload_json or {})) == digest:
+            return row
     row = ImageOutbox(task_id=task_id, payload_json=payload or {},
                       status="pending", attempts=0,
                       next_retry_at=dt.datetime.now() + dt.timedelta(seconds=BASE_BACKOFF_SECONDS),

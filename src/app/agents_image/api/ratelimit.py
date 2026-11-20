@@ -29,6 +29,10 @@ class SlidingWindow:
     def allow(self, key: str) -> bool:
         moment = time.monotonic()
         with self._lock:
+            if len(self._events) > 512:        # P2-4：窗口 key 无过期清理，长跑内存会慢慢涨
+                for stale in [name for name, items in self._events.items()
+                              if not items or moment - items[-1] >= self.window]:
+                    self._events.pop(stale, None)
             events = [item for item in self._events.get(key, [])
                       if moment - item < self.window]
             if len(events) >= self.limit:
@@ -74,11 +78,12 @@ def check_rate_limit(username: str | None, scope: str) -> None:
         return
     if _limiter(scope).allow(username or "anonymous"):
         return
+    # P2-4：带 Retry-After（秒），让客户端知道等多久再试
     raise_image(
         "IMG_RATE_LIMITED",
         f"操作过于频繁（{scope}：每分钟最多 "
         f"{int(getattr(settings, 'rate_limit_per_minute', 60) or 60)} 次），请稍后再试",
-        retryable=True)
+        retryable=True, retry_after=_DEFAULT_WINDOW_SECONDS)
 
 
 def reset_rate_limits() -> None:

@@ -51,15 +51,25 @@ def _sse_limit() -> int:
 
 _sse_guard: asyncio.Semaphore | None = None
 _sse_guard_limit = 0
+_sse_guard_loop: object | None = None
 
 
 def _guard() -> asyncio.Semaphore:
-    """SSE 并发连接信号量（P1-6）：每个连接 3s 轮询一次 DB，连接数必须有上限。"""
-    global _sse_guard, _sse_guard_limit
+    """SSE 并发连接信号量（P1-6）：每个连接 3s 轮询一次 DB，连接数必须有上限。
+
+    P2-3（第十轮）：信号量会绑定首次使用的事件循环（`_LoopBoundMixin` 缓存 loop），
+    跨 loop 复用会 RuntimeError。这里按 (limit, loop) 缓存/重建，与
+    `generator/handler._provider_semaphore` 同款处理（多 loop：脚本+服务混跑、测试多 client）。
+    """
+    global _sse_guard, _sse_guard_limit, _sse_guard_loop
     limit = _sse_limit()
-    if _sse_guard is None or _sse_guard_limit != limit:
+    import asyncio as _asyncio
+
+    loop = _asyncio.get_running_loop()
+    if _sse_guard is None or _sse_guard_limit != limit or _sse_guard_loop is not loop:
         _sse_guard = asyncio.Semaphore(limit)
         _sse_guard_limit = limit
+        _sse_guard_loop = loop
     return _sse_guard
 
 
@@ -73,9 +83,10 @@ async def _try_acquire(sem: asyncio.Semaphore) -> bool:
 
 def reset_sse_guard() -> None:
     """测试/热重载用：重建信号量（换事件循环时必须重建）。"""
-    global _sse_guard, _sse_guard_limit
+    global _sse_guard, _sse_guard_limit, _sse_guard_loop
     _sse_guard = None
     _sse_guard_limit = 0
+    _sse_guard_loop = None
 
 
 def _snapshot_payload(task) -> dict:
@@ -148,7 +159,8 @@ async def stream_task(task_id: str, request: Request):
     if not await _try_acquire(guard):
         return error_response(
             ImageError("IMG_RATE_LIMITED",
-                       f"SSE 并发连接已达上限（{_sse_limit()}），请稍后重试"), trace)
+                       f"SSE 并发连接已达上限（{_sse_limit()}），请稍后重试",
+                       extra={"retry_after": 5}), trace)
 
     async def event_stream():
         """薄包装：保证连接结束（正常/超时/客户端断开）一定释放并发槽位。"""

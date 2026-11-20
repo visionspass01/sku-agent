@@ -74,9 +74,18 @@ function authHeaders(extra) {
   return headers;
 }
 
+function newTraceId() {
+  // P2-7（第十轮）：前端也要带 trace，报障时能直接串起服务端日志与任务。
+  if (typeof crypto !== "undefined" && crypto.randomUUID) {
+    return crypto.randomUUID().replace(/-/g, "").slice(0, 12);
+  }
+  return Math.random().toString(16).slice(2, 14);
+}
+
 async function api(path, options) {
   const opts = Object.assign({}, options || {});
   opts.headers = authHeaders(opts.headers);
+  if (!opts.headers["X-Trace-Id"]) opts.headers["X-Trace-Id"] = newTraceId();
   if (opts.json !== undefined) {
     opts.method = opts.method || "POST";
     opts.headers["Content-Type"] = "application/json";
@@ -92,10 +101,12 @@ async function api(path, options) {
   if (!resp.ok) {
     const code = (body && body.error_code) || resp.headers.get("X-Error-Code") || `HTTP ${resp.status}`;
     const detail = (body && (body.detail || body.message)) || resp.statusText || "";
-    const err = new Error(`${code}${detail ? "：" + detail : ""}`);
+    const trace = (body && body.trace_id) || resp.headers.get("X-Trace-Id") || "";
+    const err = new Error(`${code}${detail ? "：" + detail : ""}${trace ? `（trace: ${trace}）` : ""}`);
     err.code = code;
     err.status = resp.status;
     err.retryable = Boolean(body && body.retryable);
+    err.trace = trace;
     throw err;
   }
   return body;

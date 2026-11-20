@@ -82,7 +82,10 @@ class ImageSettings(BaseSettings):
     # 第四轮 P1-5/P2-7：重放占位时长（防并发重发同一批）与已回写记录的保留时长
     outbox_claim_seconds: int = Field(default=120, ge=5, le=3600)
     outbox_keep_hours: int = Field(default=72, ge=1, le=24 * 30)
-    # P2-4（第九轮）：幂等表 image_request 的保留期（done 行）与滞留期（pending 行）
+    # P2-4（第九轮）：幂等表 image_request 的保留期（done 行）与滞留期（pending 行）。
+    # P2-2（第十轮）：调用方契约是"单次生图 API 最多等 360s，超时即失败"——正常客户端不会
+    # 在几十分钟后再用同一个 request_id 重放，72h 的幂等窗口足够覆盖重试/网络抖动场景；
+    # 超出窗口的同 key 请求按"新请求"处理（会在任务台账里留下新的 batch_id，便于对账）。
     request_keep_hours: int = Field(default=72, ge=1, le=24 * 30)
     request_pending_minutes: int = Field(default=60, ge=5, le=24 * 60)
 

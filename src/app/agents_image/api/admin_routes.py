@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 
@@ -85,9 +86,10 @@ def _cards(session, *, runtime: dict, username: str | None = None,
         .where(ImageTask.status == "done", ImageTask.attempts <= 1)).scalar_one() or 0)
     delivered_sum = _sum(ImageTask.delivered_images)
     attempted_sum = _sum(ImageTask.attempted_images)
-    cost_sum = _sum(ImageTask.external_cost_cny)
-    # 第七轮 P1-1：LLM/视觉解析成本单列（生图成本仍是 cost_sum，两者相加才是总成本）
-    llm_cost_sum = _sum(ImageTask.llm_cost_cny)
+    # P2-8（第十轮）：成本一律取**使用量流水**（成功/失败/取消都在结算时记账），
+    # 不再从 image_task 聚合——两张表口径不同（失败任务只有 usage 有成本），双源会对不上账。
+    cost_sum = float(totals.get("cost_cny") or 0.0)
+    llm_cost_sum = float(totals.get("llm_cost_cny") or 0.0)
     total_cost_sum = cost_sum + llm_cost_sum
     cache = runtime.get("rag_cache") or {}
     # 功能8 口径（唯一真相：都在 usage 流水里）
@@ -147,6 +149,7 @@ def _cards(session, *, runtime: dict, username: str | None = None,
         "cost_cny": round(cost_sum, 4),
         "llm_cost_cny": round(llm_cost_sum, 4),
         "cost_total_cny": round(total_cost_sum, 4),
+        "cost_source": "usage",
     }
 
 
@@ -222,12 +225,19 @@ async def admin_metrics(request: Request) -> JSONResponse:
             # P2-2（第九轮）：多表 count + 使用量窗口扫描是**同步** DB 聚合，
             # 放在 async 端点里会阻塞事件循环（面板轮询越频繁越明显）。
             # 丢线程池跑，loop 继续处理其它请求。
-            from app.observability.trace import run_in_trace
+            # P2-5（第十轮）：冷缓存时面板并发刷新会同时打 DB → 单飞（同 key 只算一次）。
+            async def _compute():
+                from app.observability.trace import run_in_trace
 
-            rows, cards = await run_in_trace(
-                _compute_metrics, granularity=granularity, count=count,
-                username=username, department=department, runtime=runtime)
+                return await run_in_trace(
+                    _compute_metrics, granularity=granularity, count=count,
+                    username=username, department=department, runtime=runtime)
+
+            rows, cards = await _metrics_single_flight(cache_key, _compute)
             _metrics_cache_put(cache_key, {"buckets": rows, "cards": cards})
+        # P2-9（第十轮）：缓存命中时 runtime 派生字段（LLM 调用/缓存命中率/在途）必须现算，
+        # 否则面板"现在有多少在跑、多少次 LLM 调用"会滞后到 30s。
+        cards = _with_fresh_runtime(cards, runtime)
         outbox = outbox_store.stats()
     except ImageError as exc:
         return error_response(exc, trace)
@@ -243,6 +253,43 @@ async def admin_metrics(request: Request) -> JSONResponse:
 
 # 指标缓存：进程内、30s（可配）；只缓存"贵的部分"（buckets/cards），在途与 outbox 每次实算
 _METRICS_CACHE: dict[tuple, tuple[float, dict]] = {}
+# P2-5：冷缓存单飞（同 key 并发 miss 只回源一次）
+_METRICS_INFLIGHT: dict[tuple, asyncio.Future] = {}
+
+
+def _with_fresh_runtime(cards: dict, runtime: dict) -> dict:
+    """P2-9：把 runtime 派生字段用**本次**快照覆盖（缓存里的这些字段会过期）。"""
+    counters = dict(runtime.get("counters") or {})
+    cache = dict(runtime.get("rag_cache") or {})
+    fresh = dict(cards)
+    fresh["llm_calls"] = int(counters.get("llm_calls") or 0)
+    if int(counters.get("llm_tokens") or 0):
+        fresh["llm_tokens"] = int(counters["llm_tokens"])
+    fresh["cache_hit_rate"] = cache.get("hit_rate", fresh.get("cache_hit_rate", 0.0))
+    fresh["in_flight_instance"] = int(runtime.get("in_flight") or 0)
+    fresh["in_flight_images"] = int(runtime.get("in_flight") or 0)
+    fresh["provider_in_flight"] = int(runtime.get("provider_in_flight") or 0)
+    return fresh
+
+
+async def _metrics_single_flight(key: tuple, factory):
+    """同 key 的并发 miss 只回源一次；回源失败把异常分发给等待者。"""
+    loop = asyncio.get_running_loop()
+    fut = _METRICS_INFLIGHT.get(key)
+    if fut is not None and not fut.done() and getattr(fut, "_loop", None) is loop:
+        return await fut
+    fut = loop.create_future()
+    _METRICS_INFLIGHT[key] = fut
+    try:
+        value = await factory()
+        fut.set_result(value)
+        return value
+    except BaseException as exc:
+        if not fut.done():
+            fut.set_exception(exc)
+        raise
+    finally:
+        _METRICS_INFLIGHT.pop(key, None)
 
 
 def _compute_metrics(*, granularity: str, count: int, username: str | None,
@@ -288,6 +335,7 @@ def _metrics_cache_put(key: tuple, value: dict) -> None:
 
 def reset_metrics_cache() -> None:
     _METRICS_CACHE.clear()
+    _METRICS_INFLIGHT.clear()
 
 
 @router.get("/admin/tasks")

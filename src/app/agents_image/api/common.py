@@ -18,10 +18,17 @@ def is_terminal(status: str | None) -> bool:
 
 
 def error_response(exc: BaseException, trace_id: str) -> JSONResponse:
-    """统一错误响应：body 带 error_code/trace_id/retryable，头带 X-Error-Code/X-Trace-Id。"""
+    """统一错误响应：body 带 error_code/trace_id/retryable，头带 X-Error-Code/X-Trace-Id。
+
+    P2-4（第十轮）：限流类错误在 `extra.retry_after` 里带等待秒数 → 出 `Retry-After` 头。
+    """
     err = normalize(exc, trace_id)
+    headers = error_headers(err, trace_id)
+    retry_after = (err.extra or {}).get("retry_after")
+    if retry_after is not None:
+        headers["Retry-After"] = str(max(1, int(retry_after)))
     return JSONResponse(status_code=err.status, content=failure_payload(err, trace_id),
-                        headers=error_headers(err, trace_id))
+                        headers=headers)
 
 
 def signed_asset_url(asset_id: str, *, ttl_seconds: int = 300) -> str:
