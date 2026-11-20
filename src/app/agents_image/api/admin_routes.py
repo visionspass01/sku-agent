@@ -94,6 +94,12 @@ def _cards(session, *, runtime: dict, username: str | None = None,
     # 复用图采纳单列（P1-1）：复用图不在使用量分母里，混进分子会让上架率 >100%
     reused_adopted = int(totals.get("reused_adopted") or 0)
     quota_used, quota_limit = _quota_totals(session, department)
+    from app.agents_image.config import get_image_settings
+
+    settings = get_image_settings()
+    cost_budget_enabled = bool(
+        float(getattr(settings, "cost_per_image_cny", 0.0) or 0.0) > 0
+        and float(getattr(settings, "cost_budget_cny", 0.0) or 0.0) > 0)
     return {
         "usage_images": usage_images,
         "provider_calls": provider_calls,
@@ -126,6 +132,8 @@ def _cards(session, *, runtime: dict, username: str | None = None,
         "adopted": adopted,
         "reused_adopted": reused_adopted,
         "rejected": int(totals.get("rejected") or 0),
+        # P0-2：预算闸是否生效（单价或预算为 0 时它等于不存在，面板要能看出来）
+        "cost_budget_enabled": cost_budget_enabled,
         "first_pass_rate": round(first_pass / done_total, 4) if done_total else 0.0,
         "tasks_done": done_total,
         "tasks_failed": failed_total,

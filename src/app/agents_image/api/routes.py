@@ -79,6 +79,12 @@ def image_health() -> dict:
         # P1-7：真正生效的参考图上限（配置上限与 provider 能力取小），创建期按它校验
         "max_refs_effective": effective_max_refs(settings),
         "max_prompt_chars": int(getattr(settings, "max_prompt_chars", 0) or 0),
+        # P0-2：预算闸是否真的生效（单价或预算为 0 时它等于不存在）
+        "cost_price_cny": float(getattr(settings, "cost_per_image_cny", 0.0) or 0.0),
+        "cost_budget_cny": float(getattr(settings, "cost_budget_cny", 0.0) or 0.0),
+        "cost_budget_enabled": bool(
+            float(getattr(settings, "cost_per_image_cny", 0.0) or 0.0) > 0
+            and float(getattr(settings, "cost_budget_cny", 0.0) or 0.0) > 0),
         "max_batch_products": settings.max_batch_products,
         "secret_is_default": settings.secret_is_default,
         "context_batches": _context_batches(),
@@ -296,6 +302,14 @@ async def create_tasks(request: Request) -> JSONResponse:
     settings = get_image_settings()
     try:
         user = require_user(request)
+        # P0-2：真实 provider + 单价 0 → 预算闸（按张数估算）会永远不触发，等于没有护栏。
+        # 这里在**创建期**直接拒绝，而不是等出完图才发现超预算。
+        if str(settings.provider or "").strip().lower() not in {"", "fake"} \
+                and float(getattr(settings, "cost_per_image_cny", 0.0) or 0.0) <= 0:
+            raise ImageError(
+                "IMG_COST_CONFIG_MISSING",
+                "已启用真实生图 provider，但 IMAGE_COST_PER_IMAGE_CNY 未配置（<= 0）："
+                "预算闸会失效；请先配置单张成本（元）再建任务", retryable=False)
         body = await request.json()
         if not isinstance(body, dict):
             raise ImageError("IMG_INPUT_INVALID", "请求体必须是 JSON 对象")

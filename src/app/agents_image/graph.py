@@ -395,6 +395,13 @@ async def execute_task(task_id: str) -> ImageTaskState:
         for item in image_costs:
             external_cost += float(item or 0.0)
         cost = external_cost
+        # P0-2：创建期用的是"按单价估算"，真实计费可能更高 —— 超预算要留痕，不能静默
+        budget = float(getattr(settings, "cost_budget_cny", 0.0) or 0.0)
+        if budget > 0 and cost > budget:
+            state.warnings.append(
+                f"IMG_COST_OVERRUN: 本次真实成本 ¥{round(cost, 4)} 超过预算上限 ¥{budget}"
+                f"（{provider_calls} 次调用 / {attempted} 张）")
+            logger.warning("成本超预算：task=%s cost=%s budget=%s", task_id, cost, budget)
         copy_json = _copy_contract(state)
         task_store.mark_done(session, task_id, attempted=attempted, delivered=delivered,
                              cost=cost, prompt_final=state.prompt_final,
