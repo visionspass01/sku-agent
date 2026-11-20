@@ -142,13 +142,10 @@ def settle_cancel(session, task_id: str, *, attempted: int = 0, provider_calls: 
 
 
 def reset_for_retry(session, task_id: str) -> bool:
-    """重试前把任务重置成"可再次执行"的干净状态（P1-10 / P2-11 / P2-9）。
+    """轻量重置（**已由 `task_store.begin_retry` 取代**，保留给脚本/历史调用）。
 
-    - `recoveries=0`：否则重试后第一次看门狗扫描就会按"重投超限"判失败（P1-10）；
-    - `settled_at=None`：额度会重新预留，重试后的结算必须能再次记账；
-    - 清掉上一轮的 warnings/blocked/reused/listing 与 `started_at`/`copy_json`/
-      `prompt_pack_json`（P2-9）：否则任务详情里还挂着上一轮的时间、文案契约与提示词，
-      重试后的结果看起来"没跑过"。
+    重试现在必须走 CAS（`begin_retry`）：先条件 UPDATE 抢占重试权再预留额度，
+    否则并发重试会各占一份额度、只有一次 claim 成功，多占的额度直到周期 rollover 才释放。
     """
     task = _task_of(session, task_id)
     if task is None:

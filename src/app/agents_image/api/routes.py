@@ -23,6 +23,7 @@ from fastapi.responses import JSONResponse, Response
 from app.agents_image import metrics
 from app.agents_image.api.admin_routes import router as admin_router
 from app.agents_image.api.auth_routes import router as auth_router
+from app.agents_image.api.batch_routes import retry_one as _retry_one
 from app.agents_image.api.batch_routes import router as batch_router
 from app.agents_image.api.common import (
     DEPARTMENTS,
@@ -1138,39 +1139,9 @@ async def retry_task(task_id: str, request: Request) -> JSONResponse:
     trace = trace_id_of(request)
     try:
         user = require_user(request)
-        settings = get_image_settings()
-        from app.agents_image import settlement
-        from app.agents_image.store import quota as quota_store
-
-        with session_scope() as session:
-            task = task_store.get_task(session, task_id)
-            if task is None:
-                raise ImageError("IMG_TASK_NOT_FOUND", f"任务不存在：{task_id}")
-            _ensure_owner(task.username, user, "任务")
-            if task.status not in {"failed", "canceled"}:
-                raise ImageError("IMG_TASK_CONFLICT",
-                                 f"只有 failed / canceled 的任务可以重试（当前 {task.status}）")
-            retries = int(getattr(task, "retries", 0) or 0)
-            if retries >= int(settings.max_task_retries):
-                raise ImageError("IMG_TASK_CONFLICT",
-                                 f"该任务已重试 {retries} 次，达到上限 "
-                                 f"{settings.max_task_retries}；请调整需求后新建任务")
-            planned = int(task.image_count or 0)
-            # 预留与重置在**同一个事务**里：中途失败不会留下"占着额度但没排上队"的半账（P2-14）
-            if not user.is_admin and planned:
-                if not quota_store.reserve(session, task.username, planned):
-                    quota = quota_store.check(session, task.username, planned)
-                    raise ImageError(
-                        "IMG_QUOTA_EXCEEDED",
-                        f"配额不足：本期剩余 {quota['remaining']} 张，重试需要 {planned} 张",
-                        retryable=False)
-            settlement.reset_for_retry(session, task_id)
-            task_store.update_task(session, task_id, retries=retries + 1)
-        try:
-            await get_dispatcher().submit(task_id)
-        except Exception:  # noqa: BLE001 —— 已入库，看门狗会补投
-            logger.warning("重试任务派发失败（保留 queued，由看门狗补投）：%s", task_id)
-        payload = {"task_id": task_id, "status": "queued", "retries": retries + 1}
+        result = await _retry_one(user, task_id)
+        payload = {"task_id": result["task_id"], "status": result["status"],
+                   "retries": result["retries"]}
     except ImageError as exc:
         return error_response(exc, trace)
     except Exception as exc:  # noqa: BLE001

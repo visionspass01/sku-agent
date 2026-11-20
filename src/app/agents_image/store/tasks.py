@@ -153,6 +153,38 @@ def mark_settled(session, task_id: str) -> bool:
     return bool(result.rowcount)
 
 
+RETRYABLE_STATUSES = ("failed", "canceled")
+
+
+def begin_retry(session, task_id: str, *, retries: int) -> bool:
+    """抢占「重试权」并把任务重置成干净的 queued（P1-2，第九轮）。
+
+    为什么必须用**条件 UPDATE**：上一版是「读 status → 判断 → reserve → reset」，
+    两个并发重试请求都能读到 `failed` 并各自 reserve 一份额度；只有一次 claim 会成功，
+    多占的那份额度没有任何路径释放（settle_done 只释放 `planned - charged`），
+    直到周期 rollover 才消失——表现为"配额莫名其妙被占住"，同时 retries 被 +2。
+
+    现在：`UPDATE ... WHERE status IN ('failed','canceled') AND retries = :retries`
+    抢占重试权，成功者才继续 reserve；reserve 失败时整个事务回滚（CAS 一起撤销），
+    不会留下"已重置但没预留"的半账。
+    """
+    result = session.execute(
+        update(ImageTask)
+        .where(ImageTask.task_id == task_id,
+               ImageTask.status.in_(RETRYABLE_STATUSES),
+               ImageTask.retries == int(retries))
+        .values(status="queued", error_code="", error_detail="", finished_at=None,
+                started_at=None, attempts=0, attempted_images=0, delivered_images=0,
+                provider_started_at=None, cancel_requested=False, lease_until=None,
+                recoveries=0, settled_at=None, provider_calls=0,
+                warnings_json=[], blocked_json=[], reused_images=0,
+                copy_json={}, prompt_pack_json=[], listing_status="not_listed",
+                listed_at=None, listing_url="", retries=int(retries) + 1)
+    )
+    session.flush()
+    return bool(result.rowcount)
+
+
 def list_tasks(session, *, username: str | None = None, limit: int = 50,
                status: str | None = None, batch_id: str | None = None,
                offset: int = 0, department: str | None = None) -> list[ImageTask]:

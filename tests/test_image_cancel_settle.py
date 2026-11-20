@@ -93,6 +93,8 @@ def _stub_dispatcher(monkeypatch, submitted: list[str]) -> None:
             return {"ok": True}
 
     monkeypatch.setattr("app.agents_image.api.routes.get_dispatcher", lambda: _Stub())
+    # P1-2（第九轮）：重试逻辑统一走 batch_routes.retry_one，这里把它的派发器也替成桩
+    monkeypatch.setattr("app.agents_image.api.batch_routes.get_dispatcher", lambda: _Stub())
 
 
 def test_cancel_queued_task_releases_reservation(env, monkeypatch):

@@ -55,9 +55,11 @@ async def _cancel_dispatch(task_id: str) -> bool:
 
 
 async def retry_one(user, task_id: str) -> dict:
-    """重试单个任务：重新排队 + 重新预留额度（与被取消/失败的额度释放配对）。"""
-    from app.agents_image import settlement
+    """重试单个任务：CAS 抢占重试权 + 重新预留额度（与被取消/失败的额度释放配对）。
 
+    P1-2（第九轮）：重试权必须用条件 UPDATE 抢（`task_store.begin_retry`），
+    否则两个并发重试都会各 reserve 一份、只有一次 claim 成功，多占的额度永远不释放。
+    """
     settings = get_image_settings()
     with session_scope() as session:
         task = task_store.get_task(session, task_id)
@@ -73,15 +75,18 @@ async def retry_one(user, task_id: str) -> dict:
             raise ImageError("IMG_TASK_CONFLICT",
                              f"该任务已重试 {retries} 次，达到上限 {settings.max_task_retries}")
         planned = int(task.image_count or 0)
-        # 预留 + 重置同一事务（P2-14）；重置会清 recoveries/settled_at/warnings/blocked/listing
-        if not user.is_admin and planned and not quota_store.reserve(session, task.username,
-                                                                   planned):
-            quota = quota_store.check(session, task.username, planned)
+        username = task.username
+        # P1-2：先用条件 UPDATE 抢重试权（同时清 settled_at/租约/告警/上架等）。
+        # 抢不到说明别的请求已经重置过它（状态/重试次数已变），直接 409。
+        if not task_store.begin_retry(session, task_id, retries=retries):
+            raise ImageError("IMG_TASK_CONFLICT",
+                             "任务状态已变化（可能已被其它请求重试），请刷新后重试")
+        # 预留与重置同一事务：reserve 失败会抛错 → 整个事务回滚（重试权一起撤销）
+        if not user.is_admin and planned and not quota_store.reserve(session, username, planned):
+            quota = quota_store.check(session, username, planned)
             raise ImageError("IMG_QUOTA_EXCEEDED",
                              f"配额不足：本期剩余 {quota['remaining']} 张，重试需要 {planned} 张",
                              retryable=False)
-        settlement.reset_for_retry(session, task_id)
-        task_store.update_task(session, task_id, retries=retries + 1)
     try:
         await get_dispatcher().submit(task_id)
     except Exception:  # noqa: BLE001 —— 已入库，看门狗会补投
