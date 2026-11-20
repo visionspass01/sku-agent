@@ -90,7 +90,8 @@ def merge_warnings(session, task_id: str, warnings: list[str] | None) -> list[st
 def mark_done(session, task_id: str, *, attempted: int, delivered: int, cost: float,
               prompt_final: str = "", prompt_pack: list[dict] | None = None,
               slots: list[dict] | None = None, backfill_status: str | None = None,
-              attempts: int | None = None, external_cost: float | None = None) -> None:
+              attempts: int | None = None, external_cost: float | None = None,
+              llm_cost: float | None = None) -> None:
     fields: dict = dict(status="done", finished_at=dt.datetime.now(),
                         attempted_images=attempted, delivered_images=delivered, cost_cny=cost,
                         prompt_final=prompt_final,
@@ -99,6 +100,8 @@ def mark_done(session, task_id: str, *, attempted: int, delivered: int, cost: fl
                         lease_until=None)   # 终态释放认领，避免看门狗/重试被 claim 拦住
     if external_cost is not None:
         fields["external_cost_cny"] = float(external_cost)
+    if llm_cost is not None:
+        fields["llm_cost_cny"] = float(llm_cost)
     if backfill_status:
         fields["backfill_status"] = backfill_status
     if attempts is not None:

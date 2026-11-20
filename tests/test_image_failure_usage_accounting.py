@@ -90,7 +90,8 @@ def test_handler_carries_generated_and_cost_on_failure(env, monkeypatch):
     with pytest.raises(ImageError) as caught:
         asyncio.run(generator_handler.run(_payload(slots=2)))
     stats = generator_handler.failure_stats_of(caught.value)
-    assert stats == {"provider_calls": 2, "generated": 1, "cost_cny": pytest.approx(0.4)}
+    assert stats == {"provider_calls": 2, "generated": 1, "cost_cny": pytest.approx(0.4),
+                     "llm_cost_cny": 0.0}
 
 
 # ---------------------------------------------------------------- graph 层
@@ -115,7 +116,8 @@ def test_graph_merges_prior_attempts_into_failure_stats(env, monkeypatch):
         asyncio.run(graph._generate_or_attach_partial(
             _Settings(), [], drafts, attempted=2, spent=0.3, provider_calls=2))
     stats = graph.generator_handler.failure_stats_of(caught.value)
-    assert stats == {"provider_calls": 3, "generated": 3, "cost_cny": pytest.approx(0.7)}
+    assert stats == {"provider_calls": 3, "generated": 3, "cost_cny": pytest.approx(0.7),
+                     "llm_cost_cny": 0.0}
 
 
 # ---------------------------------------------------------------- 端到端

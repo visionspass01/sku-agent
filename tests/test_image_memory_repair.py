@@ -257,9 +257,15 @@ def test_repair_is_reused_on_next_same_signature_failure(env, monkeypatch, tmp_p
 
 
 def test_kb_fix_is_used_when_memory_misses(env, monkeypatch):
-    """没有历史修法时退回 KB 的 `fixes/` 语料（P1-3）。"""
+    """没有历史修法时退回 KB 的 `fixes/` 语料（P1-3）。
+
+    本文件的 env 为了测记忆默认关了 RAG（P1-3 第七轮起开关对记忆检索之外的 KB 检索
+    同样生效），这个用例要验证 KB 兜底，所以显式把开关打开。
+    """
     from app.agents_image import graph
 
+    monkeypatch.setenv("IMAGE_RAG_ENABLED", "true")
+    reset_image_settings()
     state = ImageTaskState(task_id="t-kb", department="女装",
                            attrs={"product_type": "KB品类-q3"})
     result = graph._repair_experience(state, "aspect|KB品类-q3")

@@ -86,6 +86,9 @@ def _cards(session, *, runtime: dict, username: str | None = None,
     delivered_sum = _sum(ImageTask.delivered_images)
     attempted_sum = _sum(ImageTask.attempted_images)
     cost_sum = _sum(ImageTask.external_cost_cny)
+    # 第七轮 P1-1：LLM/视觉解析成本单列（生图成本仍是 cost_sum，两者相加才是总成本）
+    llm_cost_sum = _sum(ImageTask.llm_cost_cny)
+    total_cost_sum = cost_sum + llm_cost_sum
     cache = runtime.get("rag_cache") or {}
     # 功能8 口径（唯一真相：都在 usage 流水里）
     usage_images = int(totals.get("images") or 0)          # 使用量：第三方成功生成张数
@@ -120,7 +123,7 @@ def _cards(session, *, runtime: dict, username: str | None = None,
         # 在途以 DB 为准（跨副本一致）；本实例的在途单独给，避免双计数
         "in_flight": running_db,
         "in_flight_instance": int(runtime.get("in_flight") or 0),
-        "cost_per_image": (round(cost_sum / usage_images, 4) if usage_images else 0.0),
+        "cost_per_image": (round(total_cost_sum / usage_images, 4) if usage_images else 0.0),
         "cache_hit_rate": cache.get("hit_rate", 0.0),
         # 4.4/P1-7：LLM 用量改真实值（过去常量 0），来自进程内 counters（/api/image/metrics 同源）
         "llm_calls": int((runtime.get("counters") or {}).get("llm_calls") or 0),
@@ -140,7 +143,10 @@ def _cards(session, *, runtime: dict, username: str | None = None,
         "first_pass_rate": round(first_pass / done_total, 4) if done_total else 0.0,
         "tasks_done": done_total,
         "tasks_failed": failed_total,
+        # 成本三列（P1-1）：生图 / LLM / 合计（"哪条链路在烧钱"必须能分开看）
         "cost_cny": round(cost_sum, 4),
+        "llm_cost_cny": round(llm_cost_sum, 4),
+        "cost_total_cny": round(total_cost_sum, 4),
     }
 
 
@@ -336,6 +342,10 @@ def admin_task_detail(task_id: str, request: Request) -> JSONResponse:
                 "prompt_final": task.prompt_final, "aspect": task.aspect, "n": task.n,
                 "attempted_images": task.attempted_images,
                 "cost_cny": task.cost_cny,
+                # P1-1：LLM/视觉解析成本与总成本（生图成本仍看 cost_cny/external）
+                "llm_cost_cny": round(float(getattr(task, "llm_cost_cny", 0.0) or 0.0), 6),
+                "cost_total_cny": round(float(task.cost_cny or 0.0)
+                                        + float(getattr(task, "llm_cost_cny", 0.0) or 0.0), 6),
                 "error_code": task.error_code, "error_detail": task.error_detail,
                 "backfill_status": task.backfill_status,
                 "listing_status": task.listing_status,

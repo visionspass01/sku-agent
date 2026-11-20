@@ -89,13 +89,14 @@ def _extra_dict(exc: BaseException) -> dict | None:
 
 
 def attach_failure_stats(exc: BaseException, *, provider_calls: int = 0,
-                         generated: int = 0, cost_cny: float = 0.0) -> None:
+                         generated: int = 0, cost_cny: float = 0.0,
+                         llm_cost_cny: float = 0.0) -> None:
     """把失败时**已经真实发生**的发起量/生成张数/成本挂到异常上（第七轮 P1-2）。
 
     只有 `provider_calls` 是不够的：provider 跑到第 N 张失败时，前 N-1 张已经生成、
     已经计费。若只带发起量不带张数与成本，结算会记成「attempted=0、成本 0」，
     使用量/成本口径就被系统性低估。这里**写绝对值**（不是累加），调用方自己先把
-    前几轮/本次的增量加好。
+    前几轮/本次的增量加好。`llm_cost_cny` 是理解/解析阶段已经花掉的 LLM 成本（P1-1）。
     """
     extra = _extra_dict(exc)
     if extra is None:
@@ -103,13 +104,14 @@ def attach_failure_stats(exc: BaseException, *, provider_calls: int = 0,
     extra["provider_calls"] = max(0, int(provider_calls or 0))
     extra["generated"] = max(0, int(generated or 0))
     extra["cost_cny"] = max(0.0, float(cost_cny or 0.0))
+    extra["llm_cost_cny"] = max(0.0, float(llm_cost_cny or 0.0))
 
 
 def failure_stats_of(exc: BaseException) -> dict:
     """读回 `attach_failure_stats` 挂上去的失败统计（缺省全 0）。"""
     extra = getattr(exc, "extra", None)
     if not isinstance(extra, dict):
-        return {"provider_calls": 0, "generated": 0, "cost_cny": 0.0}
+        return {"provider_calls": 0, "generated": 0, "cost_cny": 0.0, "llm_cost_cny": 0.0}
 
     def _int(key: str) -> int:
         try:
@@ -117,12 +119,14 @@ def failure_stats_of(exc: BaseException) -> dict:
         except (TypeError, ValueError):
             return 0
 
-    try:
-        cost = max(0.0, float(extra.get("cost_cny") or 0.0))
-    except (TypeError, ValueError):
-        cost = 0.0
+    def _float(key: str) -> float:
+        try:
+            return max(0.0, float(extra.get(key) or 0.0))
+        except (TypeError, ValueError):
+            return 0.0
+
     return {"provider_calls": _int("provider_calls"), "generated": _int("generated"),
-            "cost_cny": cost}
+            "cost_cny": _float("cost_cny"), "llm_cost_cny": _float("llm_cost_cny")}
 
 
 def _provider_calls_of(exc: BaseException) -> int:

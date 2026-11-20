@@ -56,6 +56,8 @@ class ImageTask(Base):
     delivered_images: Mapped[int] = mapped_column(Integer, default=0)
     cost_cny: Mapped[float] = mapped_column(default=0.0)
     external_cost_cny: Mapped[float] = mapped_column(default=0.0)  # 第三方 API 真实计费累计
+    # 第七轮 P1-1：LLM/视觉解析成本（元，按 token 单价估算），与生图成本分开记
+    llm_cost_cny: Mapped[float] = mapped_column(default=0.0)
     error_code: Mapped[str] = mapped_column(String(48), default="")
     error_detail: Mapped[str] = mapped_column(Text, default="")
     mcp_degraded: Mapped[bool] = mapped_column(default=False)   # 仅历史兼容，v6 起恒为 False
@@ -247,6 +249,8 @@ class ImageUsage(Base):
     failed: Mapped[int] = mapped_column(Integer, default=0)
     tokens: Mapped[int] = mapped_column(Integer, default=0)
     cost_cny: Mapped[float] = mapped_column(default=0.0)
+    # 第七轮 P1-1：LLM/视觉解析成本单列（生图成本仍在 cost_cny，两者相加才是总成本）
+    llm_cost_cny: Mapped[float] = mapped_column(default=0.0)
     updated_at: Mapped[dt.datetime] = mapped_column(DateTime, default=dt.datetime.now)
 
 

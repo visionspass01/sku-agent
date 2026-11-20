@@ -78,16 +78,19 @@ class LocalGenerator:
                 calls = stats["provider_calls"]
                 generated = stats["generated"]
                 spent = stats["cost_cny"]
+                llm_spent = stats["llm_cost_cny"]
                 with session_scope() as session:
                     task_store.mark_failed(session, task_id, code=err.code, detail=err.detail)
-                    if calls or generated or spent:
+                    if calls or generated or spent or llm_spent:
                         task_store.update_task(session, task_id, provider_calls=calls,
                                                attempted_images=generated,
-                                               external_cost_cny=spent)
+                                               external_cost_cny=spent,
+                                               llm_cost_cny=llm_spent)
                     # 释放预留 + 记失败使用量（图已经生成过，钱已经花掉）；
                     # 若 graph 内部已经结算过（如全被门禁拦下），这里会被 settled_at 拦掉
                     settlement.settle_cancel(session, task_id, attempted=generated,
-                                             provider_calls=calls, cost=spent)
+                                             provider_calls=calls, cost=spent,
+                                             llm_cost=llm_spent)
             finally:
                 self._in_flight -= 1
                 self._tasks.pop(task_id, None)

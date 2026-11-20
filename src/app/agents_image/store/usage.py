@@ -22,7 +22,8 @@ def hour_key(now: dt.datetime | None = None) -> str:
 
 def record(session, *, username: str, department: str | None = None,
            delivered: int = 0, attempted: int = 0, tasks: int = 0, failed: int = 0,
-           tokens: int = 0, cost: float = 0.0, now: dt.datetime | None = None,
+           tokens: int = 0, cost: float = 0.0, llm_cost: float = 0.0,
+           now: dt.datetime | None = None,
            **kwargs: int) -> ImageUsage:
     """累加当前小时的计数（同一人同一小时只有一行）。
 
@@ -51,6 +52,7 @@ def record(session, *, username: str, department: str | None = None,
         .values(**{field: getattr(ImageUsage, field) + value
                    for field, value in increments.items() if value},
                 cost_cny=ImageUsage.cost_cny + max(0.0, float(cost)),
+                llm_cost_cny=ImageUsage.llm_cost_cny + max(0.0, float(llm_cost)),
                 updated_at=dt.datetime.now())
     )
     if updated.rowcount:
@@ -68,7 +70,8 @@ def record(session, *, username: str, department: str | None = None,
                      tasks=increments["tasks"], failed=increments["failed"],
                      tokens=increments["tokens"], adopted=increments["adopted"],
                      reused_adopted=increments["reused_adopted"],
-                     rejected=increments["rejected"], cost_cny=max(0.0, float(cost)))
+                     rejected=increments["rejected"], cost_cny=max(0.0, float(cost)),
+                     llm_cost_cny=max(0.0, float(llm_cost)))
     session.add(row)
     try:
         session.flush()
@@ -82,6 +85,7 @@ def record(session, *, username: str, department: str | None = None,
             .values(**{field: getattr(ImageUsage, field) + value
                        for field, value in increments.items() if value},
                     cost_cny=ImageUsage.cost_cny + max(0.0, float(cost)),
+                    llm_cost_cny=ImageUsage.llm_cost_cny + max(0.0, float(llm_cost)),
                     updated_at=dt.datetime.now())
         )
         session.flush()
@@ -211,7 +215,7 @@ def buckets(session, *, granularity: str = "day", count: int = 30,
         select(ImageUsage.username, ImageUsage.department, ImageUsage.period_key,
                ImageUsage.images, ImageUsage.images_attempted, ImageUsage.provider_calls,
                ImageUsage.agent_passed, ImageUsage.tasks, ImageUsage.failed,
-               ImageUsage.cost_cny)
+               ImageUsage.cost_cny, ImageUsage.llm_cost_cny)
         .where(ImageUsage.granularity == "hour", ImageUsage.period_key >= window_start)
     )
     if username:
@@ -223,6 +227,7 @@ def buckets(session, *, granularity: str = "day", count: int = 30,
     buckets: dict[str, dict] = {key: {"key": key, "images": 0, "images_attempted": 0,
                                       "provider_calls": 0, "agent_passed": 0,
                                       "tasks": 0, "failed": 0, "cost_cny": 0.0,
+                                      "llm_cost_cny": 0.0,
                                       "by_user": {}} for key in keys}
     for row in rows:
         moment_of_row = _row_moment(row.period_key or "")
@@ -243,6 +248,8 @@ def buckets(session, *, granularity: str = "day", count: int = 30,
         bucket["tasks"] += int(row.tasks or 0)
         bucket["failed"] += int(row.failed or 0)
         bucket["cost_cny"] = round(bucket["cost_cny"] + float(row.cost_cny or 0.0), 4)
+        bucket["llm_cost_cny"] = round(
+            bucket["llm_cost_cny"] + float(getattr(row, "llm_cost_cny", 0.0) or 0.0), 4)
         user = bucket["by_user"].setdefault(row.username, {"images": 0, "tasks": 0,
                                                            "images_attempted": 0,
                                                            "provider_calls": 0,
@@ -269,6 +276,8 @@ def totals(session, *, username: str | None = None,
         "tasks": sum(int(row.tasks or 0) for row in rows),
         "failed": sum(int(row.failed or 0) for row in rows),
         "cost_cny": round(sum(float(row.cost_cny or 0.0) for row in rows), 4),
+        "llm_cost_cny": round(sum(float(getattr(row, "llm_cost_cny", 0.0) or 0.0)
+                                  for row in rows), 4),
         "tokens": sum(int(row.tokens or 0) for row in rows),
         "adopted": sum(int(row.adopted or 0) for row in rows),
         "reused_adopted": sum(int(getattr(row, "reused_adopted", 0) or 0) for row in rows),

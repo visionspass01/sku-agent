@@ -1194,6 +1194,10 @@ def get_task(task_id: str, request: Request) -> JSONResponse:
                 "attempted_images": task.attempted_images,
                 "delivered_images": task.delivered_images,
                 "cost_cny": task.cost_cny, "error_code": task.error_code,
+                # P1-1：LLM/视觉解析成本单列（详情页与卡片同口径）
+                "llm_cost_cny": round(float(getattr(task, "llm_cost_cny", 0.0) or 0.0), 6),
+                "cost_total_cny": round(float(task.cost_cny or 0.0)
+                                        + float(getattr(task, "llm_cost_cny", 0.0) or 0.0), 6),
                 "error_detail": task.error_detail, "trace_id": task.trace_id,
                 "backfill_status": task.backfill_status,
                 "listing_status": task.listing_status,

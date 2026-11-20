@@ -67,7 +67,8 @@ def _write_warnings(session, task_id: str, warnings: list[str] | None) -> None:
 
 
 def settle_done(session, task_id: str, *, delivered: int, attempted: int, cost: float,
-                provider_calls: int = 0, warnings: list[str] | None = None) -> dict:
+                provider_calls: int = 0, warnings: list[str] | None = None,
+                llm_cost: float = 0.0) -> dict:
     """交付结算：把使用量占成 used，多预留的释放；记使用量流水；写告警。
 
     返回 `{"settled": bool, "charged": int}`：`settled=False` 表示这笔任务已经被别的路径
@@ -93,7 +94,8 @@ def settle_done(session, task_id: str, *, delivered: int, attempted: int, cost: 
         quota_store.release(session, username, max(0, planned - charged))
     usage_store.record(session, username=username, department=task.department,
                        delivered=attempted, attempted=attempted, tasks=1, cost=cost,
-                       provider_calls=provider_calls, agent_passed=delivered)
+                       llm_cost=llm_cost, provider_calls=provider_calls,
+                       agent_passed=delivered)
     # P1-6（第六轮）：发起量/真实成本与使用量流水**同源一处记账**，
     # 否则 provider 失败（没进 graph 结算）这条路径的 /metrics 会漏计。
     _record_provider_metrics(provider_calls, cost)
@@ -102,7 +104,8 @@ def settle_done(session, task_id: str, *, delivered: int, attempted: int, cost: 
 
 
 def settle_cancel(session, task_id: str, *, attempted: int = 0, provider_calls: int = 0,
-                  cost: float = 0.0, warnings: list[str] | None = None,
+                  cost: float = 0.0, llm_cost: float = 0.0,
+                  warnings: list[str] | None = None,
                   code: str = "", detail: str = "", mark_canceled: bool = False) -> bool:
     """取消/失败结算：额度全退，使用量/成本照记（钱已经花掉）。
 
@@ -125,7 +128,7 @@ def settle_cancel(session, task_id: str, *, attempted: int = 0, provider_calls: 
         quota_store.release(session, task.username, planned)
     usage_store.record(session, username=task.username, department=task.department,
                        failed=1, tasks=1, attempted=attempted, delivered=attempted,
-                       provider_calls=provider_calls, cost=cost)
+                       provider_calls=provider_calls, cost=cost, llm_cost=llm_cost)
     _record_provider_metrics(provider_calls, cost)
     if mark_canceled:
         task_store.update_task(session, task_id, status="canceled",

@@ -371,6 +371,23 @@ def record_usage(calls: int = 1, input_tokens: int = 0, output_tokens: int = 0,
                      department=department, source=source)
 
 
+def estimate_cost(input_tokens: int, output_tokens: int) -> float:
+    """按 LLM 单价（元/百万 token）估算一次调用的成本（元）。
+
+    与 `LLMClient.cost()` 同一套单价口径（`LLM_PRICE_INPUT/LLM_PRICE_OUTPUT`）；
+    图像 Agent 用它把解析/视觉调用的成本记进任务与使用量台账（第七轮 P1-1），
+    避免"生图有成本、LLM 成本恒 0"的两套口径。单价读不到就返回 0，不臆造数字。
+    """
+    try:
+        settings = get_settings()
+        price_in = float(getattr(settings, "llm_price_input", 0.0) or 0.0)
+        price_out = float(getattr(settings, "llm_price_output", 0.0) or 0.0)
+        return round((int(input_tokens or 0) / 1_000_000) * price_in
+                     + (int(output_tokens or 0) / 1_000_000) * price_out, 6)
+    except Exception:  # noqa: BLE001 —— 单价读不到按 0 记
+        return 0.0
+
+
 def reset_llm() -> None:
     global _llm
     _llm = None

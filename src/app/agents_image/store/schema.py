@@ -25,6 +25,8 @@ _COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("image_task", "image_count", "INTEGER DEFAULT 6"),
     ("image_task", "copy_json", "JSON"),
     ("image_task", "external_cost_cny", "FLOAT DEFAULT 0"),
+    # 第七轮 P1-1：LLM/视觉解析成本（元）；与生图成本分列，总成本 = 两者相加
+    ("image_task", "llm_cost_cny", "FLOAT DEFAULT 0"),
     ("image_task", "provider_started_at", "DATETIME"),
     ("image_task", "cancel_requested", "BOOLEAN DEFAULT 0"),
     ("image_task", "base_task_id", "VARCHAR(32)"),
@@ -35,6 +37,8 @@ _COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("image_request", "status", "VARCHAR(16) DEFAULT 'pending'"),
     ("image_usage", "provider_calls", "INTEGER DEFAULT 0"),
     ("image_usage", "agent_passed", "INTEGER DEFAULT 0"),
+    # 第七轮 P1-1：使用量流水里的 LLM 成本（与生图成本 cost_cny 分开记）
+    ("image_usage", "llm_cost_cny", "FLOAT DEFAULT 0"),
     ("image_task", "warnings_json", "JSON"),
     ("image_task", "blocked_json", "JSON"),
     ("image_task", "retries", "INTEGER DEFAULT 0"),

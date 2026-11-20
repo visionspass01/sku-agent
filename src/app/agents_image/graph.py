@@ -145,7 +145,8 @@ def _recall_for_slots(state: ImageTaskState, settings) -> dict[int, list[str]]:
 
 async def _generate_or_attach_partial(settings, refs: list[dict], drafts,
                                       *, attempted: int, spent: float,
-                                      provider_calls: int) -> dict:
+                                      provider_calls: int,
+                                      llm_cost: float = 0.0) -> dict:
     """调生图 provider；失败时把**前几轮已发生**的张数/成本/发起量挂到异常上（第七轮 P1-2）。
 
     `handler.run` 只知道自己这一次调用里已经生成了多少；重试轮次（第 2 轮失败）与前几轮
@@ -167,7 +168,8 @@ async def _generate_or_attach_partial(settings, refs: list[dict], drafts,
         generator_handler.attach_failure_stats(
             exc, provider_calls=provider_calls + stats["provider_calls"],
             generated=attempted + stats["generated"],
-            cost_cny=spent + stats["cost_cny"])
+            cost_cny=spent + stats["cost_cny"],
+            llm_cost_cny=llm_cost + stats["llm_cost_cny"])
         raise
 
 
@@ -334,7 +336,9 @@ async def execute_task(task_id: str) -> ImageTaskState:
                                                    attempted=attempted,
                                                    spent=sum(float(item or 0.0)
                                                              for item in image_costs),
-                                                   provider_calls=provider_calls)
+                                                   provider_calls=provider_calls,
+                                                   llm_cost=float(getattr(state, "llm_cost_cny",
+                                                                          0.0) or 0.0))
         image_costs = [float(slot.get("cost_cny") or 0.0)
                        for slot in (result.get("slots") or [])]
         images = _collect_images(result)
@@ -357,7 +361,8 @@ async def execute_task(task_id: str) -> ImageTaskState:
             with session_scope() as session:
                 _cancel_settle(session, state, attempted=attempted,
                                provider_calls=provider_calls,
-                               cost=sum(float(item or 0.0) for item in image_costs))
+                               cost=sum(float(item or 0.0) for item in image_costs),
+                               llm_cost=float(getattr(state, "llm_cost_cny", 0.0) or 0.0))
             raise ImageError("IMG_CRITIC_FAILED",
                              f"评审未通过（第 {attempt} 轮，score={critic.score}）："
                              f"{'；'.join(critic.issues[:3])}")
@@ -405,7 +410,8 @@ async def execute_task(task_id: str) -> ImageTaskState:
             spent = sum(float(item or 0.0) for item in image_costs)
             if getattr(task, "settled_at", None) is None:
                 _cancel_settle(session, state, attempted=attempted,
-                               provider_calls=provider_calls, cost=spent)
+                               provider_calls=provider_calls, cost=spent,
+                               llm_cost=float(getattr(state, "llm_cost_cny", 0.0) or 0.0))
                 task_store.update_task(session, task_id, attempted_images=attempted,
                                        provider_calls=provider_calls)
             else:
@@ -426,7 +432,8 @@ async def execute_task(task_id: str) -> ImageTaskState:
                                    error_detail="已提交生图模型，结果被丢弃（用户取消）")
             _cancel_settle(session, state, attempted=attempted,
                            provider_calls=provider_calls,
-                           cost=sum(float(item or 0.0) for item in image_costs))
+                           cost=sum(float(item or 0.0) for item in image_costs),
+                           llm_cost=float(getattr(state, "llm_cost_cny", 0.0) or 0.0))
             metrics.record_task_failed()
             state.touch("canceled", attempted=attempted)
             return state
@@ -511,7 +518,8 @@ async def execute_task(task_id: str) -> ImageTaskState:
             # 全被门禁拦下 = 失败，但 provider 已经出过图：使用量/成本照记、额度退回（只结算一次）
             _cancel_settle(session, state, attempted=attempted,
                            provider_calls=provider_calls,
-                           cost=sum(float(item or 0.0) for item in image_costs))
+                           cost=sum(float(item or 0.0) for item in image_costs),
+                           llm_cost=float(getattr(state, "llm_cost_cny", 0.0) or 0.0))
             raise ImageError("IMG_CONTENT_BLOCKED", f"所有出图都未通过平台像素门禁：{reasons}")
         # 部分成功（第三轮 P1-1）：交付张数少于计划时，必须说清"预期 X 张、输出 Y 张"
         expected = int(state.count or 0) or len(current)
@@ -526,30 +534,34 @@ async def execute_task(task_id: str) -> ImageTaskState:
             metrics.record_partial_delivery()
             logger.warning("部分交付：task=%s expected=%s delivered=%s missing=%s",
                            task_id, expected, delivered, missing)
-        # 成本口径（P0-5）：一律用 **provider 返回的真实计费**，不再用配置单价估
+        # 成本口径（P0-5/P1-1）：生图用 provider 返回的真实计费；LLM/视觉解析按 token 单价估算，
+        # 两者相加才是本次任务的总成本（过去 LLM 成本完全不进台账，预算闸门对模型解析等于不存在）
         for item in image_costs:
             external_cost += float(item or 0.0)
-        cost = external_cost
+        llm_cost = float(getattr(state, "llm_cost_cny", 0.0) or 0.0)
+        cost = external_cost + llm_cost
         # P0-2：创建期用的是"按单价估算"，真实计费可能更高 —— 超预算要留痕，不能静默
         budget = float(getattr(settings, "cost_budget_cny", 0.0) or 0.0)
         if budget > 0 and cost > budget:
             state.warnings.append(
-                f"IMG_COST_OVERRUN: 本次真实成本 ¥{round(cost, 4)} 超过预算上限 ¥{budget}"
-                f"（{provider_calls} 次调用 / {attempted} 张）")
+                f"IMG_COST_OVERRUN: 本次真实成本 ¥{round(cost, 4)}"
+                f"（生图 ¥{round(external_cost, 4)} + LLM ¥{round(llm_cost, 4)}）"
+                f"超过预算上限 ¥{budget}（{provider_calls} 次调用 / {attempted} 张）")
             logger.warning("成本超预算：task=%s cost=%s budget=%s", task_id, cost, budget)
         copy_json = _copy_contract(state)
         task_store.mark_done(session, task_id, attempted=attempted, delivered=delivered,
-                             cost=cost, prompt_final=state.prompt_final,
+                             cost=external_cost, prompt_final=state.prompt_final,
                              prompt_pack=[draft.model_dump() for draft in state.prompt_pack],
                              attempts=state.attempt, external_cost=external_cost,
+                             llm_cost=llm_cost,
                              slots=[slot.model_dump() if hasattr(slot, "model_dump") else dict(slot)
                                     for slot in (state.slots or [])])
         task_store.update_task(session, task_id, copy_json=copy_json,
                                provider_calls=provider_calls,
                                blocked_json=list(blocked or []))
         # 结算里会追加对账告警（IMG_QUOTA_SETTLE_MISMATCH），所以告警的落库放到结算之后
-        _settle(session, state, delivered=delivered, attempted=attempted, cost=cost,
-                provider_calls=provider_calls)
+        _settle(session, state, delivered=delivered, attempted=attempted, cost=external_cost,
+                provider_calls=provider_calls, llm_cost=llm_cost)
     metrics.record_task_done(delivered=delivered, attempted=attempted)
     # 发起量/成本由结算统一记（settlement._record_provider_metrics），这里不再重复计数
     state.attempted_images = attempted
@@ -611,23 +623,24 @@ def _copy_contract(state: ImageTaskState) -> dict:
 
 
 def _settle(session, state: ImageTaskState, *, delivered: int, attempted: int,
-            cost: float, provider_calls: int = 0) -> None:
+            cost: float, provider_calls: int = 0, llm_cost: float = 0.0) -> None:
     """交付结算（委托 `settlement.settle_done`）：使用量占额度、多预留释放、写告警。"""
     from app.agents_image import settlement
 
     settlement.settle_done(session, state.task_id, delivered=delivered,
-                           attempted=attempted, cost=cost,
+                           attempted=attempted, cost=cost, llm_cost=llm_cost,
                            provider_calls=provider_calls, warnings=state.warnings)
 
 
 def _cancel_settle(session, state: ImageTaskState, *, attempted: int,
-                   provider_calls: int = 0, cost: float = 0.0) -> None:
+                   provider_calls: int = 0, cost: float = 0.0,
+                   llm_cost: float = 0.0) -> None:
     """取消/失败结算（委托 `settlement.settle_cancel`）：额度全退，使用量/成本照记。"""
     from app.agents_image import settlement
 
     settlement.settle_cancel(session, state.task_id, attempted=attempted,
                              provider_calls=provider_calls, cost=cost,
-                             warnings=state.warnings)
+                             llm_cost=llm_cost, warnings=state.warnings)
     # 发起量/成本由结算统一记（settlement._record_provider_metrics），这里不再重复计数
 
 

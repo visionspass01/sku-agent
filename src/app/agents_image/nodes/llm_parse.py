@@ -89,19 +89,71 @@ def _user_prompt(state) -> str:
     )
 
 
-def _record_usage(usage: dict | None) -> None:
-    """把**本次解析**的用量记进图像指标（P2-A：不再用全局 stats 差量）。
+def _stats_snapshot(llm_mod) -> dict:
+    """读全局 LLM 统计（**只给没有上下文归集的测试桩兜底**，真实链路走 contextvar）。"""
+    try:
+        stats = dict(getattr(llm_mod.get_llm(), "stats", {}) or {})
+    except Exception:  # noqa: BLE001
+        stats = {}
+    return {"calls": int(stats.get("calls") or 0),
+            "input_tokens": int(stats.get("input_tokens") or 0),
+            "output_tokens": int(stats.get("output_tokens") or 0)}
 
-    上一版用 `get_llm().stats` 前后快照做差：并发任务同时在跑时，别的链路的 token
-    会被算进本次解析，台账整体虚高（且随并发度漂移）。现在用量由
-    `app.llm.turn_usage_context()`（contextvar，任务内隔离）归集，这里只搬数字。
+
+def _stats_delta(before: dict, after: dict) -> dict:
+    return {"calls": max(0, after["calls"] - before["calls"]),
+            "input_tokens": max(0, after["input_tokens"] - before["input_tokens"]),
+            "output_tokens": max(0, after["output_tokens"] - before["output_tokens"])}
+
+
+def _record_usage(state, usage: dict | None) -> None:
+    """把**本次解析**的用量记进图像指标与任务状态（P2-A + P1-1）。
+
+    - P2-A：用量由 `app.llm.turn_usage_context()`（contextvar，任务内隔离）归集，
+      不再用全局 `stats` 差量——并发任务互相偷数的问题消失；
+    - P1-1：按 `app.llm.estimate_cost()` 的 token 单价估算成本，**同时**记进
+      `metrics.record_llm(cost_cny=...)`（Prometheus 导出）与任务状态，
+      这样预算闸门、管理端卡片与任务详情都能看到 LLM 成本（过去恒为 0）。
     """
     data = dict(usage or {})
     calls = max(0, int(data.get("calls") or 0))
-    tokens = (max(0, int(data.get("input_tokens") or 0))
-              + max(0, int(data.get("output_tokens") or 0)))
-    if calls or tokens:
-        image_metrics.record_llm(calls=calls, tokens=tokens)
+    input_tokens = max(0, int(data.get("input_tokens") or 0))
+    output_tokens = max(0, int(data.get("output_tokens") or 0))
+    cost = _estimate_cost(input_tokens, output_tokens)
+    if state is not None:
+        state.llm_calls = int(getattr(state, "llm_calls", 0) or 0) + calls
+        state.llm_tokens = int(getattr(state, "llm_tokens", 0) or 0) + input_tokens + output_tokens
+        state.llm_cost_cny = round(float(getattr(state, "llm_cost_cny", 0.0) or 0.0) + cost, 6)
+    if calls or input_tokens or output_tokens:
+        image_metrics.record_llm(calls=calls, tokens=input_tokens + output_tokens,
+                                 cost_cny=cost)
+
+
+def _estimate_cost(input_tokens: int, output_tokens: int) -> float:
+    """按 LLM 单价估算成本；单价/依赖读不到就返回 0，不臆造数字。
+
+    优先用 `app.llm.estimate_cost`（与 LLM 侧同一套单价口径）；测试里 `app.llm`
+    被替换成桩模块时退回直接从 `app.config` 读单价（公式一致）。
+    """
+    try:
+        import importlib
+
+        llm_mod = importlib.import_module("app.llm")
+        estimate = getattr(llm_mod, "estimate_cost", None)
+        if estimate is not None:
+            return float(estimate(input_tokens, output_tokens))
+    except Exception:  # noqa: BLE001 —— 单价/依赖不可用
+        pass
+    try:
+        from app.config import get_settings
+
+        settings = get_settings()
+        price_in = float(getattr(settings, "llm_price_input", 0.0) or 0.0)
+        price_out = float(getattr(settings, "llm_price_output", 0.0) or 0.0)
+        return round((int(input_tokens or 0) / 1_000_000) * price_in
+                     + (int(output_tokens or 0) / 1_000_000) * price_out, 6)
+    except Exception:  # noqa: BLE001
+        return 0.0
 
 
 def _fallback_of(state, base_attrs: dict | None) -> dict:
@@ -140,9 +192,11 @@ async def parse_text(state, settings, *, base_attrs: dict | None = None
     usage: dict = {}
     try:
         scope = getattr(llm_mod, "turn_usage_context", None)
-        if scope is None:  # 测试桩模块不一定带上下文归集
+        if scope is None:  # 测试桩模块不一定带上下文归集：退回全局差量（仅桩场景）
+            before = _stats_snapshot(llm_mod)
             raw = await llm_mod.get_llm().invoke_text(
                 PARSE_SYSTEM, _user_prompt(state), json_mode=True)
+            usage = _stats_delta(before, _stats_snapshot(llm_mod))
         else:
             with scope() as usage:
                 raw = await llm_mod.get_llm().invoke_text(
@@ -151,7 +205,7 @@ async def parse_text(state, settings, *, base_attrs: dict | None = None
         logger.warning("LLM 解析失败，退回启发式：%s", exc)
         return None, [f"IMG_LLM_PARSE_DEGRADED: 模型解析失败（{type(exc).__name__}），已退回启发式"]
     finally:
-        _record_usage(usage)
+        _record_usage(state, usage)
     attrs, warnings = _raw_to_attrs(state, raw, base_attrs=base_attrs)
     return attrs, warnings
 
@@ -241,7 +295,7 @@ async def parse_with_vision(state, settings, *, base_attrs: dict | None = None
         logger.warning("视觉解析失败，退回启发式：%s", exc)
         return None, [f"IMG_VISION_DEGRADED: 视觉解析失败（{type(exc).__name__}），已退回启发式"]
     finally:
-        _record_usage(usage)
+        _record_usage(state, usage)
     attrs, warnings = _raw_to_attrs(state, raw, source="vision", base_attrs=base_attrs)
     return attrs, warnings
 
