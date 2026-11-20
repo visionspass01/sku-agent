@@ -54,6 +54,9 @@ _COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("image_usage", "reused_adopted", "INTEGER DEFAULT 0"),
     ("image_memory", "sample_kind", "VARCHAR(16) DEFAULT 'auto'"),
     ("image_memory", "adopt_count", "INTEGER DEFAULT 0"),
+    # 第五轮 P0-4：修复经验的 upsert 键与最近一次使用时间（TTL 清理按它算）
+    ("image_memory", "dedupe_key", "VARCHAR(160)"),
+    ("image_memory", "updated_at", "DATETIME"),
 )
 
 # (索引名, 表, 列, 是否唯一)
@@ -64,6 +67,8 @@ _INDEXES: tuple[tuple[str, str, tuple[str, ...], bool], ...] = (
     ("uq_image_usage_user_period", "image_usage",
      ("username", "period_key", "granularity"), True),
     ("idx_image_asset_adopt", "image_asset", ("adopt_status",), False),
+    # 修复经验按 (签名|部门) 唯一：人工样本 dedupe_key 为 NULL，不受该约束影响
+    ("uq_image_memory_dedupe", "image_memory", ("dedupe_key",), True),
 )
 
 

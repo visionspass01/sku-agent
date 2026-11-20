@@ -113,12 +113,41 @@ def _collect_images(result: dict) -> list[critic_mod.CheckedImage]:
     return images
 
 
-def _memory_patches(signature: str) -> dict[str, str]:
+def _repair_experience(state: ImageTaskState, signature: str) -> dict:
+    """Critic 不通过时检索「修法」（P0-4/P1-3）：历史修法 → KB fixes 语料 → 内置规则。
+
+    - 只看**同签名 + 同部门**的修复经验（`image_memory.sample_kind=repair`）；
+    - 没命中就看 KB 的 `fixes/` 语料（`kind="fix"`，走阈值/重排过的检索）；
+    - 都没命中返回空 dict，`reflexion.reflect` 自动退回内置补丁规则。
+    返回值：`{"patches": {issue_kind: 修法}, "source": "memory|kb|"}`。
+    """
+    kinds = [item for item in (signature or "").split("|")[0].split("+") if item]
     try:
         with session_scope() as session:
-            return memory_store.patches_for(session, signature)
+            patches = memory_store.repair_patches(
+                session, signature, department=getattr(state, "department", None))
     except Exception:  # noqa: BLE001 —— 记忆读失败不影响出图
-        return {}
+        patches = {}
+    if patches:
+        state.warnings.append(
+            f"IMG_REPAIR_REUSED: 复用同部门历史修法（{signature}），本轮按经验修复")
+        return {"patches": patches, "source": "memory"}
+    try:
+        from app.agents_image.rag import index as rag_index
+
+        query = " ".join(part for part in (
+            str((state.attrs or {}).get("product_type") or ""),
+            " ".join(kinds), "修复") if part)
+        hits = rag_index.retrieve(query, top_k=1, kind="fix")
+        if hits:
+            snippet = str(hits[0].snippet or "").strip()
+            if snippet:
+                state.warnings.append(
+                    f"IMG_REPAIR_KB: 命中知识库修复经验（{hits[0].doc.doc_id}），本轮按它修复")
+                return {"patches": {kind: snippet for kind in kinds}, "source": "kb"}
+    except Exception as exc:  # noqa: BLE001 —— KB 检索失败退回内置规则
+        logger.warning("修复经验检索失败（走内置规则）：%s", exc)
+    return {"patches": {}, "source": ""}
 
 
 async def execute_task(task_id: str) -> ImageTaskState:
@@ -190,6 +219,8 @@ async def execute_task(task_id: str) -> ImageTaskState:
     critic = CriticResult()
     attempted = 0
     provider_calls = 0
+    last_signature = ""
+    last_reflection = None
     for attempt in range(1, max_attempts + 1):
         state.attempt = attempt
         _renew_lease(task_id, settings)
@@ -217,13 +248,14 @@ async def execute_task(task_id: str) -> ImageTaskState:
         critic = critic_mod.critique(state, current, images, settings=settings, rules=rules,
                                      manifest=registry.manifest)
         if critic.passed:
+            # P0-4：只有"失败转成功"才归档修法（失败本身不进记忆，避免污染默认生成）
+            if attempt > 1 and last_signature and last_reflection is not None:
+                _archive_repair(state, last_signature, last_reflection, attempt)
             break
-        signature = critic_mod.failure_signature(state, critic)
-        memory_patches = _memory_patches(signature)
-        state.touch("reflexion", attempt=attempt, issues=len(critic.issues))
+        last_signature = critic_mod.failure_signature(state, critic)
         if attempt >= max_attempts:
-            _archive_failure(state, critic, signature, attempted,
-                             cost=sum(float(item or 0.0) for item in image_costs))
+            _record_failure(state, critic, last_signature, attempted,
+                            cost=sum(float(item or 0.0) for item in image_costs))
             # 失败也要记账（使用量=已生成张数、成本已发生），并且只结算一次
             with session_scope() as session:
                 _cancel_settle(session, state, attempted=attempted,
@@ -232,9 +264,15 @@ async def execute_task(task_id: str) -> ImageTaskState:
             raise ImageError("IMG_CRITIC_FAILED",
                              f"评审未通过（第 {attempt} 轮，score={critic.score}）："
                              f"{'；'.join(critic.issues[:3])}")
+        # P0-4/P1-3：**只在 Critic 不通过、还要再试一轮时**检索修复经验
+        # （同签名+同部门的历史修法 → KB fixes 语料 → 内置规则，见 reflexion.reflect）
+        repair = _repair_experience(state, last_signature)
+        state.touch("reflexion", attempt=attempt, issues=len(critic.issues),
+                    repair_source=repair.get("source", ""))
         reflection = reflexion.reflect(state, critic, current, rules=rules,
-                                       memory=memory_patches)
+                                       memory=repair.get("patches") or None)
         current = reflexion.apply_patches(current, reflection)
+        last_reflection = reflection
 
     state.prompt_pack = current + static_drafts
     state.critic = critic
@@ -424,23 +462,41 @@ async def execute_task(task_id: str) -> ImageTaskState:
     return state
 
 
-def _archive_failure(state: ImageTaskState, critic: CriticResult, signature: str,
-                     attempted: int, cost: float = 0.0) -> None:
-    """失败归档：任务 attempts 落库 + 失败签名写进 `image_memory`（下次同因优先复用修复）。
+def _record_failure(state: ImageTaskState, critic: CriticResult, signature: str,
+                    attempted: int, cost: float = 0.0) -> None:
+    """失败台账：只落任务 attempts/error，**不再写 `image_memory`**（第五轮 P0-4）。
 
-    使用量/额度不在这里记：统一由 `settlement.settle_cancel()` 在调度器的失败分支结算
-    （第三轮 P1-3：一处记账，避免失败被记两次）。
+    为什么改：AI 生图覆盖大多数情景，失败样本一旦进记忆、默认生成时又去检索，就会污染
+    Prompt、拉低成功率。失败只留下来排查用的台账；真正的"经验"是**失败转成功那一轮的修法**
+    （见 `_archive_repair`）。使用量/额度由 `settlement.settle_cancel()` 统一结算。
     """
-    patch = "；".join(critic.issues[:3]) or "未知原因"
+    detail = "；".join(critic.issues[:3]) or "未知原因"
     try:
         with session_scope() as session:
             task_store.update_task(session, state.task_id, attempts=attempted,
                                    attempted_images=attempted, error_code="IMG_CRITIC_FAILED",
-                                   error_detail=patch[:500])
-            memory_store.remember(session, signature=signature, fix_summary=patch,
-                                  prompt_patch=patch, department=state.department)
-    except Exception:  # noqa: BLE001 —— 归档失败不改变任务结论
-        logger.warning("失败归档写入出错：task=%s", state.task_id)
+                                   error_detail=detail[:500])
+    except Exception:  # noqa: BLE001 —— 台账写入失败不改变任务结论
+        logger.warning("失败台账写入出错：task=%s signature=%s", state.task_id, signature)
+
+
+def _archive_repair(state: ImageTaskState, signature: str, reflection, attempt: int) -> None:
+    """归档「失败→修复成功」的修法（P0-4）：存的是**实际生效的修复指令**，不是报错文本。"""
+    fixes = [str(line).strip() for line in (getattr(reflection, "summary", None) or [])
+             if str(line).strip()]
+    if not fixes:
+        return
+    patch = "；".join(fixes)[:4000]
+    summary = f"修复后通过（第 {attempt} 轮，{len(fixes)} 条修法）"
+    try:
+        with session_scope() as session:
+            memory_store.remember_repair(
+                session, signature=signature, patch=patch,
+                department=getattr(state, "department", None), summary=summary)
+        state.warnings.append(
+            f"IMG_REPAIR_ARCHIVED: 本次修复经验已归档（{signature}），下次同因可直接复用")
+    except Exception:  # noqa: BLE001 —— 归档失败不影响已交付结果
+        logger.warning("修复经验归档失败：task=%s signature=%s", state.task_id, signature)
 
 
 def _copy_contract(state: ImageTaskState) -> dict:

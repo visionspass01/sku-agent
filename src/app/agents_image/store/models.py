@@ -143,7 +143,14 @@ class ImageTokenBlacklist(Base):
 
 
 class ImageMemory(Base):
-    """失败签名 → 修复经验（Critic 不通过时归档，下次同因优先复用）。"""
+    """修复经验（第五轮 P0-4）：**只在"失败→修复成功"时归档修法**，Critic 失败时检索。
+
+    为什么不记失败：AI 生图能覆盖大多数情景，把每次失败都当经验，默认生成时检索会污染 Prompt、
+    反而拉低成功率。现在的口径是：
+    - 失败只落任务台账（`image_tasks` 的 error/attempts），**不进记忆**；
+    - 修复后通过才归档「这一轮真正生效的修法」（`sample_kind="repair"`）；
+    - 只有 Critic 不通过、准备再试一轮时才检索（同签名 + 同部门优先）。
+    """
 
     __tablename__ = "image_memory"
 
@@ -153,9 +160,14 @@ class ImageMemory(Base):
     fix_summary: Mapped[str] = mapped_column(Text, default="")
     prompt_patch: Mapped[str] = mapped_column(Text, default="")
     hits: Mapped[int] = mapped_column(Integer, default=0)
-    sample_kind: Mapped[str] = mapped_column(String(16), default="auto")  # auto|positive|negative
+    # auto（历史遗留）| repair（失败转成功的修法）| positive/negative（人工采纳/驳回样本）
+    sample_kind: Mapped[str] = mapped_column(String(16), default="auto")
     adopt_count: Mapped[int] = mapped_column(Integer, default=0)
+    # 修复经验的 upsert 键：`签名|部门`；人工样本为 NULL（允许重复，不受唯一约束影响）
+    dedupe_key: Mapped[str | None] = mapped_column(String(160), nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=dt.datetime.now)
+    # 最后一次被复用/更新的时间（TTL 清理按它算，而不是首次创建时间）
+    updated_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class ImageFeedback(Base):

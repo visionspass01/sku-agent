@@ -75,6 +75,8 @@ class ImageSettings(BaseSettings):
     rag_enabled: bool = True
     rag_top_k: int = Field(default=2, ge=1, le=6)
     rag_kb_dir: str = ""              # 空 = data/kb_image
+    # 修复经验（失败转成功才归档，P0-4）保留天数；过期由清理任务删除（人工样本不受影响）
+    memory_keep_days: int = Field(default=90, ge=1, le=3650)
 
     # ---- 配额（按交付张数；管理员不受限）----
     default_quota_period: str = "day"       # day | week | month

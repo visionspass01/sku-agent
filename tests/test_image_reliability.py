@@ -192,7 +192,10 @@ def test_recoveries_exhausted_marks_failed_and_releases_quota(env):
     from app.agents_image.store import quota as quota_store
 
     with session_scope() as session:
-        quota_store.grant(session, "worker1", period_type="day", period_limit=10)
+        quota_store.grant(session, "worker1", period_type="day", period_limit=50)
+        # 基线：别的用例可能给 worker1 留过预留（测试库 session 级），不断言绝对 0
+        baseline = {row["username"]: row
+                    for row in quota_store.list_quotas(session)}["worker1"]["reserved"]
         assert quota_store.reserve(session, "worker1", 2) is True
         task_store.create_task(session, task_id="20261118000000aa33", username="worker1",
                                department="男装", prompt="白底主图", platform="淘系",
@@ -211,7 +214,7 @@ def test_recoveries_exhausted_marks_failed_and_releases_quota(env):
         rows = {row["username"]: row for row in quota_store.list_quotas(session)}
     assert status == "failed"
     assert code == "IMG_RECOVERY_EXHAUSTED"
-    assert rows["worker1"]["reserved"] == 0     # 预留必须还回去
+    assert rows["worker1"]["reserved"] == baseline    # 本任务预留的 2 张必须还回去
 
 
 # ---------------------------------------------------------------- P1-7 SSE / 并发

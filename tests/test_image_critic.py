@@ -238,7 +238,8 @@ def test_graph_retries_after_critic_failure(tmp_path, monkeypatch, _db):
         assert stored.attempts == 2
 
 
-def test_graph_fails_after_max_rounds_and_archives_memory(tmp_path, monkeypatch, _db):
+def test_graph_fails_after_max_rounds_without_polluting_memory(tmp_path, monkeypatch, _db):
+    """第五轮 P0-4：Critic 多轮仍失败 → 任务失败，但**失败不进记忆**（避免污染默认生成）。"""
     task_id = _seed_task(tmp_path, monkeypatch, aspect="3:4")
 
     async def always_bad(self, req):
@@ -246,6 +247,22 @@ def test_graph_fails_after_max_rounds_and_archives_memory(tmp_path, monkeypatch,
                            provider="fake", model="bad", cost_cny=0.0, latency_ms=1)
 
     monkeypatch.setattr("app.agents_image.providers.fake.FakeProvider.generate", always_bad)
+
+    # 内存写入打点：失败路径不该调用任何"归档"入口（不看残留行，避免被别的用例干扰）
+    writes = {"remember": 0, "remember_repair": 0}
+    real_remember = memory_store.remember
+    real_remember_repair = memory_store.remember_repair
+
+    def spy_remember(*args, **kwargs):
+        writes["remember"] += 1
+        return real_remember(*args, **kwargs)
+
+    def spy_remember_repair(*args, **kwargs):
+        writes["remember_repair"] += 1
+        return real_remember_repair(*args, **kwargs)
+
+    monkeypatch.setattr(memory_store, "remember", spy_remember)
+    monkeypatch.setattr(memory_store, "remember_repair", spy_remember_repair)
 
     from app.agents_image.dispatch.local_generator import LocalGenerator
 
@@ -267,5 +284,4 @@ def test_graph_fails_after_max_rounds_and_archives_memory(tmp_path, monkeypatch,
         task = task_store.get_task(session, task_id)
         assert task.error_code == "IMG_CRITIC_FAILED"
         assert task.attempts >= 2
-        memories = memory_store.list_memories(session)
-    assert any("aspect" in item["failure_signature"] for item in memories)
+    assert writes == {"remember": 0, "remember_repair": 0}, writes

@@ -135,9 +135,11 @@ async def _cleanup_loop(interval_seconds: int) -> None:
             expired_tokens = sweep_tokens()
             # P2-7：已回写（sent）的 outbox 行按保留期清理，否则表只涨不降
             pruned = await asyncio.to_thread(_prune_outbox)
-            if result.get("removed") or expired_tokens or pruned:
-                logger.info("本地清理：文件 %s 个，令牌 %s 条，outbox %s 条",
-                            result.get("removed"), expired_tokens, pruned)
+            # P1-4：修复经验按 TTL 清理（人工采纳/驳回样本不动）
+            pruned_memory = await asyncio.to_thread(_prune_memory)
+            if result.get("removed") or expired_tokens or pruned or pruned_memory:
+                logger.info("本地清理：文件 %s 个，令牌 %s 条，outbox %s 条，修复经验 %s 条",
+                            result.get("removed"), expired_tokens, pruned, pruned_memory)
         except asyncio.CancelledError:  # pragma: no cover —— 关机时正常退出
             raise
         except Exception as exc:  # noqa: BLE001 —— 清理失败不影响服务
@@ -149,8 +151,23 @@ def _prune_outbox() -> int:
         from app.agents_image.store import outbox as outbox_store
 
         return outbox_store.prune()
-    except Exception as exc:  # noqa: BLE001 —— 清理失败不阻塞其它清理
+    except Exception as exc:  # noqa: BLE001 —— 清理失败不影响其它清理
         logger.warning("outbox 清理失败：%s", exc)
+        return 0
+
+
+def _prune_memory() -> int:
+    """修复经验的 TTL 清理（P1-4）：只清 repair/auto，人工样本永远保留。"""
+    try:
+        from app.agents_image.config import get_image_settings
+        from app.agents_image.store import memory as memory_store
+        from app.db.engine import session_scope
+
+        keep_days = int(getattr(get_image_settings(), "memory_keep_days", 90) or 90)
+        with session_scope() as session:
+            return memory_store.prune(session, keep_days=keep_days)
+    except Exception as exc:  # noqa: BLE001 —— 清理失败不影响其它清理
+        logger.warning("修复经验清理失败：%s", exc)
         return 0
 
 
