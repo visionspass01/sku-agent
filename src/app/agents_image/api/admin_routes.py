@@ -258,7 +258,9 @@ def admin_task_detail(task_id: str, request: Request) -> JSONResponse:
             refs = [asset_payload(asset) for asset in asset_store.get_assets(session, list(task.ref_asset_ids or []))]
             expected = int(getattr(task, "image_count", 0) or 0)
             delivered = int(getattr(task, "delivered_images", 0) or 0)
-            terminal = str(task.status or "") in {"done", "failed", "canceled"}
+            reused = int(getattr(task, "reused_images", 0) or 0)
+            status = str(task.status or "")
+            terminal = status in {"done", "failed", "canceled"}
             payload = {
                 "task_id": task.task_id, "batch_id": task.batch_id,
                 "username": task.username, "department": task.department,
@@ -269,7 +271,7 @@ def admin_task_detail(task_id: str, request: Request) -> JSONResponse:
                 "attempts": task.attempts, "prompt": task.prompt,
                 "prompt_final": task.prompt_final, "aspect": task.aspect, "n": task.n,
                 "attempted_images": task.attempted_images,
-                "delivered_images": task.delivered_images, "cost_cny": task.cost_cny,
+                "cost_cny": task.cost_cny,
                 "error_code": task.error_code, "error_detail": task.error_detail,
                 "backfill_status": task.backfill_status,
                 "listing_status": task.listing_status,
@@ -280,13 +282,16 @@ def admin_task_detail(task_id: str, request: Request) -> JSONResponse:
                 "blocked": list(getattr(task, "blocked_json", None) or []),
                 "copy": dict(getattr(task, "copy_json", None) or {}),
                 "expected_images": expected,
-                "partial": bool(terminal and expected and delivered < expected),
+                "delivered_images": delivered,
+                "total_images": delivered + reused,
+                # P0-3：failed/canceled 不算"部分成功"（由 error_code/error_detail 解释）
+                "partial": bool(status == "done" and expected and delivered < expected),
                 "in_progress": not terminal,
                 "ref_source": getattr(task, "ref_source", "") or "",
                 "retries": int(getattr(task, "retries", 0) or 0),
                 "provider_calls": int(getattr(task, "provider_calls", 0) or 0),
                 "base_task_id": getattr(task, "base_task_id", None),
-                "reused_images": int(getattr(task, "reused_images", 0) or 0),
+                "reused_images": reused,
                 "refs": refs, "assets": outputs,
                 "created_at": task.created_at.isoformat() if task.created_at else "",
                 "finished_at": task.finished_at.isoformat() if task.finished_at else "",

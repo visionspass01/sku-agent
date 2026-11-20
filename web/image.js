@@ -699,12 +699,14 @@ function watchTask(taskId, productId) {
         statusEl.textContent = data.status + (data.timed_out ? "（等待超时）" : "");
         row.className = "progress-item " + data.status;
         if (data.error_code) nameEl.textContent = data.error_code;
-        // 第三轮 P1-12：部分成功 / 被门禁拦下的图位必须让用户看见
-        if (data.message) {
+        // P0-3：只有"部分成功"才显示 message；失败/取消不套用这句话，
+        // 改成"输出 X / 预期 Y 张"让运营一眼看出没出图
+        if (data.partial && data.message) {
           nameEl.textContent = data.message;
           nameEl.classList.add("partial");
         } else if (data.expected_images) {
-          nameEl.textContent = `预期 ${data.expected_images} 张 / 输出 ${data.delivered_images} 张`;
+          nameEl.textContent = `输出 ${data.delivered_images} / 预期 ${data.expected_images} 张`
+            + (data.reused_images ? `（另有 ${data.reused_images} 张复用）` : "");
         }
         if (Array.isArray(data.warnings) && data.warnings.length) {
           row.title = data.warnings.join("\n");

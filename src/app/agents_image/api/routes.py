@@ -1119,21 +1119,35 @@ def _ensure_owner(owner: str | None, user, what: str) -> None:
 
 
 def _partial_fields(task) -> dict:
-    """部分成功的统一口径（第三轮 P1-1 + 第四轮 P1-9）：预期张数 / 是否部分 / 给用户看的一句话。
+    """交付口径（第五轮 P0-3）：预期/交付/复用/总数 + 是否部分 + 给用户看的一句话。
 
-    **只有终态**才判定"部分成功"：任务还在排队/运行时 delivered 必然小于预期，
-    过去照样算 partial 并拼出"部分成功，预期 X 张，输出 0 张"，等于凭空诬告。
-    非终态返回 `in_progress=True`，前端据此显示进度而不是结论。
+    三条规则，别混：
+    - **非终态**不算结论（`in_progress=True`）：排队/运行中 delivered 必然小于预期；
+    - **failed / canceled 不是"部分成功"**：没有可用图就是失败/取消，交给 `error_code` 解释，
+      过去这里会拼出"部分成功，预期 6 张，输出 0 张"，等于诬告运营；
+    - **done 且少图**才是部分成功（iterate 的"预期"是差额，复用张数单列说明）。
     """
     expected = int(getattr(task, "image_count", 0) or 0)
     delivered = int(getattr(task, "delivered_images", 0) or 0)
-    if not is_terminal(getattr(task, "status", "")):
-        return {"expected_images": expected, "partial": False, "message": "",
-                "in_progress": True}
-    partial = bool(expected and delivered < expected)
-    message = (f"部分成功，预期 {expected} 张，输出 {delivered} 张" if partial else "")
-    return {"expected_images": expected, "partial": partial, "message": message,
-            "in_progress": False}
+    reused = int(getattr(task, "reused_images", 0) or 0)
+    status = str(getattr(task, "status", "") or "")
+    payload = {
+        "expected_images": expected,
+        "delivered_images": delivered,
+        "reused_images": reused,
+        "total_images": delivered + reused,
+        "failure_code": str(getattr(task, "error_code", "") or ""),
+        "in_progress": not is_terminal(status),
+        "partial": False,
+        "message": "",
+    }
+    if status != "done":
+        return payload
+    if expected and delivered < expected:
+        reused_note = f"（另有 {reused} 张复用）" if reused else ""
+        payload["partial"] = True
+        payload["message"] = f"部分成功，预期 {expected} 张{reused_note}，输出 {delivered} 张"
+    return payload
 
 
 @router.get("/assets/{asset_id}")

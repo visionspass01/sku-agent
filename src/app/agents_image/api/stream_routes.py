@@ -34,9 +34,11 @@ _MAX_STREAM_SECONDS = 120
 def _snapshot_payload(task) -> dict:
     expected = int(getattr(task, "image_count", 0) or 0)
     delivered = int(getattr(task, "delivered_images", 0) or 0)
-    # P1-9：只有终态才谈"部分成功"；排队/运行中 delivered < expected 是正常现象
-    terminal = is_terminal(getattr(task, "status", ""))
-    partial = bool(terminal and expected and delivered < expected)
+    reused = int(getattr(task, "reused_images", 0) or 0)
+    status = str(getattr(task, "status", "") or "")
+    # P0-3：只有 done 且少图才是"部分成功"；failed/canceled 由 error_code 解释
+    partial = bool(status == "done" and expected and delivered < expected)
+    reused_note = f"（另有 {reused} 张复用）" if reused else ""
     return {
         "task_id": task.task_id, "batch_id": task.batch_id, "product_id": task.product_id,
         "platform": task.platform, "variant_id": getattr(task, "variant_id", "") or "",
@@ -44,7 +46,7 @@ def _snapshot_payload(task) -> dict:
         "color": (str(getattr(task, "color_key", "") or "").split("#", 1)[1]
                   if "#" in str(getattr(task, "color_key", "") or "") else ""),
         "base_task_id": getattr(task, "base_task_id", "") or "",
-        "status": task.status, "attempts": task.attempts,
+        "status": status, "attempts": task.attempts,
         # P1-10：图位数/出图张数/参考图来源/重试/发起量都进快照，
         # 前端 iterate 才能用任务的真实参数，而不是回读 UI 输入框
         "slot_count": int(getattr(task, "slot_count", 0) or 0),
@@ -54,10 +56,13 @@ def _snapshot_payload(task) -> dict:
         "provider_calls": int(getattr(task, "provider_calls", 0) or 0),
         "attempted_images": task.attempted_images,
         "delivered_images": delivered,
+        "reused_images": reused,
+        "total_images": delivered + reused,
         "expected_images": expected,
         "partial": partial,
-        "in_progress": not terminal,
-        "message": (f"部分成功，预期 {expected} 张，输出 {delivered} 张" if partial else ""),
+        "in_progress": not is_terminal(status),
+        "message": (f"部分成功，预期 {expected} 张{reused_note}，输出 {delivered} 张"
+                    if partial else ""),
         "warnings": list(getattr(task, "warnings_json", None) or []),
         "blocked": list(getattr(task, "blocked_json", None) or []),
         "backfill_status": task.backfill_status,

@@ -100,15 +100,42 @@ def test_partial_fields_respect_status():
     from app.agents_image.api.routes import _partial_fields
 
     queued = _partial_fields(_task_stub())
-    assert queued == {"expected_images": 6, "partial": False, "message": "",
-                      "in_progress": True}
+    assert queued["in_progress"] is True
+    assert queued["partial"] is False and queued["message"] == ""
+    assert queued["expected_images"] == 6 and queued["delivered_images"] == 0
+    assert queued["total_images"] == 0
 
     running = _partial_fields(_task_stub(status="running", delivered_images=1))
     assert running["in_progress"] is True and running["partial"] is False
 
+    # P0-3：failed / canceled 不是"部分成功"
     failed = _partial_fields(_task_stub(status="failed", delivered_images=0,
-                                        attempted_images=6))
-    assert failed["in_progress"] is False and failed["partial"] is True
+                                        attempted_images=6, error_code="IMG_PROVIDER_UNAVAILABLE"))
+    assert failed["in_progress"] is False
+    assert failed["partial"] is False and failed["message"] == ""
+    assert failed["failure_code"] == "IMG_PROVIDER_UNAVAILABLE"
+
+    canceled = _partial_fields(_task_stub(status="canceled", delivered_images=0))
+    assert canceled["partial"] is False and canceled["message"] == ""
+
+    done = _partial_fields(_task_stub(status="done", image_count=3,
+                                      delivered_images=2, reused_images=4))
+    assert done["partial"] is True
+    assert done["total_images"] == 6
+    assert "部分成功" in done["message"] and "另有 4 张复用" in done["message"]
+
+
+def test_snapshot_failed_task_does_not_claim_partial():
+    from app.agents_image.api.stream_routes import _snapshot_payload
+
+    failed = _snapshot_payload(_task_stub(status="failed", delivered_images=0,
+                                          attempted_images=6,
+                                          error_code="IMG_CONTENT_BLOCKED"))
+    assert failed["partial"] is False
+    assert failed["message"] == ""
+    assert failed["error_code"] == "IMG_CONTENT_BLOCKED"
+    assert failed["in_progress"] is False
+    assert failed["total_images"] == 0
 
 
 # ---------------------------------------------------------------- HTTP 层（排队中）
@@ -149,3 +176,30 @@ def test_done_task_still_reports_partial(env):
         assert detail["partial"] is True and detail["message"]
     else:
         assert detail["partial"] is False and detail["message"] == ""
+
+
+# ---------------------------------------------------------------- HTTP 层（失败任务，P0-3）
+def test_failed_task_detail_does_not_claim_partial_success(env, monkeypatch):
+    from app.agents_image.providers.fake import FakeProvider
+    from app.core.errors import raise_image
+
+    async def down(self, req):
+        raise_image("IMG_PROVIDER_UNAVAILABLE", "5xx")
+
+    monkeypatch.setattr(FakeProvider, "generate", down)
+    headers = login(env)
+    created = env.post("/api/image/tasks", headers=headers,
+                       json={"product_ids": ["P-3001"], "prompt": "白底主图",
+                             "slot_count": 3, "image_count": 2})
+    assert created.status_code == 201, created.text
+    task_id = created.json()["tasks"][0]["task_id"]
+    detail = _wait(env, headers, task_id)
+    assert detail["status"] == "failed"
+    assert detail["partial"] is False, detail
+    assert detail["message"] == ""
+    assert detail["failure_code"] == "IMG_PROVIDER_UNAVAILABLE"
+
+    admin = env.get(f"/api/image/admin/tasks/{task_id}", headers=headers).json()
+    assert admin["partial"] is False
+    assert admin["in_progress"] is False
+    assert admin["total_images"] == admin["delivered_images"]

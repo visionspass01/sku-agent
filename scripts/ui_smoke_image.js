@@ -57,6 +57,8 @@ expect("按颜色建任务", js.includes("product_colors") || js.includes("all_c
 expect("双平台开关", js.includes("platform_variant"));
 expect("iterate 入口", js.includes("attachIterateButton"));
 expect("部分成功可见", js.includes("partial") && html.includes('id="create-hint"'));
+// 第五轮 P0-3：失败/取消不套用「部分成功」文案，只显示输出/预期与 error_code
+expect("失败不冒充部分成功", js.includes("data.partial && data.message"));
 expect("批次号可恢复", js.includes("image_agent_batch"));
 expect("页面版本 image-v2", html.includes('data-ui-build="image-v2"') &&
   js.includes('"image-v2"'));
