@@ -174,24 +174,38 @@ async def stream_task(task_id: str, request: Request):
 
 
 async def _stream_body(task_id: str, snapshot: dict, trace: str):
+    from app.observability.trace import run_in_trace
+
     seen_assets: set[str] = set()
     last_status = ""
     last_keepalive = time.time()
     started = time.time()
     max_stream_seconds = _max_stream_seconds()
-    yield sse.sse_event("snapshot", {**snapshot, "trace_id": trace})
-    while True:
+
+    def _poll() -> tuple[str | None, dict | None, list[dict]]:
+        """一次轮询：同步 DB（快照 + 新图），必须在**线程池**里跑。
+
+        P1-2（第十二轮）：上一版只有首帧快照 offload，循环体里每 3s 直接开同步会话——
+        连接数一多（上限 32）就是持续占着事件循环；而每个连接本来是为了"看进度"，
+        却把服务本身拖慢。现在整块丢线程池。
+        """
         with session_scope() as session:
             task = task_store.get_task(session, task_id)
             if task is None:
-                yield sse.sse_event("fatal", {"message": f"任务不存在：{task_id}",
-                                              "error_code": "IMG_TASK_NOT_FOUND",
-                                              "trace_id": trace, "fatal": True})
-                return
-            status = task.status
+                return None, None, []
             state = _snapshot_payload(task)
             fresh = [asset_payload(asset) for asset in asset_store.list_outputs(session, task_id)
                      if asset.asset_id not in seen_assets]
+            return str(task.status or ""), state, fresh
+
+    yield sse.sse_event("snapshot", {**snapshot, "trace_id": trace})
+    while True:
+        status, state, fresh = await run_in_trace(_poll)
+        if status is None:
+            yield sse.sse_event("fatal", {"message": f"任务不存在：{task_id}",
+                                          "error_code": "IMG_TASK_NOT_FOUND",
+                                          "trace_id": trace, "fatal": True})
+            return
         for item in fresh:
             seen_assets.add(item["asset_id"])
             yield sse.sse_event("asset", {**item, "task_id": task_id, "trace_id": trace})

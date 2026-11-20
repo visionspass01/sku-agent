@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 
 from app.agents_image.api.common import TERMINAL_STATUSES, error_response
 from app.agents_image.api.deps import require_user, require_user_async, trace_id_of
+from app.agents_image.api.ratelimit import check_rate_limit
 from app.agents_image.config import get_image_settings
 from app.agents_image.dispatch.task_dispatcher import get_dispatcher
 from app.agents_image.store import quota as quota_store
@@ -121,6 +122,8 @@ async def cancel_batch(request: Request) -> JSONResponse:
     trace = trace_id_of(request)
     try:
         user = await require_user_async(request)
+        # P2-3（第十二轮）：整批取消/重试会触发真实派发与配额预留，和建任务一样需要请求级限流
+        check_rate_limit(user.username, "batch_ops")
         batch_id = _body_batch_id(await request.json())
         with session_scope() as session:
             rows = _batch_tasks(session, batch_id)
@@ -171,15 +174,24 @@ async def retry_batch(request: Request) -> JSONResponse:
     """整批重试：只挑 `failed` / `canceled` 的任务重新排队（其余跳过并说明原因）。"""
     trace = trace_id_of(request)
     try:
-        user = require_user(request)
+        # P1-1（第十二轮）：async 端点的认证与读批次都是同步 DB，一律丢线程池
+        # （上一轮修 create_tasks/cancel_batch 时漏了这个端点）
+        user = await require_user_async(request)
+        check_rate_limit(user.username, "batch_ops")
         batch_id = _body_batch_id(await request.json())
-        with session_scope() as session:
-            rows = _batch_tasks(session, batch_id)
-            if not rows:
-                raise ImageError("IMG_TASK_NOT_FOUND", f"批次不存在或没有任务：{batch_id}")
-            if not user.is_admin and any(row.username != user.username for row in rows):
-                raise ImageError("IMG_FORBIDDEN", "批次里有他人任务，不能整批重试")
-            candidates = [(row.task_id, row.status) for row in rows]
+
+        def _load_candidates() -> list[tuple[str, str]]:
+            with session_scope() as session:
+                rows = _batch_tasks(session, batch_id)
+                if not rows:
+                    raise ImageError("IMG_TASK_NOT_FOUND", f"批次不存在或没有任务：{batch_id}")
+                if not user.is_admin and any(row.username != user.username for row in rows):
+                    raise ImageError("IMG_FORBIDDEN", "批次里有他人任务，不能整批重试")
+                return [(row.task_id, row.status) for row in rows]
+
+        from app.observability.trace import run_in_trace
+
+        candidates = await run_in_trace(_load_candidates)
         results = []
         for task_id, status in candidates:
             if status not in {"failed", "canceled"}:
