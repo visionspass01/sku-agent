@@ -389,7 +389,6 @@ async def execute_task(task_id: str) -> ImageTaskState:
         state.touch("validate_warnings", count=len(state.warnings))
 
     delivered = 0
-    cost = 0.0
     external_cost = 0.0
     outputs: list[dict] = []
     # 第三轮补充：像素门禁 + autofix（纯 Python 解码/重编码，单图可达数百毫秒）**在事务外**算完，
@@ -540,20 +539,21 @@ async def execute_task(task_id: str) -> ImageTaskState:
             metrics.record_partial_delivery()
             logger.warning("部分交付：task=%s expected=%s delivered=%s missing=%s",
                            task_id, expected, delivered, missing)
-        # 成本口径（P0-5/P1-1）：生图用 provider 返回的真实计费；LLM/视觉解析按 token 单价估算，
-        # 两者相加才是本次任务的总成本（过去 LLM 成本完全不进台账，预算闸门对模型解析等于不存在）
+        # 成本口径（P0-5/P1-1/P1-3）：生图用 provider 返回的真实计费；LLM/视觉解析按 token
+        # 单价估算。**总成本只用于预算闸与展示**，`state.cost_cny` 保持"生图成本"语义
+        # （回写中台/接口的 `cost_cny` 同口径，LLM 单列，避免同一字段两种含义）。
         for item in image_costs:
             external_cost += float(item or 0.0)
         llm_cost = float(getattr(state, "llm_cost_cny", 0.0) or 0.0)
-        cost = external_cost + llm_cost
+        total_cost = external_cost + llm_cost
         # P0-2：创建期用的是"按单价估算"，真实计费可能更高 —— 超预算要留痕，不能静默
         budget = float(getattr(settings, "cost_budget_cny", 0.0) or 0.0)
-        if budget > 0 and cost > budget:
+        if budget > 0 and total_cost > budget:
             state.warnings.append(
-                f"IMG_COST_OVERRUN: 本次真实成本 ¥{round(cost, 4)}"
+                f"IMG_COST_OVERRUN: 本次真实成本 ¥{round(total_cost, 4)}"
                 f"（生图 ¥{round(external_cost, 4)} + LLM ¥{round(llm_cost, 4)}）"
                 f"超过预算上限 ¥{budget}（{provider_calls} 次调用 / {attempted} 张）")
-            logger.warning("成本超预算：task=%s cost=%s budget=%s", task_id, cost, budget)
+            logger.warning("成本超预算：task=%s cost=%s budget=%s", task_id, total_cost, budget)
         copy_json = _copy_contract(state)
         task_store.mark_done(session, task_id, attempted=attempted, delivered=delivered,
                              cost=external_cost, prompt_final=state.prompt_final,
@@ -572,7 +572,7 @@ async def execute_task(task_id: str) -> ImageTaskState:
     # 发起量/成本由结算统一记（settlement._record_provider_metrics），这里不再重复计数
     state.attempted_images = attempted
     state.delivered_images = delivered
-    state.cost_cny = cost
+    state.cost_cny = external_cost
     state.touch("aggregate", delivered=delivered, attempts=state.attempt)
     await _backfill(state, outputs_by_slot=outputs, blocked=blocked)
     return state
@@ -692,7 +692,13 @@ async def _backfill(state: ImageTaskState, *, outputs_by_slot: list[dict],
                    "expected": int(getattr(state, "expected_images", 0) or 0),
                    "partial": bool(getattr(state, "partial", False)),
                    "critic_score": state.critic.score,
-                   "cost_cny": state.cost_cny},
+                   # P1-3（第八轮）：成本三列，口径与 Agent 接口/卡片一致——
+                   # cost_cny = 生图（第三方真实计费），llm_cost_cny = 解析估算，total = 两者相加。
+                   # 上一版把"总成本"塞进 cost_cny，中台按单图成本对账时口径与接口不一致。
+                   "cost_cny": round(float(state.cost_cny or 0.0), 6),
+                   "llm_cost_cny": round(float(getattr(state, "llm_cost_cny", 0.0) or 0.0), 6),
+                   "cost_total_cny": round(float(state.cost_cny or 0.0)
+                                           + float(getattr(state, "llm_cost_cny", 0.0) or 0.0), 6)},
         "requester": state.username,
         "trace_id": state.trace_id,
         "results": [{
@@ -706,7 +712,13 @@ async def _backfill(state: ImageTaskState, *, outputs_by_slot: list[dict],
             "storage": item.get("storage", "local"),
             "storage_key": item.get("key", ""),
             "critic_score": state.critic.score,
-            "cost_cny": round(state.cost_cny / max(1, len(outputs_by_slot)), 6) if outputs_by_slot else 0.0,
+            # 单图成本同样按口径拆分：cost_cny=生图，cost_total_cny=生图+LLM 分摊
+            "cost_cny": (round(float(state.cost_cny or 0.0) / max(1, len(outputs_by_slot)), 6)
+                         if outputs_by_slot else 0.0),
+            "cost_total_cny": (round(
+                (float(state.cost_cny or 0.0)
+                 + float(getattr(state, "llm_cost_cny", 0.0) or 0.0))
+                / max(1, len(outputs_by_slot)), 6) if outputs_by_slot else 0.0),
             "reused": bool(item.get("reused")),
             "copy_json": _slot_copy_of(state, item["slot"]),
             "status": "done",
