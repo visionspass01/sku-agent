@@ -9,6 +9,7 @@ from __future__ import annotations
 import datetime as dt
 
 from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 
 from app.agents_image.store import quota as quota_store
 from app.agents_image.store.models import ImageUsage
@@ -72,11 +73,18 @@ def record(session, *, username: str, department: str | None = None,
                      reused_adopted=increments["reused_adopted"],
                      rejected=increments["rejected"], cost_cny=max(0.0, float(cost)),
                      llm_cost_cny=max(0.0, float(llm_cost)))
-    session.add(row)
     try:
-        session.flush()
-    except Exception:  # noqa: BLE001 —— 并发插入撞唯一索引：回退成更新
-        session.rollback()
+        # P0-1（第九轮）：必须用 **SAVEPOINT** 兜住并发撞唯一索引，而不是 `session.rollback()`。
+        # `record()` 是在**结算事务内部**被调用的（同事务里还有 mark_settled / 额度提交 /
+        # mark_done / 资产落库），整事务 rollback 会把结算与任务状态一起抹掉：
+        # 任务被打回 running、额度保持预留，随后看门狗重投 → 重复出图与重复计费。
+        # 这里只回滚这一条 INSERT（与 assets.save_bytes 同款写法），外层事务的写入不受影响。
+        with session.begin_nested():
+            session.add(row)
+            session.flush()
+        return row
+    except IntegrityError:
+        # 并发的同 key 行已被另一个事务写入：退回加量更新（不碰外层事务）
         session.execute(
             update(ImageUsage)
             .where(ImageUsage.username == username,
@@ -94,7 +102,6 @@ def record(session, *, username: str, department: str | None = None,
                                      ImageUsage.period_key == key,
                                      ImageUsage.granularity == "hour")
         ).scalars().first()
-    return row
 
 
 def shift(session, *, username: str, department: str | None = None,
