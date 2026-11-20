@@ -8,7 +8,10 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
+
+logger = logging.getLogger("sku-agent.core.errors")
 
 # 错误码 → HTTP 状态。新增错误码时先在这里登记，避免各处散落魔法数字。
 IMAGE_CODES: dict[str, int] = {
@@ -76,12 +79,23 @@ def raise_image(code: str, detail: str = "", *, retryable: bool = False,
 
 
 def normalize(exc: BaseException, trace_id: str = "") -> ImageError:
-    """把任意异常收敛成 ImageError（未知异常一律 IMG_INTERNAL）。"""
+    """把任意异常收敛成 ImageError（未知异常一律 IMG_INTERNAL）。
+
+    P1-10（第十二轮）：未知异常**不再把原始异常串回给调用方**。
+    上一版 detail = `f"{type(exc).__name__}: {exc}"`：数据库/存储/上游的原始信息
+    （`UNIQUE constraint failed: image_task.task_id`、SQL 片段、绝对路径、上游响应体）
+    会直接出现在 4xx/5xx 响应体里——既是信息泄露，也把"内部错误"和"业务错误"混成一个 500。
+    现在：响应只给通用文案 + trace_id，原始异常进日志（带 trace，排障靠 trace 串联）。
+    """
     if isinstance(exc, ImageError):
         if trace_id and not exc.trace_id:
             exc.trace_id = trace_id
         return exc
-    return ImageError(code="IMG_INTERNAL", detail=f"{type(exc).__name__}: {exc}",
+    logger.warning(
+        "未归类的内部异常 → IMG_INTERNAL（trace=%s）：%s: %s",
+        trace_id or "-", type(exc).__name__, exc, exc_info=exc)
+    return ImageError(code="IMG_INTERNAL",
+                      detail="服务内部错误，请稍后重试；如需排查请把 trace_id 提供给运维",
                       retryable=False, trace_id=trace_id)
 
 
