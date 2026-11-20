@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from app.agents_image.schemas import FORBIDDEN_WORDS, attrs_of
+from app.agents_image.schemas import FORBIDDEN_WORDS, attrs_of, identity_missing
 from app.agents_image.state import CriticResult, ImageTaskState, PromptDraft
 from app.agents_image.storage.image_storage import image_size, sniff_mime
 
@@ -60,17 +60,16 @@ def critique(state: ImageTaskState, drafts: list[PromptDraft], images: list[Chec
     score = 100
 
     must_not_change = list(attrs_of(state.attrs).must_not_change)
+    # P1-12：与 validate 共用同一个身份锁定判定（schemas.identity_missing）
+    for slot, missing in identity_missing(drafts, must_not_change):
+        score -= 50
+        blocking.append("identity")
+        issues.append(f"identity: 图位 {slot} 丢失身份锁定：{'、'.join(missing)}")
     for draft in drafts:
-        missing = [word for word in must_not_change if word not in (draft.preserve or [])]
-        if missing:
-            score -= 50
-            blocking.append("identity")
-            issues.append(f"identity: 图位 {draft.slot} 丢失身份锁定：{'、'.join(missing)}")
         if not (draft.prompt or "").strip():
             score -= 40
             blocking.append("prompt")
             issues.append(f"prompt: 图位 {draft.slot} Prompt 为空")
-        expected = _expected_ratio(state.aspect)
         if draft.aspect != state.aspect:
             score -= 20
             issues.append(f"aspect: 图位 {draft.slot} 比例 {draft.aspect} 与请求 {state.aspect} 不一致")

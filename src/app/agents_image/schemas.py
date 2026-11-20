@@ -211,6 +211,24 @@ def mask_banned(text: str, banned: tuple[str, ...] | list[str] = ()) -> str:
     return out
 
 
+def identity_missing(drafts, must_not_change: list[str] | None = None
+                     ) -> list[tuple[int, list[str]]]:
+    """身份锁定检查的**唯一实现**（第五轮 P1-12）：validate 与 Critic 共用同一套判定。
+
+    返回 `[(slot, 缺失的锁定词...)]`；列表为空表示每条 Prompt 都保住了 `must_not_change`。
+    过去 validate 与 critic 各写一份，改一处忘一处就会出现"校验通过但评审拦截"的口径分裂。
+    """
+    wanted = [str(item) for item in (must_not_change or []) if str(item or "").strip()]
+    missing: list[tuple[int, list[str]]] = []
+    for draft in drafts or []:
+        slot = int(getattr(draft, "slot", 0) or 0)
+        preserve = [str(item) for item in (getattr(draft, "preserve", None) or [])]
+        lost = [word for word in wanted if word not in preserve]
+        if lost:
+            missing.append((slot, lost))
+    return missing
+
+
 __all__ = ["ClothingAttrs", "ImageIntent", "DEFAULT_MUST_NOT_CHANGE", "FORBIDDEN_WORDS",
            "parse_attrs", "parse_intent", "merge_preserve", "attrs_of", "mask_banned",
-           "HEX_PATTERN"]
+           "identity_missing", "HEX_PATTERN"]

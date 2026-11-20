@@ -14,7 +14,12 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from app.agents_image.api.batch_routes import cancel_one
-from app.agents_image.api.common import asset_payload, error_response, is_terminal
+from app.agents_image.api.common import (
+    TERMINAL_STATUSES,
+    asset_payload,
+    error_response,
+    is_terminal,
+)
 from app.agents_image.api.deps import require_user, trace_id_of
 from app.agents_image.dispatch.task_dispatcher import get_dispatcher
 from app.agents_image.store import assets as asset_store
@@ -25,10 +30,17 @@ from app.core.errors import ImageError
 from app.db.engine import session_scope
 
 router = APIRouter(tags=["image-stream"])
-_TERMINAL = {"done", "failed", "canceled"}
+# 第五轮 P1-11：终态集合统一从 common 取，不再各文件各写一份
+_TERMINAL = TERMINAL_STATUSES
 _POLL_SECONDS = 3.0   # P1-7：图片场景对时延不敏感，3s 轮询把 DB 压力降一个数量级
 _KEEPALIVE_SECONDS = 10
-_MAX_STREAM_SECONDS = 120
+
+
+def _max_stream_seconds() -> int:
+    """P1-8：SSE 连接上限可配（默认 300s），覆盖 provider 60s×3 重试 + 反射轮次。"""
+    from app.agents_image.config import get_image_settings
+
+    return int(getattr(get_image_settings(), "sse_max_seconds", 300) or 300)
 
 
 def _snapshot_payload(task) -> dict:
@@ -91,6 +103,7 @@ async def stream_task(task_id: str, request: Request):
         last_status = ""
         last_keepalive = time.time()
         started = time.time()
+        max_stream_seconds = _max_stream_seconds()
         yield sse.sse_event("snapshot", {**snapshot, "trace_id": trace})
         while True:
             with session_scope() as session:
@@ -119,7 +132,7 @@ async def stream_task(task_id: str, request: Request):
                 yield sse.sse_event("done", {**state, "elapsed_ms": int((time.time() - started) * 1000),
                                              "trace_id": trace})
                 return
-            if time.time() - started > _MAX_STREAM_SECONDS:
+            if time.time() - started > max_stream_seconds:
                 yield sse.sse_event("done", {**state, "timed_out": True,
                                              "trace_id": trace})
                 return

@@ -179,8 +179,52 @@ class ImageIndex:
 
 _LOCK = threading.Lock()
 _INDEX: ImageIndex | None = None
-_CACHE: dict[tuple[str, str, int, str, str], list[Hit]] = {}
+# 第五轮 P1-9：召回缓存走共享 TTL 缓存（Redis；未配置时 fakeredis 进程内自动降级），
+# 命中率/后端都给面板看；进程内 dict 只作为"缓存层不可用"时的兜底。
+_LOCAL_CACHE: dict[tuple, dict] = {}
 _STATS = {"hits": 0, "misses": 0}
+
+
+def _shared_cache():
+    try:
+        from app.cache.ttl_cache import get_ttl_cache
+
+        return get_ttl_cache()
+    except Exception:  # noqa: BLE001 —— image-only 模式或依赖缺失时退回进程内
+        return None
+
+
+def cache_backend() -> str:
+    """`redis` / `fakeredis` / `memory`（缓存层不可用）。"""
+    try:
+        from app.cache.redis_factory import redis_mode
+
+        return redis_mode() if _shared_cache() is not None else "memory"
+    except Exception:  # noqa: BLE001
+        return "memory"
+
+
+def _cache_ttl() -> int:
+    settings = _settings_for_retrieval()
+    return max(1, int(getattr(settings, "rag_cache_ttl_seconds", 60) or 60))
+
+
+def _hit_to_cache(hit: "Hit") -> dict:
+    body = hit.doc.body.replace("\n", " ").strip()
+    return {"doc_id": hit.doc.doc_id, "kind": hit.doc.kind, "title": hit.doc.title,
+            "body": body[:400], "tags": list(hit.doc.tags),
+            "score": hit.score, "rerank_score": hit.rerank_score,
+            "keyword_rank": hit.keyword_rank, "vector_rank": hit.vector_rank}
+
+
+def _hit_from_cache(item: dict) -> "Hit":
+    doc = Doc(doc_id=str(item.get("doc_id") or ""), kind=str(item.get("kind") or ""),
+              title=str(item.get("title") or ""), body=str(item.get("body") or ""),
+              tags=list(item.get("tags") or []))
+    return Hit(doc=doc, score=float(item.get("score") or 0.0),
+               keyword_rank=int(item.get("keyword_rank") or 0),
+               vector_rank=int(item.get("vector_rank") or 0),
+               rerank_score=float(item.get("rerank_score") or 0.0))
 
 
 def get_index(directory=None) -> ImageIndex:
@@ -191,7 +235,7 @@ def get_index(directory=None) -> ImageIndex:
         fingerprint = corpus_fingerprint(docs) if docs else "empty"
         if _INDEX is None or _INDEX.fingerprint != fingerprint:
             _INDEX = ImageIndex(docs)
-            _CACHE.clear()
+            _LOCAL_CACHE.clear()
         return _INDEX
 
 
@@ -219,20 +263,55 @@ def retrieve(query: str, *, top_k: int = 5, kind: str | None = None,
                              or "heuristic")
     index = get_index()
     kinds_key = ",".join(sorted(kinds or ()))
-    key = (index.fingerprint, query.strip(), int(top_k), kind or "", kinds_key)
-    if use_cache and key in _CACHE:
-        _STATS["hits"] += 1
-        return _CACHE[key]
+    key = (index.fingerprint, query.strip(), int(top_k), kind or "", kinds_key,
+           round(float(min_score or 0.0), 4), str(rerank_backend or ""))
+    if use_cache:
+        cached = _cache_get(key)
+        if cached is not None:
+            _STATS["hits"] += 1
+            return [_hit_from_cache(item) for item in cached]
     _STATS["misses"] += 1
     hits = index.search(query, top_k=top_k, kind=kind, kinds=kinds, min_score=min_score,
                         rerank_backend=rerank_backend)
-    _CACHE[key] = hits
+    if use_cache:
+        _cache_set(key, [_hit_to_cache(hit) for hit in hits])
     return hits
+
+
+def _cache_key(key: tuple) -> str:
+    raw = "|".join(str(part) for part in key)
+    digest = hashlib.blake2b(raw.encode("utf-8"), digest_size=12).hexdigest()
+    return f"image:rag:{digest}"
+
+
+def _cache_get(key: tuple):
+    cache = _shared_cache()
+    if cache is None:
+        return _LOCAL_CACHE.get(key, {}).get("value")
+    try:
+        value = cache.get(_cache_key(key))
+    except Exception:  # noqa: BLE001 —— 旁路缓存不许拖垮检索
+        value = None
+    return value
+
+
+def _cache_set(key: tuple, value) -> None:
+    cache = _shared_cache()
+    if cache is None:
+        _LOCAL_CACHE[key] = {"value": value}
+        if len(_LOCAL_CACHE) > 512:              # 进程内兜底也不许无限涨
+            for stale in list(_LOCAL_CACHE)[: len(_LOCAL_CACHE) - 512]:
+                _LOCAL_CACHE.pop(stale, None)
+        return
+    try:
+        cache.set(_cache_key(key), value, _cache_ttl())
+    except Exception:  # noqa: BLE001
+        _LOCAL_CACHE[key] = {"value": value}
 
 
 def cache_stats() -> dict:
     total = _STATS["hits"] + _STATS["misses"]
-    return {**_STATS, "total": total,
+    return {**_STATS, "total": total, "backend": cache_backend(),
             "hit_rate": round(_STATS["hits"] / total, 4) if total else 0.0}
 
 
@@ -245,10 +324,11 @@ def reset_index() -> None:
     global _INDEX
     with _LOCK:
         _INDEX = None
-        _CACHE.clear()
+        _LOCAL_CACHE.clear()
         _STATS["hits"] = 0
         _STATS["misses"] = 0
 
 
-__all__ = ["Hit", "ImageIndex", "get_index", "retrieve", "cache_stats", "index_status",
-           "reset_index", "RRF_K", "RERANK_BACKENDS", "_stable_bucket", "_vector"]
+__all__ = ["Hit", "ImageIndex", "get_index", "retrieve", "cache_backend", "cache_stats",
+           "index_status", "reset_index", "RRF_K", "RERANK_BACKENDS", "_stable_bucket",
+           "_vector"]

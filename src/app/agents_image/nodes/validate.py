@@ -8,7 +8,11 @@
 
 from __future__ import annotations
 
-from app.agents_image.schemas import FORBIDDEN_WORDS, attrs_of
+from app.agents_image.schemas import (
+    FORBIDDEN_WORDS,
+    attrs_of,
+    identity_missing,
+)
 from app.agents_image.state import ImageTaskState
 from app.agents_image.storage.image_storage import get_storage
 from app.core.errors import raise_image
@@ -68,13 +72,13 @@ def _validate_prompt_pack(state: ImageTaskState) -> None:
     for draft in drafts:
         if not (draft.prompt or "").strip():
             raise_image("IMG_SCHEMA_INVALID", f"图位 {draft.slot} 的 Prompt 为空")
-        missing = [word for word in must_not_change if word not in (draft.preserve or [])]
-        if missing:
-            raise_image("IMG_SCHEMA_INVALID",
-                        f"图位 {draft.slot} 丢失身份锁定字段：{'、'.join(missing)}")
         if draft.aspect != state.aspect:
             raise_image("IMG_SCHEMA_INVALID",
                         f"图位 {draft.slot} 比例（{draft.aspect}）与请求（{state.aspect}）不一致")
+    # P1-12：身份锁定检查与 Critic 共用 schemas.identity_missing（一处判定，两处引用）
+    for slot, missing in identity_missing(drafts, must_not_change):
+        raise_image("IMG_SCHEMA_INVALID",
+                    f"图位 {slot} 丢失身份锁定字段：{'、'.join(missing)}")
 
 
 def _validate_words(state: ImageTaskState, extra_forbidden: tuple[str, ...]) -> None:

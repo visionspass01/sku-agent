@@ -224,7 +224,10 @@ def admin_tasks(request: Request) -> JSONResponse:
         username = (request.query_params.get("username") or "").strip() or None
         status = (request.query_params.get("status") or "").strip() or None
         department = (request.query_params.get("department") or "").strip() or None
-        limit = int(request.query_params.get("limit") or 50)
+        try:
+            limit = int(request.query_params.get("limit") or 50)
+        except ValueError as exc:      # P1-6：非法 limit 应该是 422，不是 500
+            raise ImageError("IMG_INPUT_INVALID", "limit 必须是整数") from exc
         # P2-3：limit 要夹紧，避免一次拉全表
         limit = max(1, min(limit, 200))
         with session_scope() as session:

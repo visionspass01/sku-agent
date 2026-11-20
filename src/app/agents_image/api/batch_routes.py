@@ -11,7 +11,7 @@ import logging
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from app.agents_image.api.common import error_response
+from app.agents_image.api.common import TERMINAL_STATUSES, error_response
 from app.agents_image.api.deps import require_user, trace_id_of
 from app.agents_image.config import get_image_settings
 from app.agents_image.dispatch.task_dispatcher import get_dispatcher
@@ -24,7 +24,7 @@ logger = logging.getLogger("sku-agent.image.api.batch")
 
 router = APIRouter(tags=["image-batch"])
 
-_TERMINAL = {"done", "failed", "canceled"}
+_TERMINAL = TERMINAL_STATUSES
 
 
 def cancel_one(user, task_id: str) -> dict:

@@ -55,6 +55,8 @@ class ImageSettings(BaseSettings):
     recovery_interval_seconds: int = Field(default=30, ge=0, le=3600)  # 看门狗扫描间隔（0=关）
     # 任务租约（W1）：执行期每阶段续约；只有租约过期才允许看门狗重投
     task_lease_seconds: int = Field(default=300, ge=30, le=3600)
+    # P1-8：SSE 连接上限（provider 超时 60s × 重试 3 + 反射轮次可能超过 120s）
+    sse_max_seconds: int = Field(default=300, ge=30, le=3600)
     max_recoveries: int = Field(default=3, ge=1, le=10)  # 同一任务最多被重投几次
     # 排队宽限（第三轮 P0-2）：queued 任务在这段时间内算「刚建、正在被提交」，看门狗不碰；
     # 超过宽限仍未被认领（没有 lease）才可能是孤儿任务
@@ -78,6 +80,8 @@ class ImageSettings(BaseSettings):
     rag_top_k: int = Field(default=3, ge=1, le=8)
     rag_min_score: float = Field(default=0.0, ge=0.0, le=1.0)
     rag_rerank_backend: str = "heuristic"   # heuristic | none
+    # 召回结果缓存（P1-9）：走共享 TTL 缓存（Redis / fakeredis），TTL 默认 60s
+    rag_cache_ttl_seconds: int = Field(default=60, ge=1, le=3600)
     rag_kb_dir: str = ""              # 空 = data/kb_image
     # 修复经验（失败转成功才归档，P0-4）保留天数；过期由清理任务删除（人工样本不受影响）
     memory_keep_days: int = Field(default=90, ge=1, le=3650)

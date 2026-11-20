@@ -88,6 +88,9 @@ def image_health() -> dict:
         "max_batch_products": settings.max_batch_products,
         "secret_is_default": settings.secret_is_default,
         "context_batches": _context_batches(),
+        # P1-9：召回缓存后端（redis / fakeredis / memory）与登录限流作用域（进程内）
+        "cache_backend": _cache_backend(),
+        "throttle_scope": "instance",
         **_department_health(),
         **_degraded_state(),
         **metrics.snapshot(),
@@ -119,6 +122,16 @@ def _degraded_state() -> dict:
         status = {"degraded": False, "issues": []}
     return {"degraded": bool(status.get("degraded")),
             "degraded_reason": "；".join(status.get("issues") or [])[:300]}
+
+
+def _cache_backend() -> str:
+    """召回缓存后端（P1-9）：redis / fakeredis / memory（缓存层不可用）。"""
+    try:
+        from app.agents_image.rag import index as rag_index
+
+        return rag_index.cache_backend()
+    except Exception:  # noqa: BLE001
+        return "unknown"
 
 
 def _context_batches() -> dict:
@@ -552,9 +565,8 @@ async def create_tasks(request: Request) -> JSONResponse:
                 reuse_map = _reuse_window(state, _reuse_of(target, platform, variant))
                 # P1-3/P1-4：iterate 但一张图位都复用不到时必须解释清楚（基座 + 目标三元组）
                 task_warnings = _reuse_miss_warnings(
-                    base_task if _reuse_targets(target, platform, variant) else None,
-                    base_task_id_hint, target, platform, str(state.variant_id or ""),
-                    reuse_map) + list(prompt_warnings)
+                    base_task_id_hint, base_task, target, platform,
+                    str(state.variant_id or ""), reuse_map) + list(prompt_warnings)
                 task = task_store.create_task(
                     session, task_id=new_task_id(), username=user.username,
                     department=user.department, batch_id=batch_id,
@@ -831,20 +843,33 @@ def _inherit_from_base(body: dict, base) -> dict:
 
 def _reuse_miss_warnings(base, base_task_id: str, target, platform: str,
                          variant_id: str, reuse_map: dict) -> list[str]:
-    """iterate 一张图位都复用不到时落 `IMG_REUSE_SKIPPED`（P1-3）。
+    """iterate 一张图位都复用不到时落 `IMG_REUSE_SKIPPED`（P1-3 / 第五轮 P1-5）。
 
-    只对「本来该复用这个基座」的目标记账，避免多色/双平台任务之间互相误报；
-    告警里带基座与目标的三元组，运营据此一眼能看出为什么没复用上。
+    第五轮修正：过去只在「目标与基座三元组完全一致」时才告警——于是**显式改了平台/变体/颜色**
+    的 iterate 静默全量重出，用户以为在续做基座。现在只要"给了 base_task_id 却没复用上"就告警，
+    并明确列出与基座不同的维度。
     """
-    if base is None or reuse_map:
+    if not base_task_id or reuse_map:
         return []
+    target_key = f"{target.color_key or '无颜色'}/{platform}/{variant_id or '-'}"
+    if base is None:
+        return [f"IMG_REUSE_SKIPPED: 基座 {base_task_id} 与目标 {target_key} 没有可复用的图位，"
+                "已按差额全量重出"]
+    diffs: list[str] = []
+    if str(getattr(base, "color_key", "") or "") != str(target.color_key or ""):
+        diffs.append("颜色")
+    if str(getattr(base, "platform", "") or "") != str(platform or ""):
+        diffs.append("平台")
+    if str(getattr(base, "variant_id", "") or "") != str(variant_id or ""):
+        diffs.append("变体")
     base_key = (f"{str(getattr(base, 'color_key', '') or '无颜色')}"
                 f"/{str(getattr(base, 'platform', '') or '-')}"
                 f"/{str(getattr(base, 'variant_id', '') or '-')}")
-    target_key = f"{target.color_key or '无颜色'}/{platform}/{variant_id or '-'}"
+    hint = f"（与基座不同的维度：{'、'.join(diffs)}）" if diffs else ""
     return [
         f"IMG_REUSE_SKIPPED: 基座 {base_task_id}（{base_key}）与目标 {target_key} "
-        "没有可复用的图位（基座成品可能被驳回/已过保留期/本任务窗口更小），已按差额全量重出"
+        f"没有可复用的图位{hint}（基座成品可能被驳回/已过保留期/本任务窗口更小），"
+        "已按差额全量重出"
     ]
 
 
