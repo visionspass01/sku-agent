@@ -114,8 +114,12 @@ def test_frontend_supports_iterate_and_partial(env):
     js = (WEB / "image.js").read_text(encoding="utf-8")
     assert "attachIterateButton" in js
     assert "mode: \"iterate\"" in js or 'mode: "iterate"' in js
-    assert "部分成功" in js
+    # 部分成功文案由后端给（message），前端判断的是 partial 字段
+    assert "data.partial" in js
     assert "data.message" in js
+    # 第六轮 P1-5：失败原因（error_code）优先，输出/预期不能把它覆盖掉
+    assert "const outputNote" in js
+    assert "${data.error_code} · ${outputNote}" in js
 
 
 def test_frontend_version_and_batch_restore(env):

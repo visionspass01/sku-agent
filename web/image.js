@@ -698,15 +698,21 @@ function watchTask(taskId, productId) {
       } else if (event === "done") {
         statusEl.textContent = data.status + (data.timed_out ? "（等待超时）" : "");
         row.className = "progress-item " + data.status;
-        if (data.error_code) nameEl.textContent = data.error_code;
-        // P0-3：只有"部分成功"才显示 message；失败/取消不套用这句话，
-        // 改成"输出 X / 预期 Y 张"让运营一眼看出没出图
-        if (data.partial && data.message) {
+        const outputNote = data.expected_images
+          ? `输出 ${data.delivered_images} / 预期 ${data.expected_images} 张`
+            + (data.reused_images ? `（另有 ${data.reused_images} 张复用）` : "")
+          : "";
+        // 第六轮 P1-5：失败/取消时**错误码优先**，输出张数跟在后面；
+        // 过去先写 error_code、又被「输出/预期」覆盖 → 运营看不到失败原因。
+        if (data.error_code) {
+          nameEl.textContent = outputNote
+            ? `${data.error_code} · ${outputNote}`
+            : data.error_code;
+        } else if (data.partial && data.message) {
           nameEl.textContent = data.message;
           nameEl.classList.add("partial");
-        } else if (data.expected_images) {
-          nameEl.textContent = `输出 ${data.delivered_images} / 预期 ${data.expected_images} 张`
-            + (data.reused_images ? `（另有 ${data.reused_images} 张复用）` : "");
+        } else if (outputNote) {
+          nameEl.textContent = outputNote;
         }
         if (Array.isArray(data.warnings) && data.warnings.length) {
           row.title = data.warnings.join("\n");
