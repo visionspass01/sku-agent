@@ -90,8 +90,11 @@ class LocalStore:
     def sweep_expired(self, hours: float) -> int:
         cutoff = dt.datetime.now() - dt.timedelta(hours=hours)
         removed = 0
+        # P2-1（第八轮）：`blocked/` 也要扫——被门禁拦下的图是留档排查用的临时文件，
+        # 配置注释明确写「参与 24h 清理」，但上一版只扫 refs/outputs/thumbnails，
+        # 结果拦截图永久占盘。素材库（library/）是人工资产，不参与自动清理，保持不动。
         for kind_dir in (self.settings.refs_dir, self.settings.outputs_dir,
-                         self.settings.thumbs_dir):
+                         self.settings.thumbs_dir, self.settings.blocked_dir):
             if not kind_dir.exists():
                 continue
             for path in kind_dir.glob("*"):

@@ -133,6 +133,10 @@ async def replay(*, catalog=None, limit: int = 20, now: dt.datetime | None = Non
     """把到期的 pending 记录重新回写中台；返回 {sent, failed, skipped, claimed}。
 
     网络调用（`save_result`）发生在**所有会话之外**（P1-5）。
+
+    P2-2（第八轮）：`claim()` 的返回值必须真正生效——上一版拿到 `claimed` 就丢掉，
+    没抢到占位（别的副本/请求正在重放）的行也会被再发一遍。现在按 claimed 过滤：
+    只处理真正抢到的行，其余计入 `skipped`。
     """
     from app.agents_image.sources.product_source import get_catalog
 
@@ -141,8 +145,10 @@ async def replay(*, catalog=None, limit: int = 20, now: dt.datetime | None = Non
     if not rows:
         return {"sent": 0, "failed": 0, "skipped": 0, "claimed": 0}
     claimed = claim([row["id"] for row in rows], now=now)
+    claimed_ids = set(claimed)
+    todo = [row for row in rows if row["id"] in claimed_ids]
     sent = failed = 0
-    for row in rows:
+    for row in todo:
         try:
             await target.save_result(dict(row["payload"] or {}))
             mark_sent_by_id(row["id"])
@@ -154,7 +160,8 @@ async def replay(*, catalog=None, limit: int = 20, now: dt.datetime | None = Non
             logger.warning("outbox 重放失败：task=%s %s", row["task_id"], exc)
             mark_failed_by_id(row["id"], f"{type(exc).__name__}: {exc}")
             failed += 1
-    return {"sent": sent, "failed": failed, "skipped": len(rows) - sent - failed,
+    return {"sent": sent, "failed": failed,
+            "skipped": (len(rows) - len(todo)) + (len(todo) - sent - failed),
             "claimed": len(claimed)}
 
 
