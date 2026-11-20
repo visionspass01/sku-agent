@@ -200,6 +200,7 @@ def batch_detail(batch_id: str, request: Request) -> JSONResponse:
             statuses: dict[str, int] = {}
             delivered = attempted = reused = 0
             cost = 0.0
+            llm_cost = 0.0
             listed = 0
             partial_tasks = 0
             warnings_count = 0
@@ -212,6 +213,8 @@ def batch_detail(batch_id: str, request: Request) -> JSONResponse:
                 attempted += int(row.attempted_images or 0)
                 reused += int(getattr(row, "reused_images", 0) or 0)
                 cost += float(row.external_cost_cny or 0)
+                # P2-3（第八轮）：批次汇总也要给 LLM 成本列，否则与卡片（三列口径）对不上
+                llm_cost += float(getattr(row, "llm_cost_cny", 0.0) or 0.0)
                 if (row.listing_status or "") == "listed":
                     listed += 1
                 ref_sources.add(str(getattr(row, "ref_source", "") or ""))
@@ -247,7 +250,10 @@ def batch_detail(batch_id: str, request: Request) -> JSONResponse:
                 "delivered_images": delivered,
                 "attempted_images": attempted,
                 "reused_images": reused,
+                # P2-3：成本三列（生图 / LLM / 合计），与卡片、任务详情同口径
                 "cost_cny": round(cost, 4),
+                "llm_cost_cny": round(llm_cost, 4),
+                "cost_total_cny": round(cost + llm_cost, 4),
                 "listed_tasks": listed,
                 "ref_source": batch_source,
                 "ref_sources": sorted(ref_sources),

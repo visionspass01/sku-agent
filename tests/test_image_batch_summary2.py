@@ -101,6 +101,19 @@ def test_batch_summary_marks_mixed_ref_source(env):
     assert set(detail["ref_sources"]) == {"mcp", "library"}
 
 
+def test_batch_summary_cost_has_three_columns(env):
+    """P2-3（第八轮）：批次成本要给「生图 / LLM / 合计」三列，与卡片口径一致。"""
+    headers = login(env)
+    batch = _create_batch(env, headers)
+    task_id = batch["tasks"][0]["task_id"]
+    with session_scope() as session:
+        task_store.update_task(session, task_id, external_cost_cny=0.4, llm_cost_cny=0.06)
+    detail = env.get(f"/api/image/batches/{batch['batch_id']}", headers=headers).json()
+    assert detail["cost_cny"] == pytest.approx(0.4), detail
+    assert detail["llm_cost_cny"] == pytest.approx(0.06), detail
+    assert detail["cost_total_cny"] == pytest.approx(0.46), detail
+
+
 def test_batch_summary_counts_partial_tasks(env):
     headers = login(env)
     batch = _create_batch(env, headers)
