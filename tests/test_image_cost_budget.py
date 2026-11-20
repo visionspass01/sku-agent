@@ -122,7 +122,7 @@ def test_health_and_cards_expose_budget_flag(env, monkeypatch):
     assert health["cost_budget_enabled"] is True
     assert health["cost_price_cny"] == 0.4
 
-    cards = env.get("/api/image/admin/metrics?granularity=day&count=7",
+    cards = env.get("/api/image/admin/metrics?granularity=day&count=7&refresh=1",
                     headers=headers).json()["cards"]
     assert cards["cost_budget_enabled"] is True
 

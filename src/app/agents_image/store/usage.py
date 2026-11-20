@@ -188,14 +188,12 @@ def buckets(session, *, granularity: str = "day", count: int = 30,
     """近 `count` 个周期桶（含当前桶），每桶交付/尝试/任务/失败/成本 + 按账户细分。
 
     P2-2：支持按部门过滤（`image_usage.department`），与管理端卡片的部门视图同口径。
+    第五轮 P2：**窗口下推**——只读首个桶起的小时行（过去把整表读进内存再分组，
+    管理端轮询越久越慢），并且只取需要的列（不再构造 ORM 对象）。
     """
     granularity = granularity if granularity in GRANULARITIES else "day"
     count = max(1, min(int(count or 30), 120))
     moment = quota_store.now_local(now)
-    start = _bucket_start(moment, granularity)
-    for _ in range(count - 1):
-        start = _advance(_bucket_start(start - dt.timedelta(seconds=1), granularity), granularity)
-    # 上面的推进可能落到上一周期，统一重算成「首桶 = 当前桶往前 (count-1) 个」
     keys: list[str] = []
     cursor = _bucket_start(moment, granularity)
     for _ in range(count):
@@ -203,12 +201,24 @@ def buckets(session, *, granularity: str = "day", count: int = 30,
         cursor = _advance(cursor, granularity)
     keys = list(reversed(keys))          # 时间升序（图表从左到右）
 
-    statement = select(ImageUsage).where(ImageUsage.granularity == "hour")
+    # 首桶的起点 = 当前桶往前 (count-1) 个；据此算出最早的小时键（period_key 是字符串，可直接比较）
+    first_bucket = _bucket_start(moment, granularity)
+    for _ in range(count - 1):
+        first_bucket = _bucket_start(first_bucket - dt.timedelta(seconds=1), granularity)
+    window_start = first_bucket.strftime("%Y-%m-%dT%H")
+
+    statement = (
+        select(ImageUsage.username, ImageUsage.department, ImageUsage.period_key,
+               ImageUsage.images, ImageUsage.images_attempted, ImageUsage.provider_calls,
+               ImageUsage.agent_passed, ImageUsage.tasks, ImageUsage.failed,
+               ImageUsage.cost_cny)
+        .where(ImageUsage.granularity == "hour", ImageUsage.period_key >= window_start)
+    )
     if username:
         statement = statement.where(ImageUsage.username == username)
     if department:
         statement = statement.where(ImageUsage.department == department)
-    rows = session.execute(statement).scalars().all()
+    rows = session.execute(statement).all()
 
     buckets: dict[str, dict] = {key: {"key": key, "images": 0, "images_attempted": 0,
                                       "provider_calls": 0, "agent_passed": 0,

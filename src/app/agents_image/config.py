@@ -125,6 +125,8 @@ class ImageSettings(BaseSettings):
     vision_enabled: bool = False
     # 第五轮 P1-7：/api/image/metrics（Prometheus text format）的可选 Bearer 令牌
     metrics_token: str = ""
+    # 第五轮 P2：/admin/metrics 的进程内缓存秒数（0 = 关缓存）
+    metrics_cache_seconds: int = Field(default=30, ge=0, le=3600)
 
     # ---- 中台 / MCP（D6 起使用）----
     platform_url: str = "http://127.0.0.1:8001"   # 数据中台（本仓库 data_platform，端口 8001）

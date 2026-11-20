@@ -113,6 +113,9 @@ class ImageAsset(Base):
     purged_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
     source: Mapped[str] = mapped_column(String(16), default="mcp")  # mcp（v6：参考图只来自中台）
     sha256: Mapped[str] = mapped_column(String(64), index=True)
+    # 第五轮 P2：参考图/素材图的去重键（`kind|sha256|账号|商品|颜色`），唯一索引兜底并发；
+    # output/blocked 为 NULL（同一张字节在不同任务里必须各占一行）
+    dedupe_key: Mapped[str | None] = mapped_column(String(200), nullable=True)
     storage: Mapped[str] = mapped_column(String(16), default="local")
     key: Mapped[str] = mapped_column(String(256), default="")
     mime: Mapped[str] = mapped_column(String(32), default="image/png")

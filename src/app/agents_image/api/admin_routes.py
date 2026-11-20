@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import logging
+import time
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
@@ -191,7 +192,12 @@ def _listing_rate(session) -> float:
 
 @router.get("/admin/metrics")
 async def admin_metrics(request: Request) -> JSONResponse:
-    """近 N 个周期的折线数据 + 五张卡（全员或单账号 × 月/周/日/小时）。"""
+    """近 N 个周期的折线数据 + 五张卡（全员或单账号 × 月/周/日/小时）。
+
+    第五轮 P2：加 30s 进程内缓存（`IMAGE_METRICS_CACHE_SECONDS`）。这个接口被面板轮询，
+    每次都要做多表 count + 使用量窗口扫描；SKU 侧同类聚合早就有 30s 缓存，生图侧一直没有。
+    `?refresh=1` 可强制绕过缓存（改完数据要立刻看结果的场景）。
+    """
     trace = trace_id_of(request)
     try:
         require_admin(request)
@@ -199,13 +205,20 @@ async def admin_metrics(request: Request) -> JSONResponse:
         username = (request.query_params.get("username") or "").strip() or None
         department = (request.query_params.get("department") or "").strip() or None
         count = int(request.query_params.get("count") or 30)
+        refresh = (request.query_params.get("refresh") or "").strip() in {"1", "true", "yes"}
         runtime = await _runtime_snapshot()
-        with session_scope() as session:
-            rows = usage_store.buckets(session, granularity=granularity, count=count,
-                                       username=username, department=department)
-            cards = _cards(session, runtime=runtime, username=username,
-                           department=department)
-            outbox = outbox_store.stats()
+        cache_key = (granularity, count, username or "", department or "")
+        cached = None if refresh else _metrics_cache_get(cache_key)
+        if cached is not None:
+            rows, cards = cached["buckets"], cached["cards"]
+        else:
+            with session_scope() as session:
+                rows = usage_store.buckets(session, granularity=granularity, count=count,
+                                           username=username, department=department)
+                cards = _cards(session, runtime=runtime, username=username,
+                               department=department)
+            _metrics_cache_put(cache_key, {"buckets": rows, "cards": cards})
+        outbox = outbox_store.stats()
     except ImageError as exc:
         return error_response(exc, trace)
     except ValueError as exc:
@@ -213,9 +226,47 @@ async def admin_metrics(request: Request) -> JSONResponse:
     return JSONResponse(status_code=200, content={
         "granularity": granularity, "username": username or "all",
         "department": department or "all",
-        "buckets": rows, "cards": cards, "outbox": outbox,
-        "runtime": runtime, "trace_id": trace,
+        "buckets": rows, "cards": cards, "outbox": outbox, "runtime": runtime,
+        "cached": cached is not None, "trace_id": trace,
     })
+
+
+# 指标缓存：进程内、30s（可配）；只缓存"贵的部分"（buckets/cards），在途与 outbox 每次实算
+_METRICS_CACHE: dict[tuple, tuple[float, dict]] = {}
+
+
+def _metrics_cache_ttl() -> float:
+    from app.agents_image.config import get_image_settings
+
+    return float(getattr(get_image_settings(), "metrics_cache_seconds", 30) or 0)
+
+
+def _metrics_cache_get(key: tuple) -> dict | None:
+    ttl = _metrics_cache_ttl()
+    if ttl <= 0:
+        return None
+    entry = _METRICS_CACHE.get(key)
+    if entry is None:
+        return None
+    expires_at, value = entry
+    if expires_at < time.monotonic():      # 过期即丢（这里不主动清理其它 key）
+        _METRICS_CACHE.pop(key, None)
+        return None
+    return value
+
+
+def _metrics_cache_put(key: tuple, value: dict) -> None:
+    ttl = _metrics_cache_ttl()
+    if ttl <= 0:
+        return
+    if len(_METRICS_CACHE) > 64:           # 组数很少，但别让 key 无限涨
+        for stale in list(_METRICS_CACHE)[: len(_METRICS_CACHE) - 64]:
+            _METRICS_CACHE.pop(stale, None)
+    _METRICS_CACHE[key] = (time.monotonic() + ttl, value)
+
+
+def reset_metrics_cache() -> None:
+    _METRICS_CACHE.clear()
 
 
 @router.get("/admin/tasks")

@@ -17,43 +17,59 @@ from app.core.errors import raise_image
 logger = logging.getLogger("sku-agent.image.assets")
 
 
+def _dedupe_key(kind: str, sha256: str, username: str, product_id: str | None,
+                color_key: str) -> str | None:
+    """参考图/素材图的去重键（第五轮 P2）：并发下由唯一索引兜底，不再只靠"先查后写"。"""
+    if kind not in {"ref", "library"}:
+        return None
+    return f"{kind}|{sha256}|{username}|{product_id or ''}|{color_key or ''}"[:200]
+
+
 def save_bytes(session, data: bytes, *, kind: str, mime: str = "",
                task_id: str | None = None, slot: int = 0,
                username: str = "anonymous", department: str | None = None,
                product_id: str | None = None, color_key: str = "",
                source: str = "mcp", blocked_reason: str = "") -> ImageAsset:
-    """落盘并入库；参考图按 `(sha256, 账号, 商品)` 去重，产出按 task 独立成行。"""
+    """落盘并入库；参考图/素材图按去重键幂等，产出按 task 独立成行。
+
+    去重分两层（第五轮 P2）：
+    1. 先查（便宜路径，绝大多数命中走这里）；
+    2. 插入时用 `dedupe_key` 唯一索引兜底：并发两个请求同时写同一张图时，
+       后到的会撞唯一约束 → 回滚这一条并复用已存在行（savepoint 不污染外层事务）。
+    """
     storage = get_storage()
     ref = storage.put(data, kind=kind, mime=mime)
-    # ref 去重：同账号重复解析同一商品的同一张图，复用已有行（不重复占盘，也不跨账号串号）；
-    # 素材库（第三轮 P2-10）按 (sha256, 账号) 去重：同一张图重复上传不该占两次额度；
-    # output 必须按 task 独立成行，否则两次任务产出同样字节会被并成一条、任务查不到自己的图。
-    existing = None
-    if kind == "ref":
+    key = _dedupe_key(kind, ref.sha256, username, product_id, color_key)
+    if key:
         existing = session.execute(
-            select(ImageAsset).where(ImageAsset.sha256 == ref.sha256,
-                                     ImageAsset.kind == kind,
-                                     ImageAsset.username == username,
-                                     ImageAsset.product_id == product_id,
-                                     ImageAsset.color_key == (color_key or ""))
+            select(ImageAsset).where(ImageAsset.dedupe_key == key)
         ).scalars().first()
-    elif kind == "library":
-        existing = session.execute(
-            select(ImageAsset).where(ImageAsset.sha256 == ref.sha256,
-                                     ImageAsset.kind == kind,
-                                     ImageAsset.username == username)
-        ).scalars().first()
-    if existing is not None:
-        return existing
+        if existing is not None:
+            return existing
     asset = ImageAsset(
         asset_id=uuid.uuid4().hex, task_id=task_id, slot=slot,
         username=username, department=department, product_id=product_id,
         color_key=color_key or "",
         blocked_reason=blocked_reason or "",
-        kind=kind, source=source, sha256=ref.sha256,
+        kind=kind, source=source, sha256=ref.sha256, dedupe_key=key,
         storage=ref.storage, key=ref.key, mime=ref.mime,
         width=ref.width, height=ref.height, bytes=ref.bytes,
     )
+    if key:
+        from sqlalchemy.exc import IntegrityError
+
+        try:
+            with session.begin_nested():        # SAVEPOINT：撞唯一索引只回滚这一条
+                session.add(asset)
+                session.flush()
+            return asset
+        except IntegrityError:
+            hit = session.execute(
+                select(ImageAsset).where(ImageAsset.dedupe_key == key)
+            ).scalars().first()
+            if hit is not None:
+                return hit
+            raise
     session.add(asset)
     session.flush()
     return asset

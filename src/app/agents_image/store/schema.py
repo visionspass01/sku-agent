@@ -44,6 +44,7 @@ _COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("image_task", "listing_url", "TEXT"),
     ("image_task", "listed_at", "DATETIME"),
     ("image_asset", "color_key", "VARCHAR(64) DEFAULT ''"),
+    ("image_asset", "dedupe_key", "VARCHAR(200)"),
     ("image_asset", "adopt_status", "VARCHAR(16) DEFAULT 'pending'"),
     ("image_asset", "blocked_reason", "VARCHAR(64) DEFAULT ''"),
     ("image_asset", "purged_at", "DATETIME"),
@@ -66,7 +67,13 @@ _INDEXES: tuple[tuple[str, str, tuple[str, ...], bool], ...] = (
     ("idx_image_task_color", "image_task", ("color_key",), False),
     ("uq_image_usage_user_period", "image_usage",
      ("username", "period_key", "granularity"), True),
+    # 第五轮 P2：折线图只读窗口内的小时行（窗口下推），这两条索引直接服务该查询
+    ("idx_image_usage_scope", "image_usage", ("granularity", "period_key"), False),
+    ("idx_image_usage_dept", "image_usage", ("department", "period_key"), False),
     ("idx_image_asset_adopt", "image_asset", ("adopt_status",), False),
+    # 第五轮 P2：参考图/素材图去重键唯一索引（output/blocked 的 dedupe_key 为 NULL，
+    # SQLite 与 MySQL 的唯一索引都允许多个 NULL，所以产出图仍能各自成行）
+    ("uq_image_asset_dedupe", "image_asset", ("dedupe_key",), True),
     # 修复经验按 (签名|部门) 唯一：人工样本 dedupe_key 为 NULL，不受该约束影响
     ("uq_image_memory_dedupe", "image_memory", ("dedupe_key",), True),
 )

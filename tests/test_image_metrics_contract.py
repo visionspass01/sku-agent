@@ -61,7 +61,7 @@ def _wait(env, headers, task_id, timeout=30.0) -> dict:
 
 
 def _cards(env, headers) -> dict:
-    body = env.get("/api/image/admin/metrics?granularity=day&count=7", headers=headers).json()
+    body = env.get("/api/image/admin/metrics?granularity=day&count=7&refresh=1", headers=headers).json()
     return body["cards"]
 
 
@@ -99,7 +99,7 @@ def test_chart_buckets_carry_new_fields(env):
     headers = login(env)
     env.post("/api/image/tasks", headers=headers,
              json={"product_ids": ["P-3001"], "prompt": "白底主图", "image_count": 1})
-    body = env.get("/api/image/admin/metrics?granularity=hour&count=6", headers=headers).json()
+    body = env.get("/api/image/admin/metrics?granularity=hour&count=6&refresh=1", headers=headers).json()
     bucket = body["buckets"][-1]
     for key in ("images", "provider_calls", "agent_passed", "cost_cny"):
         assert key in bucket, key

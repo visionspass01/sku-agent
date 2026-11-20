@@ -126,7 +126,7 @@ def test_cards_and_buckets_respect_department(env):
         usage_store.record(session, username=second, department=department,
                            delivered=5, attempted=5, tasks=1, agent_passed=5)
 
-    body = env.get(f"/api/image/admin/metrics?granularity=day&count=7&department={department}",
+    body = env.get(f"/api/image/admin/metrics?granularity=day&count=7&department={department}&refresh=1",
                    headers=headers).json()
     assert body["cards"]["usage_images"] == 7
     assert body["cards"]["quota_limit"] == 30, "配额上限必须按部门聚合"
@@ -134,7 +134,7 @@ def test_cards_and_buckets_respect_department(env):
     assert bucket_users == {first, second}
 
     # 别的部门不能看到这两个账号的数据
-    other = env.get("/api/image/admin/metrics?granularity=day&count=7&department=男装",
+    other = env.get("/api/image/admin/metrics?granularity=day&count=7&department=男装&refresh=1",
                     headers=headers).json()
     other_users = {name for bucket in other["buckets"] for name in bucket["by_user"]}
     assert first not in other_users and second not in other_users

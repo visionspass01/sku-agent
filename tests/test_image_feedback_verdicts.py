@@ -75,7 +75,7 @@ def _cards(env, headers, username: str | None = None) -> dict:
     query = "granularity=day&count=7"
     if username:
         query += f"&username={username}"
-    return env.get(f"/api/image/admin/metrics?{query}", headers=headers).json()["cards"]
+    return env.get(f"/api/image/admin/metrics?{query}&refresh=1", headers=headers).json()["cards"]
 
 
 def _done_task(env, headers, product="P-3001") -> dict:

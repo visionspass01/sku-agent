@@ -79,7 +79,7 @@ def test_listing_mark_updates_task_and_metrics(env):
     assert fetched["listing_url"].startswith("https://shop.example.com")
     assert fetched["listed_at"]
 
-    metrics = env.get("/api/image/admin/metrics?granularity=day&count=3",
+    metrics = env.get("/api/image/admin/metrics?granularity=day&count=3&refresh=1",
                       headers=headers).json()
     assert 0.0 <= metrics["cards"]["listing_rate"] <= 1.0
 
