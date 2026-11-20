@@ -36,33 +36,59 @@ class LocalGenerator:
 
         `force=True` 只给"已经自己认领过"的调用方（看门狗的 `resume_pending`）；
         普通建任务/重试一律走认领，避免多实例重复执行同一任务（第三轮 P0-2）。
+
+        P1-3（第十二轮）：认领是同步 DB，丢线程池——建任务派发循环里每个任务一次，
+        满批 60 个任务就是 60 次阻塞往返压在事件循环上。
         """
+        from app.observability.trace import run_in_trace
+
         running = self._tasks.get(task_id)
         if running is not None and not running.done():
             return task_id
         if not force:
             lease = int(getattr(self.settings, "task_lease_seconds", 300) or 300)
-            with session_scope() as session:
-                if not task_store.claim(session, task_id, lease_seconds=lease):
-                    return task_id          # 已被认领/不在 queued：不重复派发
+
+            def _claim() -> bool:
+                with session_scope() as session:
+                    return task_store.claim(session, task_id, lease_seconds=lease)
+
+            if not await run_in_trace(_claim):
+                return task_id          # 已被认领/不在 queued：不重复派发
         self._tasks[task_id] = asyncio.create_task(self._run(task_id), name=f"image-task-{task_id}")
         return task_id
 
     async def _run(self, task_id: str) -> None:
         from app.agents_image.graph import execute_task
+        from app.observability.trace import run_in_trace
 
         async with self._semaphore:
-            with session_scope() as session:
-                task = task_store.get_task(session, task_id)
-                if task is None or task.status in {"canceled", "done", "failed"}:
-                    return
-                task_trace = str(getattr(task, "trace_id", "") or "")
-                task_store.mark_running(session, task_id)
-                # 拿到并发槽位后再续一次租约：排队时间再长也不会被别的实例/看门狗抢走
-                task_store.renew_lease(
-                    session, task_id,
-                    seconds=int(getattr(self.settings, "task_lease_seconds", 300) or 300))
+            def _start() -> str | None:
+                """同步起点：状态判定 + 认领执行权 + 续约（P1-3：整块丢线程池）。"""
+                with session_scope() as session:
+                    task = task_store.get_task(session, task_id)
+                    if task is None or task.status in {"canceled", "done", "failed"}:
+                        return None
+                    task_trace = str(getattr(task, "trace_id", "") or "")
+                    # P1-5（第十二轮）：用 CAS 认领执行权（只允许 queued → running）。
+                    # 上一版是"先读状态、再无条件写 running"，两步之间用户取消会被覆盖回
+                    # running：界面显示已取消，任务却继续出图并按全价结算。
+                    if not task_store.mark_running(session, task_id):
+                        return None
+                    # 拿到并发槽位后再续一次租约：排队时间再长也不会被别的实例/看门狗抢走
+                    task_store.renew_lease(
+                        session, task_id,
+                        seconds=int(getattr(self.settings, "task_lease_seconds", 300) or 300))
+                    return task_trace
+
+            task_trace = await run_in_trace(_start)
+            if task_trace is None:
+                return
             self._in_flight += 1
+            # P2-2（第十二轮）：`metrics.set_in_flight` 过去没有任何调用点，
+            # Prometheus 的 `image_in_flight` 与 health 段的在途数永远是 0（死指标）。
+            from app.agents_image import metrics as image_metrics
+
+            image_metrics.set_in_flight(self._in_flight)
             # P1-1（第十轮）：后台执行体必须绑定任务的 trace——
             # 否则执行期的日志（graph/settlement/provider）全部是 [trace=-]，
             # 与创建请求的 trace 串不起来（task_id 只能串同一条任务，串不了请求）。
@@ -76,9 +102,12 @@ class LocalGenerator:
                     await self._execute(task_id, execute_task)
             finally:
                 self._in_flight -= 1
+                image_metrics.set_in_flight(self._in_flight)
                 self._tasks.pop(task_id, None)
 
     async def _execute(self, task_id: str, execute_task) -> None:  # noqa: ANN001 —— 可注入以便测试
+        from app.observability.trace import run_in_trace
+
         try:
             await execute_task(task_id)
         except Exception as exc:  # noqa: BLE001 —— 任务失败必须落库，不能只打日志
@@ -96,37 +125,49 @@ class LocalGenerator:
             generated = stats["generated"]
             spent = stats["cost_cny"]
             llm_spent = stats["llm_cost_cny"]
-            with session_scope() as session:
-                task_store.mark_failed(session, task_id, code=err.code, detail=err.detail)
-                if calls or generated or spent or llm_spent:
-                    task_store.update_task(session, task_id, provider_calls=calls,
-                                           attempted_images=generated,
-                                           external_cost_cny=spent,
-                                           llm_cost_cny=llm_spent)
-                # 释放预留 + 记失败使用量（图已经生成过，钱已经花掉）；
-                # 若 graph 内部已经结算过（如全被门禁拦下），这里会被 settled_at 拦掉
-                settlement.settle_cancel(session, task_id, attempted=generated,
-                                         provider_calls=calls, cost=spent,
-                                         llm_cost=llm_spent)
+
+            def _record_failure() -> None:
+                with session_scope() as session:
+                    task_store.mark_failed(session, task_id, code=err.code, detail=err.detail)
+                    if calls or generated or spent or llm_spent:
+                        task_store.update_task(session, task_id, provider_calls=calls,
+                                               attempted_images=generated,
+                                               external_cost_cny=spent,
+                                               llm_cost_cny=llm_spent)
+                    # 释放预留 + 记失败使用量（图已经生成过，钱已经花掉）；
+                    # 若 graph 内部已经结算过（如全被门禁拦下），这里会被 settled_at 拦掉
+                    settlement.settle_cancel(session, task_id, attempted=generated,
+                                             provider_calls=calls, cost=spent,
+                                             llm_cost=llm_spent)
+
+            # P1-3（第十二轮）：失败落库也是同步 DB，丢线程池（失败路径不能反过来卡住 loop）
+            await run_in_trace(_record_failure)
 
     async def cancel(self, task_id: str) -> bool:
         """取消任务：未调模型 → 释放预留额度并记一次失败；已结束的任务取消返回 False。"""
         from app.agents_image import settlement
+        from app.observability.trace import run_in_trace
 
-        with session_scope() as session:
-            task = task_store.get_task(session, task_id)
-            if task is None or task.status in {"done", "failed"}:
-                return False
-            already_canceled = task.status == "canceled"
-            if not already_canceled:
-                task_store.update_task(session, task_id, status="canceled",
-                                       finished_at=dt.datetime.now(),
-                                       error_code="IMG_TASK_CANCELED",
-                                       error_detail="用户在调用生图模型前取消")
-            # 关键：额度必须在这里退回（过去只改状态，预留永远占着 → P0-1）
-            settlement.settle_cancel(session, task_id, code="IMG_TASK_CANCELED",
-                                     detail="用户在调用生图模型前取消",
-                                     mark_canceled=False)
+        def _cancel_db() -> bool:
+            with session_scope() as session:
+                task = task_store.get_task(session, task_id)
+                if task is None or task.status in {"done", "failed"}:
+                    return False
+                already_canceled = task.status == "canceled"
+                if not already_canceled:
+                    task_store.update_task(session, task_id, status="canceled",
+                                           finished_at=dt.datetime.now(),
+                                           error_code="IMG_TASK_CANCELED",
+                                           error_detail="用户在调用生图模型前取消")
+                # 关键：额度必须在这里退回（过去只改状态，预留永远占着 → P0-1）
+                settlement.settle_cancel(session, task_id, code="IMG_TASK_CANCELED",
+                                         detail="用户在调用生图模型前取消",
+                                         mark_canceled=False)
+                return True
+
+        # P1-3（第十二轮）：取消判定/结算都是同步 DB，丢线程池
+        if not await run_in_trace(_cancel_db):
+            return False
         running = self._tasks.pop(task_id, None)
         if running is not None and not running.done():
             running.cancel()
@@ -142,34 +183,50 @@ class LocalGenerator:
         P1-1（第十一轮）：接管一个"租约过期的 running"任务前，先把任务台账里**已经发生的**
         发起量/张数/成本结算进使用量流水，再把台账字段清零给新一次执行用。
         否则崩溃/被抢的任务重投会重复花钱，而账一直是 0（第二次结算只记本轮）。
+
+        P1-3（第十二轮）：候选扫描与逐条认领都是同步 DB，整块丢线程池
+        （看门狗在服务进程内跑，压在 loop 上就是周期性的全站抖动）。
         """
+        from app.observability.trace import run_in_trace
+
         lease = int(getattr(self.settings, "task_lease_seconds", 300) or 300)
         grace = int(getattr(self.settings, "claim_grace_seconds", 30) or 0)
         max_recoveries = int(getattr(self.settings, "max_recoveries", 3) or 3)
-        with session_scope() as session:
-            candidates = task_store.list_recoverable(
-                session, lease_seconds=lease, grace_seconds=grace)
+
+        def _list_candidates():  # noqa: ANN202 —— 内部辅助
+            with session_scope() as session:
+                return task_store.list_recoverable(
+                    session, lease_seconds=lease, grace_seconds=grace)
+
+        candidates = await run_in_trace(_list_candidates)
         resumed: list[str] = []
         for candidate in candidates:
-            with session_scope() as session:
-                if candidate.kind == "queued":
-                    claimed = task_store.claim(session, candidate.task_id, lease_seconds=lease)
-                else:
-                    claimed = task_store.claim_running(session, candidate.task_id,
-                                                       lease_seconds=lease)
-                if not claimed:
-                    continue                 # 别人抢先接管/任务已不在候选状态
-                if candidate.kind != "queued":
-                    _flush_partial_cost(session, candidate.task_id)
-                recoveries = task_store.bump_recoveries(session, candidate.task_id)
-                if recoveries > max_recoveries:
-                    task_store.mark_failed(
-                        session, candidate.task_id, code="IMG_RECOVERY_EXHAUSTED",
-                        detail=f"看门狗已重投 {recoveries} 次仍未完成，判失败（不再重投）")
-                    from app.agents_image import settlement
+            def _claim_candidate(cand=candidate) -> str:  # noqa: ANN001 —— 内部辅助
+                """返回 skip / exhausted / claimed 三种结论。"""
+                with session_scope() as session:
+                    if cand.kind == "queued":
+                        claimed = task_store.claim(session, cand.task_id, lease_seconds=lease)
+                    else:
+                        claimed = task_store.claim_running(session, cand.task_id,
+                                                           lease_seconds=lease)
+                    if not claimed:
+                        return "skip"          # 别人抢先接管/任务已不在候选状态
+                    if cand.kind != "queued":
+                        _flush_partial_cost(session, cand.task_id)
+                    recoveries = task_store.bump_recoveries(session, cand.task_id)
+                    if recoveries > max_recoveries:
+                        task_store.mark_failed(
+                            session, cand.task_id, code="IMG_RECOVERY_EXHAUSTED",
+                            detail=f"看门狗已重投 {recoveries} 次仍未完成，判失败（不再重投）")
+                        from app.agents_image import settlement
 
-                    settlement.settle_cancel(session, candidate.task_id)
-                    continue
+                        settlement.settle_cancel(session, cand.task_id)
+                        return "exhausted"
+                    return "claimed"
+
+            outcome = await run_in_trace(_claim_candidate)
+            if outcome != "claimed":
+                continue
             await self.submit(candidate.task_id, force=True)
             resumed.append(candidate.task_id)
         if resumed:

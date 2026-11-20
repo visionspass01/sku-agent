@@ -47,6 +47,28 @@ def create_task(session, *, task_id: str, username: str, department: str | None,
     return task
 
 
+def create_task_with_retry(session, *, id_factory, max_tries: int = 5, **fields) -> ImageTask:
+    """建任务并**兜住主键撞车**（P1-6，第十二轮）。
+
+    任务 ID 是"时间前缀 + 4 位随机 hex"：同一秒内最多 65536 个名额，而一次批量请求
+    最多可建 60 个任务（几乎全在同一秒），撞主键概率约 2.7%/批。过去撞了就是
+    `IntegrityError` 冒到路由层 → **整批回滚 + 500**（同一事务里先建的也一起丢）。
+    这里用 SAVEPOINT 只回滚这一条 INSERT，换一个 ID 重试；重试仍失败才抛。
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    last_exc: BaseException | None = None
+    for _ in range(max(1, int(max_tries))):
+        task_id = id_factory()
+        try:
+            with session.begin_nested():        # SAVEPOINT：只回滚这一条
+                return create_task(session, task_id=task_id, **fields)
+        except IntegrityError as exc:           # 主键撞车（极小概率）→ 换 id 再来
+            last_exc = exc
+            continue
+    raise last_exc if last_exc is not None else RuntimeError("建任务失败")
+
+
 def get_task(session, task_id: str) -> ImageTask | None:
     return session.get(ImageTask, task_id)
 
@@ -62,8 +84,21 @@ def update_task(session, task_id: str, **fields: Any) -> ImageTask | None:
     return task
 
 
-def mark_running(session, task_id: str) -> None:
-    update_task(session, task_id, status="running", started_at=dt.datetime.now())
+def mark_running(session, task_id: str) -> bool:
+    """把任务置为 running（**CAS**：只有 queued 才能变成 running）。
+
+    P1-5（第十二轮）：上一版是"先读状态、再无条件写"，与取消/失败之间有一个窗口：
+    用户在这中间取消，`update_task` 会把 `canceled` 覆盖回 `running`——界面显示已取消，
+    任务却继续出图、继续计费，最后连状态也变成 done。这里用条件 UPDATE 抢执行权，
+    抢不到（已被取消/已结算/已被别的执行体认领）就返回 False，调用方直接放弃执行。
+    """
+    result = session.execute(
+        update(ImageTask)
+        .where(ImageTask.task_id == task_id, ImageTask.status == "queued")
+        .values(status="running", started_at=dt.datetime.now())
+    )
+    session.flush()
+    return bool(result.rowcount)
 
 
 def merge_warnings(session, task_id: str, warnings: list[str] | None) -> list[str]:
@@ -132,10 +167,22 @@ def mark_backfill(session, task_id: str, status: str) -> None:
     update_task(session, task_id, backfill_status=status)
 
 
-def mark_failed(session, task_id: str, *, code: str, detail: str = "") -> None:
-    # 终态要释放认领（lease），否则"失败后立刻重试/重投"会被 claim 拦住
-    update_task(session, task_id, status="failed", finished_at=dt.datetime.now(),
+def mark_failed(session, task_id: str, *, code: str, detail: str = "") -> bool:
+    """把任务置为 failed（**CAS**：不覆盖已取消/已交付的终态）。
+
+    P1-5（第十二轮）：失败落库同样不能无条件写——用户取消后，后台执行体抛出的异常
+    会把 `canceled` 覆盖成 `failed`（结算被 `settled_at` 拦住，但终态语义已经被改写）。
+    终态要释放认领（lease），否则"失败后立刻重试/重投"会被 claim 拦住。
+    """
+    result = session.execute(
+        update(ImageTask)
+        .where(ImageTask.task_id == task_id,
+               ImageTask.status.not_in(("canceled", "done")))
+        .values(status="failed", finished_at=dt.datetime.now(),
                 error_code=code, error_detail=detail, lease_until=None)
+    )
+    session.flush()
+    return bool(result.rowcount)
 
 
 def mark_settled(session, task_id: str) -> bool:

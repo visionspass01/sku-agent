@@ -70,12 +70,22 @@ def _fix_doc_matches(doc, kinds: list[str]) -> bool:
     return False
 
 
-def _renew_lease(task_id: str, settings) -> None:
-    """执行期续约（W1）：每个阶段续一次，保证在途任务不会被看门狗重投。"""
+async def _renew_lease(task_id: str, settings) -> None:
+    """执行期续约（W1）：每个阶段续一次，保证在途任务不会被看门狗重投。
+
+    P1-3（第十二轮）：续约是同步 DB 写（每任务每轮 3 次），直接调会把事件循环压在下面；
+    与像素门禁/RAG 召回同一套做法：丢线程池。
+    """
+    from app.observability.trace import run_in_trace
+
     seconds = int(getattr(settings, "task_lease_seconds", 300) or 300)
-    try:
+
+    def _renew() -> None:
         with session_scope() as session:
             task_store.renew_lease(session, task_id, seconds=seconds)
+
+    try:
+        await run_in_trace(_renew)
     except Exception:  # noqa: BLE001 —— 续约失败不影响执行
         logger.warning("任务续约失败：task=%s", task_id)
 
@@ -251,15 +261,29 @@ async def _generate_or_attach_partial(settings, refs: list[dict], drafts,
 
 
 async def _gate_image(image: critic_mod.CheckedImage, *, role: str, rules, gate_mode: str,
-                      autofix: bool, aspect: str, nonpng_policy: str):
+                      autofix: bool, aspect: str, nonpng_policy: str, decoded=None):
     """单图像素门禁（P1-4）：纯 Python 解码/统计单图可达数百毫秒到 1 秒，
     必须丢线程池，不能占着事件循环——否则并发任务一多，SSE 心跳/取消/其它任务全被拖后。
+
+    `decoded`（P2-1，第十二轮）：Critic 颜色漂移检测已经解过的像素，直接复用不重复解。
     """
     from app.observability.trace import run_in_trace
 
     return await run_in_trace(
         compliance.gate, image.data, slot=image.slot, role=role, platform_rules=rules,
-        gate_mode=gate_mode, autofix=autofix, aspect=aspect, nonpng_policy=nonpng_policy)
+        gate_mode=gate_mode, autofix=autofix, aspect=aspect, nonpng_policy=nonpng_policy,
+        decoded=decoded)
+
+
+def _decode_images(images: list[critic_mod.CheckedImage]) -> list:
+    """一次性解码整批出图（P2-1）：Critic 与像素门禁共用，避免同一批图各解一遍。
+
+    由调用方丢线程池执行（纯 Python PNG 解码）；返回与 `images` **同序**的像素元组，
+    解不出来的位置是 None（各自按降级策略处理）。
+    """
+    from app.agents_image import pixels
+
+    return [pixels.decode_any(image.data) for image in images]
 
 
 def _collect_images(result: dict) -> list[critic_mod.CheckedImage]:
@@ -364,7 +388,7 @@ async def execute_task(task_id: str) -> ImageTaskState:
     # P1（第十轮）：任务级截止时间（生图 API 最大等待 360s，超时即失败）
     deadline_at = time.time() + float(getattr(settings, "task_max_seconds", 360) or 360)
 
-    _renew_lease(task_id, settings)
+    await _renew_lease(task_id, settings)
     state.touch("understand")
     # 第六轮 P1-3：解析触发改成「模式驱动」——
     # 过去只有 attrs 为空才解析，而建任务时总会写入中台 attrs，于是 LLM/视觉解析永远不执行；
@@ -424,7 +448,7 @@ async def execute_task(task_id: str) -> ImageTaskState:
     last_reflection = None
     for attempt in range(1, max_attempts + 1):
         state.attempt = attempt
-        _renew_lease(task_id, settings)
+        await _renew_lease(task_id, settings)
         # P1（第十轮）：生图 API 最大等待 360s（IMAGE_TASK_MAX_SECONDS），超时即失败。
         # 每轮生成前检查一次：到点就不再花钱，异常上带已发生的张数/成本，结算按真实值记账。
         if deadline_at and time.time() > deadline_at:
@@ -462,10 +486,15 @@ async def execute_task(task_id: str) -> ImageTaskState:
         images = _collect_images(result)
         provider_calls += int(result.get("provider_calls") or len(images))
         attempted += len(images)
-        _renew_lease(task_id, settings)
+        # P2-1（第十二轮）：同一批图只解码一次——后续 Critic 的颜色漂移与像素门禁共用，
+        # 解码本身丢线程池（纯 Python PNG 解码，单图 0.3–1s）
+        from app.observability.trace import run_in_trace as _run_in_trace
+
+        decoded = await _run_in_trace(_decode_images, images) if images else []
+        await _renew_lease(task_id, settings)
         state.touch("critic", attempt=attempt, images=len(images))
         critic = critic_mod.critique(state, current, images, settings=settings, rules=rules,
-                                     manifest=registry.manifest)
+                                     manifest=registry.manifest, decoded=decoded)
         if critic.passed:
             # P0-4：只有"失败转成功"才归档修法（失败本身不进记忆，避免污染默认生成）
             if attempt > 1 and last_signature and last_reflection is not None:
@@ -512,12 +541,14 @@ async def execute_task(task_id: str) -> ImageTaskState:
     autofix_images = bool(getattr(settings, "compliance_autofix", True))
     nonpng_policy = str(getattr(settings, "compliance_nonpng", "warn") or "warn")
     gated: list[tuple[int, str, object, str]] = []
-    for image in images:
+    for index, image in enumerate(images):
         role = _role_of(state, image.slot)
         # P1-4：门禁在**线程池**里跑（纯 Python 像素统计单图 ~1s，不能阻塞事件循环）
+        # P2-1：复用上面那一次解码（decoded 与 images 同序）
         verdict = await _gate_image(
             image, role=role, rules=rules, gate_mode=gate_mode, autofix=autofix_images,
-            aspect=state.aspect, nonpng_policy=nonpng_policy)
+            aspect=state.aspect, nonpng_policy=nonpng_policy,
+            decoded=decoded[index] if index < len(decoded) else None)
         gated.append((image.slot, role, verdict, image.mime or "image/png"))
     # P1（第十轮）：生成+门禁都做完了，但如果已经超过任务截止时间，按"超时即失败"处理：
     # 图不交付，已发生的发起量/张数/成本按真实值记账（`_raise_deadline` 已挂到异常上）。
