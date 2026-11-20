@@ -158,7 +158,12 @@ async def _generate_with_retry(provider, request) -> tuple[Any, int]:
     try:
         for attempt in range(1, attempts + 1):
             try:
-                return await provider.generate(request), attempt
+                # P2-5（第九轮）：信号量只包住**单次** provider 调用。
+                # 旧实现把 `async with _provider_semaphore()` 套在整段重试外，
+                # 退避睡眠期间也占着全局并发槽位：一次限流重试会把
+                # IMAGE_PROVIDER_CONCURRENCY 个名额一起占住，吞吐被白白压掉。
+                async with _provider_semaphore():
+                    return await provider.generate(request), attempt
             except ImageError as exc:
                 last_exc = exc
                 if attempt >= attempts or not _retryable(exc):
@@ -203,8 +208,7 @@ async def run(payload: dict[str, Any]) -> dict[str, Any]:
                 seed=payload.get("seed"),
                 preserve=list(payload.get("preserve") or []),
             )
-            async with _provider_semaphore():
-                result, calls = await _generate_with_retry(provider, request)
+            result, calls = await _generate_with_retry(provider, request)
             provider_calls += int(calls)
             results.append({
                 "slot": int(slot.get("slot") or 1),

@@ -172,7 +172,11 @@ class McpCatalog:
 
     # ------------------------------------------------------------ 回写
     async def save_result(self, payload: dict) -> dict:
-        # 工具签名是 `image_save_result(payload)`，MCP 侧的参数名就是 payload
+        # 工具签名是 `image_save_result(payload)`，MCP 侧的参数名就是 payload。
+        # P2-6（第九轮）：网络超时/5xx 会重试（`_request`），因此**重发必须是同一份 payload**：
+        # 中台按 `(task_id, slot)` upsert，同样的内容重放是幂等的；如果 payload 里混入
+        # 时间戳/随机值，重试会把中台结果覆盖成"新内容"。payload 的确定性由
+        # test_image_provider_retry_semaphore.py 锁住。
         return await self._tool("image_save_result", {"payload": payload or {}})
 
     # ------------------------------------------------------------ 取图
