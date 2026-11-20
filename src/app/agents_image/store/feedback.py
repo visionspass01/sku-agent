@@ -10,6 +10,7 @@ import datetime as dt
 import logging
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from app.agents_image.store.models import ImageAsset, ImageFeedback, ImageMemory
 from app.core.errors import raise_image
@@ -61,10 +62,27 @@ def record(session, *, task_id: str, asset_id: str, verdict: str, reason: str = 
     previous = (row.verdict if row is not None else "") or ""
     first_created_at = row.created_at if row is not None else None
     if row is None:
-        row = ImageFeedback(task_id=task_id, asset_id=asset_id, slot=slot or asset.slot,
-                            verdict=verdict, reason=reason[:500], username=username,
-                            created_at=dt.datetime.now())
-        session.add(row)
+        new_row = ImageFeedback(task_id=task_id, asset_id=asset_id, slot=slot or asset.slot,
+                                verdict=verdict, reason=reason[:500], username=username,
+                                created_at=dt.datetime.now())
+        try:
+            with session.begin_nested():      # SAVEPOINT：并发双击只回滚这一条 INSERT
+                session.add(new_row)
+                session.flush()
+            row = new_row
+        except IntegrityError:
+            # P2-9（第九轮）：并发双击同一张图（前端连点/双开）时，唯一索引 `uq_image_feedback_asset`
+            # 会让后到者撞键；上一版直接 500。现在退回"覆盖更新"，并以**胜者写入的状态**为准
+            # 重新计算 changed：两个并发 adopt 只会记一次采纳，不会重复加计。
+            row = session.execute(
+                select(ImageFeedback).where(ImageFeedback.asset_id == asset_id)
+            ).scalars().first()
+            if row is None:                   # pragma: no cover —— 撞键后却读不到行
+                raise
+            previous = str(row.verdict or "")
+            row.verdict = verdict
+            row.reason = reason[:500]
+            row.username = username or row.username
     else:
         row.verdict = verdict
         row.reason = reason[:500]
