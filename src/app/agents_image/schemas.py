@@ -211,19 +211,25 @@ def mask_banned(text: str, banned: tuple[str, ...] | list[str] = ()) -> str:
     return out
 
 
-def identity_missing(drafts, must_not_change: list[str] | None = None
-                     ) -> list[tuple[int, list[str]]]:
+def identity_missing(drafts, must_not_change: list[str] | None = None,
+                     *, check_prompt: bool = False) -> list[tuple[int, list[str]]]:
     """身份锁定检查的**唯一实现**（第五轮 P1-12）：validate 与 Critic 共用同一套判定。
 
     返回 `[(slot, 缺失的锁定词...)]`；列表为空表示每条 Prompt 都保住了 `must_not_change`。
-    过去 validate 与 critic 各写一份，改一处忘一处就会出现"校验通过但评审拦截"的口径分裂。
+
+    P1-1（第八轮）：默认只看 `preserve` 字段，而 `preserve` 是 `plan_slots.compose` 刚刚
+    **用同一份 must_not_change 写进去的**，拿它反过来比对等于自证（生产链路永远通过）。
+    传 `check_prompt=True` 时额外要求这些词**真的出现在 Prompt 正文里**——那才是下发给
+    模型的内容；模板/Reflexion 改坏了、丢词了，这里才会失败。
     """
     wanted = [str(item) for item in (must_not_change or []) if str(item or "").strip()]
     missing: list[tuple[int, list[str]]] = []
     for draft in drafts or []:
         slot = int(getattr(draft, "slot", 0) or 0)
         preserve = [str(item) for item in (getattr(draft, "preserve", None) or [])]
-        lost = [word for word in wanted if word not in preserve]
+        text = str(getattr(draft, "prompt", "") or "")
+        lost = [word for word in wanted
+                if word not in preserve or (check_prompt and word not in text)]
         if lost:
             missing.append((slot, lost))
     return missing

@@ -46,10 +46,14 @@ def _state(**overrides) -> ImageTaskState:
 
 
 _LOCKED = list(_PRODUCTS["P-1001"]["attrs"]["must_not_change"])
+# P1-1（第八轮）：真实 compose 出来的 Prompt 正文里**一定**带着这些锁定词（模板的否定清单槽位），
+# 测试用 draft 也要照这个形态来，否则「身份检查看正文」会把它们判成丢词。
+_LOCKED_TEXT = "、".join(_LOCKED)
 
 
 def _draft(slot: int = 1, **overrides) -> PromptDraft:
-    base = {"slot": slot, "role": "主图", "prompt": "白底主图，商品占画面 70%",
+    base = {"slot": slot, "role": "主图",
+            "prompt": f"白底主图，商品占画面 70%；保持以下不变：{_LOCKED_TEXT}",
             "negative_prompt": "文字水印", "preserve": list(_LOCKED), "type": "generate"}
     base.update(overrides)
     return PromptDraft(**base)
@@ -74,6 +78,68 @@ def test_critique_blocks_identity_loss():
     assert result.passed is False
     assert "identity" in result.consistency["blocking"]
     assert any("版型" in issue for issue in result.issues)
+
+
+def test_identity_missing_checks_prompt_text_not_only_preserve():
+    """P1-1：身份锁定必须看 **Prompt 正文**（preserve 由 compose 自己写入，自证不算）。"""
+    from app.agents_image.schemas import identity_missing
+
+    locked = ["颜色", "版型"]
+    draft = PromptDraft(slot=1, role="主图", prompt="白底主图", preserve=list(locked))
+    assert identity_missing([draft], locked) == []                      # 只看 preserve：通过
+    assert identity_missing([draft], locked, check_prompt=True) == [
+        (1, locked)], "正文里没有锁定词，必须判丢失"
+    ok = PromptDraft(slot=1, role="主图", prompt="保持：颜色、版型", preserve=list(locked))
+    assert identity_missing([ok], locked, check_prompt=True) == []
+
+
+def test_critique_blocks_identity_when_prompt_drops_lock_words():
+    """P1-1：preserve 齐全但 Prompt 正文丢了锁定词 → 也要 blocking（真实链路不会自证通过）。"""
+    draft = _draft(prompt="白底主图，商品占画面 70%")
+    result = critic_mod.critique(_state(), [draft], [_image()], settings=ImageSettings())
+    assert result.passed is False
+    assert "identity" in result.consistency["blocking"]
+    assert any("丢失身份锁定" in issue and "颜色" in issue for issue in result.issues), \
+        result.issues
+
+
+def test_color_drift_check_flags_wrong_dominant_color_when_enabled():
+    """P1-1：开颜色检测时，出图主色偏离锁定色要留痕（非 blocking，score −10）。"""
+    from app.agents_image.png import encode_png
+
+    locked_hex = str(_PRODUCTS["P-1001"]["attrs"]["color_hex"])
+    assert locked_hex.startswith("#")
+    locked_rgb = tuple(int(locked_hex[i:i + 2], 16) for i in (1, 3, 5))
+    black = encode_png(64, 64, bytes((0, 0, 0)) * 64 * 64)
+    match = encode_png(64, 64, bytes(locked_rgb) * 64 * 64)
+
+    def _img(data: bytes) -> critic_mod.CheckedImage:
+        return critic_mod.CheckedImage(slot=1, data=data, mime="image/png",
+                                       width=64, height=64)
+
+    settings = ImageSettings(critic_color_check=True)
+    state = _state()
+    drift = critic_mod.critique(state, [_draft()], [_img(black)], settings=settings)
+    assert any("identity_color" in issue for issue in drift.issues), drift.issues
+    assert any("IMG_COLOR_DRIFT" in warn for warn in state.warnings), state.warnings
+    assert drift.passed is True, "漂移只降分并告警，不直接判失败"
+    assert drift.score == 90
+
+    clean = critic_mod.critique(_state(), [_draft()], [_img(match)], settings=settings)
+    assert not any("identity_color" in issue for issue in clean.issues), clean.issues
+    assert clean.score == 100
+
+
+def test_color_drift_check_is_off_for_fake_provider_by_default():
+    """占位图的主体色是哈希派生的，默认（fake provider）不该误报颜色漂移。"""
+    from app.agents_image.png import encode_png
+
+    black = encode_png(64, 64, bytes((0, 0, 0)) * 64 * 64)
+    image = critic_mod.CheckedImage(slot=1, data=black, mime="image/png",
+                                    width=64, height=64)
+    result = critic_mod.critique(_state(), [_draft()], [image], settings=ImageSettings())
+    assert not any("identity_color" in issue for issue in result.issues), result.issues
+    assert result.score == 100
 
 
 def test_critique_blocks_wrong_aspect_image():

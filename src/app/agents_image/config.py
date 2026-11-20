@@ -106,6 +106,10 @@ class ImageSettings(BaseSettings):
     # ---- 质量与成本 ----
     critic_pass_score: int = Field(default=75, ge=0, le=100)
     reflexion_max_rounds: int = Field(default=2, ge=0, le=5)
+    # P1-1（第八轮）：出图主色与锁定色（attrs.color_hex）的漂移检测。
+    # None = 自动（真实 provider 开、fake 关，避免占位图误报）；True/False 显式覆盖。
+    critic_color_check: bool | None = None
+    critic_color_tolerance: float = Field(default=60.0, ge=0.0, le=441.7)
     cost_per_image_cny: float = Field(default=0.0, ge=0.0)
     cost_budget_cny: float = Field(default=0.5, ge=0.0)
 

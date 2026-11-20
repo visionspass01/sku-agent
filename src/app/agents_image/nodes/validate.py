@@ -76,7 +76,9 @@ def _validate_prompt_pack(state: ImageTaskState) -> None:
             raise_image("IMG_SCHEMA_INVALID",
                         f"图位 {draft.slot} 比例（{draft.aspect}）与请求（{state.aspect}）不一致")
     # P1-12：身份锁定检查与 Critic 共用 schemas.identity_missing（一处判定，两处引用）
-    for slot, missing in identity_missing(drafts, must_not_change):
+    # P1-1（第八轮）：check_prompt=True —— 要求锁定词**真的写进了 Prompt 正文**，
+    # 否则「preserve 由 compose 自己写入、自己校验」等于自证。
+    for slot, missing in identity_missing(drafts, must_not_change, check_prompt=True):
         raise_image("IMG_SCHEMA_INVALID",
                     f"图位 {slot} 丢失身份锁定字段：{'、'.join(missing)}")
 

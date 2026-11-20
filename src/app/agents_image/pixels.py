@@ -279,6 +279,31 @@ def resize(width: int, height: int, channels: int, pixels: bytearray,
     return encode_png(new_width, new_height, bytes(rgb))
 
 
+def dominant_color(width: int, height: int, channels: int, pixels: bytearray, *,
+                   white_threshold: int = 250, min_samples: int = 64
+                   ) -> tuple[int, int, int, int] | None:
+    """主体主色（对非白像素取均值）与样本数（P1-1：身份/颜色漂移检测用）。
+
+    返回 `(r, g, b, samples)`；非白像素少于 `min_samples` 时返回 None（图基本是纯白，
+    谈不上"主色"，别拿它去判漂移）。
+    """
+    total = width * height
+    red = green = blue = 0
+    samples = 0
+    for index in range(total):
+        base = index * channels
+        r, g, b = pixels[base], pixels[base + 1], pixels[base + 2]
+        if r >= white_threshold and g >= white_threshold and b >= white_threshold:
+            continue
+        red += r
+        green += g
+        blue += b
+        samples += 1
+    if samples < max(1, int(min_samples)):
+        return None
+    return red // samples, green // samples, blue // samples, samples
+
+
 __all__ = ["PngDecodeError", "decode_png", "decode_any", "rgb_stats", "stats_of",
-           "whiten_near_white", "crop_to_square", "crop_to_aspect", "resize",
-           "autofix_nonpng"]
+           "dominant_color", "whiten_near_white", "crop_to_square", "crop_to_aspect",
+           "resize", "autofix_nonpng"]

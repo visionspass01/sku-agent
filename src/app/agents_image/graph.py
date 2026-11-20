@@ -379,6 +379,12 @@ async def execute_task(task_id: str) -> ImageTaskState:
     state.prompt_pack = current + static_drafts
     state.critic = critic
     state.prompt_final = current[0].prompt or state.prompt
+    # P1-1（第八轮）：组装完 Prompt 后再做一次**真实**校验。
+    # 此前 validate 在 `prompt_pack` 还为空时被调用，`_validate_prompt_pack` 直接短路，
+    # 于是「身份锁定词是否真的写进 Prompt / Prompt 是否为空 / 比例是否一致」从没被检查过。
+    # 现在拿真正要下发给模型的那份文本再验一遍（模板/Reflexion 改坏了会在这里失败）。
+    state.touch("validate_final")
+    validate.validate(state, settings=settings)
     if state.warnings:
         state.touch("validate_warnings", count=len(state.warnings))
 
