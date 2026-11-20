@@ -67,7 +67,6 @@ async def upload_library_image(request: Request) -> JSONResponse:
                              f"（当前 {len(raw) / 1024 / 1024:.1f} MB）")
         def _save_asset() -> tuple[str, dict]:
             with session_scope() as session:
-                used = asset_store.count_library(session, user.username)
                 limit = int(settings.library_max_images)
                 already = asset_store.find_library_by_sha(session, user.username, raw)
                 if already is not None:
@@ -77,16 +76,34 @@ async def upload_library_image(request: Request) -> JSONResponse:
                                     "created_at": _iso(already.created_at),
                                     "deduped": True})
                     return "deduped", payload
-                if used >= limit and not user.is_admin:
-                    raise ImageError("IMG_LIBRARY_FULL",
-                                     f"素材库已满（每人最多 {limit} 张），请先删除不用的图")
-                # P2-6（第八轮）：**不信任请求里的 mime**，一律按字节嗅探（LocalStore.put 会
-                # sniff_mime，认不出 png/jpeg/webp 就 422），否则伪造扩展名可绕过白名单。
-                asset = asset_store.save_bytes(
-                    session, raw, kind="library", mime="",
-                    username=user.username, department=user.department,
-                    source="upload",
-                )
+                # P2-6（第十二轮）：先写再数、超了就回滚这一条。
+                # 上一版是"先 count 再 insert"：两个并发上传都读到 limit-1 → 双双写入，
+                # 每人上限被突破。这里用 SAVEPOINT 让"插入 + 校验上限"成为一个可撤销单元
+                # （SQLite/MySQL 下写事务本身串行，回滚能保证最终不超限）。
+                from sqlalchemy.exc import IntegrityError
+
+                try:
+                    with session.begin_nested():
+                        # P2-6（第八轮）：**不信任请求里的 mime**，一律按字节嗅探
+                        # （LocalStore.put 会 sniff_mime，认不出 png/jpeg/webp 就 422）。
+                        asset = asset_store.save_bytes(
+                            session, raw, kind="library", mime="",
+                            username=user.username, department=user.department,
+                            source="upload",
+                        )
+                        used = asset_store.count_library(session, user.username)
+                        if used > limit and not user.is_admin:
+                            raise ImageError(
+                                "IMG_LIBRARY_FULL",
+                                f"素材库已满（每人最多 {limit} 张），请先删除不用的图")
+                except IntegrityError:      # pragma: no cover —— 并发撞唯一键（去重键）
+                    hit = asset_store.find_library_by_sha(session, user.username, raw)
+                    if hit is None:
+                        raise
+                    payload = asset_payload(hit)
+                    payload.update({"username": hit.username,
+                                    "created_at": _iso(hit.created_at), "deduped": True})
+                    return "deduped", payload
                 payload = asset_payload(asset)
                 payload.update({"username": asset.username,
                                 "created_at": _iso(asset.created_at)})

@@ -71,11 +71,16 @@ def _thresholds(platform_rules, aspect: str | None = None) -> dict:
     return merged
 
 
-def _check(data: bytes, thresholds: dict) -> tuple[bool, list[str], dict, bool]:
-    """返回 (passed, reasons, stats, degraded)。degraded=True 表示像素校验被跳过。"""
+def _check(data: bytes, thresholds: dict, decoded=None) -> tuple[bool, list[str], dict, bool]:
+    """返回 (passed, reasons, stats, degraded)。degraded=True 表示像素校验被跳过。
+
+    `decoded`（P2-1，第十二轮）：调用方已经解好的像素 `(w, h, channels, pixels)`。
+    纯 Python PNG 解码是这整条门禁里最贵的一步（单图 0.3–1s），Critic 的颜色漂移检测
+    与像素门禁看的是**同一批字节**，过去各解一次——这里接受外部解码结果复用。
+    """
     reasons: list[str] = []
     stats: dict = {"bytes": len(data), "mb": round(len(data) / (1024 * 1024), 3)}
-    decoded = decode_any(data)
+    decoded = decoded if decoded is not None else decode_any(data)
     if decoded is None:
         # 解不了像素：不再静默 passed=True（P1-4）——交给上层按 warn/block 策略处理
         stats["pixel_check"] = False
@@ -119,8 +124,12 @@ def _autofix(data: bytes, thresholds: dict) -> bytes:
 
 def gate(data: bytes, *, slot: int, role: str, platform_rules=None,
          gate_mode: str = "main", autofix: bool = False, aspect: str | None = None,
-         nonpng_policy: str = "warn") -> Verdict:
-    """对单张出图做门禁：返回是否通过、原因与（可能的）修复后字节。"""
+         nonpng_policy: str = "warn", decoded=None) -> Verdict:
+    """对单张出图做门禁：返回是否通过、原因与（可能的）修复后字节。
+
+    `decoded`（P2-1）：调用方（编排层）已经在线程池里解好的像素，复用后同一批图
+    只解码一次（Critic 颜色漂移 + 像素门禁共用）。传 None 表示自己解。
+    """
     mode = (gate_mode or "main").strip().lower()
     if mode == "off":
         return Verdict(passed=True, reasons=[], data=data)
@@ -129,7 +138,7 @@ def gate(data: bytes, *, slot: int, role: str, platform_rules=None,
         return Verdict(passed=True, reasons=[], data=data)
 
     thresholds = _thresholds(platform_rules, aspect)
-    passed, reasons, stats, degraded = _check(data, thresholds)
+    passed, reasons, stats, degraded = _check(data, thresholds, decoded=decoded)
     if degraded:
         # P2-15：非 PNG（JPEG/WebP）在装了 Pillow 时也能修：归白 → 按比例裁 → 补长边 → 转 PNG，
         # 然后按普通 PNG 复检。没装 Pillow 仍然保持 degraded（可见降级，不假装校验过）。

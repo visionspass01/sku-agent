@@ -283,10 +283,13 @@ async def image_catalog(request: Request) -> JSONResponse:
         platform = (request.query_params.get("platform") or "淘系").strip()
         category = (request.query_params.get("category") or "").strip()
         catalog = get_catalog()
-        compositions = await catalog.list_compositions(category=category, platform=platform)
-        scene_styles = await catalog.list_scene_styles(category=category, platform=platform)
-        policy = await catalog.get_plan_policy(platform=platform, category=category)
-        rules = await catalog.get_platform_rules(platform=platform)
+        # P2-5（第十二轮）：四个上游调用彼此独立，串行等于 4 倍往返（首屏/切平台都会打）
+        compositions, scene_styles, policy, rules = await asyncio.gather(
+            catalog.list_compositions(category=category, platform=platform),
+            catalog.list_scene_styles(category=category, platform=platform),
+            catalog.get_plan_policy(platform=platform, category=category),
+            catalog.get_platform_rules(platform=platform),
+        )
         payload = {
             "platform": platform,
             "category": category,
@@ -623,8 +626,8 @@ async def create_tasks(request: Request) -> JSONResponse:
                     # P1-2（第八轮）：目标颜色没有对应参考图时，参考图解析会退回别颜色的图，
                     # 这条告警必须落到任务上（否则运营只看到"颜色不对"却不知道原因）
                     task_warnings.extend(resolution.warnings)
-                    task = task_store.create_task(
-                        session, task_id=new_task_id(), username=user.username,
+                    task = task_store.create_task_with_retry(
+                        session, id_factory=new_task_id, username=user.username,
                         department=user.department, batch_id=batch_id,
                         product_id=target.product_id, color_key=target.color_key,
                         variant_id=state.variant_id,
@@ -899,6 +902,8 @@ def list_tasks(request: Request) -> JSONResponse:
     trace = trace_id_of(request)
     try:
         user = require_user(request)
+        # P2-3（第十二轮）：任务列表是轮询接口（前端每次刷新都打），加请求级限流
+        check_rate_limit(user.username, "tasks_list")
         include_all = user.is_admin and request.query_params.get("all") in {"1", "true", "yes"}
         batch_id = (request.query_params.get("batch_id") or "").strip()
         try:

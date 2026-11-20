@@ -120,6 +120,7 @@ class LoginThrottle:
 
     def allowed(self, username: str, ip: str, now: float | None = None) -> tuple[bool, int]:
         moment = float(now if now is not None else time.time())
+        self._prune(moment)
         bucket = self._failures[self._key(username, ip)]
         while bucket and moment - bucket[0] > self.window_seconds:
             bucket.popleft()
@@ -127,6 +128,20 @@ class LoginThrottle:
             retry_after = max(1, int(self.window_seconds - (moment - bucket[0])))
             return False, retry_after
         return True, 0
+
+    def _prune(self, moment: float) -> None:
+        """清掉窗口外/空桶的 key（P2-4，第十二轮）。
+
+        上一版 `_failures` 只增不减：攻击者用大量不同的 用户名×IP 组合试登录，
+        字典会无限膨胀（每个 key 一个 deque），进程内存被慢慢吃满。
+        与 `ratelimit.SlidingWindow` 同款处理：超过阈值就整体扫一遍过期 key。
+        """
+        if len(self._failures) <= 512:
+            return
+        stale = [key for key, bucket in self._failures.items()
+                 if not bucket or moment - bucket[-1] >= self.window_seconds]
+        for key in stale:
+            self._failures.pop(key, None)
 
     def record_failure(self, username: str, ip: str, now: float | None = None) -> None:
         moment = float(now if now is not None else time.time())

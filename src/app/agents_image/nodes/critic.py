@@ -73,9 +73,13 @@ def _color_check_enabled(settings) -> bool:
     return provider not in {"", "fake"}
 
 
-def _dominant_of(image: CheckedImage) -> tuple[int, int, int] | None:
-    """出图主体主色；解不了像素就返回 None（不判漂移）。"""
-    decoded = decode_any(image.data)
+def _dominant_of(image: CheckedImage, decoded=None) -> tuple[int, int, int] | None:
+    """出图主体主色；解不了像素就返回 None（不判漂移）。
+
+    `decoded`（P2-1，第十二轮）：编排层已经解好的 `(w, h, channels, pixels)`，
+    复用后同一批图只解码一次（与像素门禁共用，纯 Python 解码是最贵的一步）。
+    """
+    decoded = decoded if decoded is not None else decode_any(image.data)
     if decoded is None:
         return None
     width, height, channels, pixels = decoded
@@ -92,7 +96,8 @@ def _color_distance(one: tuple[int, int, int], other: tuple[int, int, int]) -> f
 
 
 def critique(state: ImageTaskState, drafts: list[PromptDraft], images: list[CheckedImage],
-             *, settings=None, rules=None, manifest: dict | None = None) -> CriticResult:
+             *, settings=None, rules=None, manifest: dict | None = None,
+             decoded: list | None = None) -> CriticResult:
     """返回 CriticResult（score / issues / blocking 摘要），不抛异常。
 
     通过线与 blocking 规则优先取 manifest（`IMAGE_CRITIC_PASS_SCORE` 仍是兜底），
@@ -169,8 +174,9 @@ def critique(state: ImageTaskState, drafts: list[PromptDraft], images: list[Chec
     locked = _locked_color(state)
     if locked is not None and _color_check_enabled(settings):
         tolerance = float(getattr(settings, "critic_color_tolerance", 60.0) or 60.0)
-        for image in images:
-            got = _dominant_of(image)
+        for index, image in enumerate(images):
+            pre = decoded[index] if decoded and index < len(decoded) else None
+            got = _dominant_of(image, pre)
             if got is None:
                 continue
             distance = _color_distance(got, locked)

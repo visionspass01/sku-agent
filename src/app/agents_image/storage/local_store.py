@@ -9,7 +9,9 @@
 from __future__ import annotations
 
 import datetime as dt
+import os
 import pathlib
+import uuid
 
 from app.agents_image.config import get_image_settings
 from app.agents_image.storage.image_storage import AssetRef, image_size, sniff_mime
@@ -63,7 +65,16 @@ class LocalStore:
         path = self._path(key)
         path.parent.mkdir(parents=True, exist_ok=True)
         if not path.exists():
-            path.write_bytes(data)
+            # P2-7（第十二轮）：**原子落盘**（写临时文件 + os.replace）。
+            # 上一版直接 `path.write_bytes`：并发读端可能在写一半时读到截断文件
+            # （sha 命名 + 内容寻址，读到半截 = 像素解码失败/门禁误判）。
+            tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex[:8]}.tmp")
+            try:
+                tmp.write_bytes(data)
+                os.replace(tmp, path)
+            finally:
+                if tmp.exists():            # replace 成功后 tmp 已不存在
+                    tmp.unlink(missing_ok=True)
         width, height = image_size(data)
         return AssetRef(key=key, sha256=digest, mime=mime, width=width, height=height,
                         bytes=len(data), storage=self.name)

@@ -6,6 +6,7 @@ import asyncio
 import datetime as dt
 import logging
 import shutil
+import time
 
 from app.agents_image.config import get_image_settings
 from app.agents_image.store.schema import ensure_image_schema
@@ -19,11 +20,17 @@ _outbox_task: asyncio.Task | None = None
 
 
 def health_block() -> dict:
-    """健康段：报"当前生效的形态" + 库结构是否降级（第三轮 P2-4）。"""
+    """健康段：报"当前生效的形态" + 库结构是否降级（第三轮 P2-4）。
+
+    P2-2（第十二轮）：`tasks_pending` / `in_flight_images` 过去是**硬编码 0**——
+    运维看 /health 会以为"没有积压、没有在途"，而实际上任务可能在排队。
+    现在：在途取进程内计数（`metrics`），待处理取 DB 计数（60s 缓存，避免探针打爆库）。
+    """
     from app.agents_image.store.schema import schema_status
 
     settings = get_image_settings()
     status = schema_status()
+    in_flight = _in_flight_images()
     return {
         "enabled": bool(settings.enabled),
         "provider": settings.provider,
@@ -35,9 +42,51 @@ def health_block() -> dict:
         "secret_is_default": settings.secret_is_default,
         "degraded": bool(status.get("degraded")),
         "degraded_reason": "；".join(status.get("issues") or [])[:300],
-        "tasks_pending": 0,
-        "in_flight_images": 0,
+        "tasks_pending": _pending_tasks(),
+        "in_flight_images": in_flight,
     }
+
+
+def _in_flight_images() -> int:
+    """本实例正在执行的任务数（优先用调度器真实计数，取不到退回 metrics）。"""
+    try:
+        from app.agents_image.dispatch.task_dispatcher import get_dispatcher
+
+        return int(getattr(get_dispatcher(), "in_flight", 0) or 0)
+    except Exception:  # noqa: BLE001 —— 调度器没起来（脚本/测试）就退回计数快照
+        try:
+            from app.agents_image import metrics as image_metrics
+
+            return int(image_metrics.snapshot().get("in_flight_images", 0) or 0)
+        except Exception:  # noqa: BLE001
+            return 0
+
+
+_PENDING_CACHE: dict[str, float] = {}
+_PENDING_TTL_SECONDS = 60.0
+
+
+def _pending_tasks() -> int:
+    """排队/执行中的任务数（60s 缓存：/health 被探针高频读取，不能每次都数表）。"""
+    now = time.monotonic()
+    cached_at = _PENDING_CACHE.get("value_at")
+    if cached_at is not None and now - cached_at < _PENDING_TTL_SECONDS:
+        return int(_PENDING_CACHE.get("value") or 0)
+    try:
+        from sqlalchemy import func, select
+
+        from app.agents_image.store.models import ImageTask
+        from app.db.engine import session_scope
+
+        with session_scope() as session:
+            count = int(session.execute(
+                select(func.count()).select_from(ImageTask)
+                .where(ImageTask.status.in_(("queued", "running")))
+            ).scalar_one())
+    except Exception:  # noqa: BLE001 —— 库不可用时不要把 health 一起拖挂
+        count = 0
+    _PENDING_CACHE.update({"value": count, "value_at": now})
+    return count
 
 
 def sweep_local_files(now: dt.datetime | None = None) -> dict:
@@ -293,5 +342,6 @@ def reset_for_tests() -> None:
         if task is not None:
             task.cancel()
         globals()[name] = None
+    _PENDING_CACHE.clear()
     health_registry.unregister("image")
     shutil.rmtree(get_image_settings().images_dir, ignore_errors=True)

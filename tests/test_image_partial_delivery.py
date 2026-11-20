@@ -127,14 +127,14 @@ def test_blocked_slot_counts_as_partial(env, monkeypatch):
     calls = {"n": 0}
 
     def flaky_gate(data, *, slot, role, platform_rules, gate_mode, autofix,
-                   aspect=None, nonpng_policy="warn"):
+                   aspect=None, nonpng_policy="warn", decoded=None):
         calls["n"] += 1
         if calls["n"] == 2:                          # 第二个图位故意判不过
             return compliance.Verdict(passed=False, reasons=["测试注入：主体占比过大"],
                                       data=data)
         return original_gate(data, slot=slot, role=role, platform_rules=platform_rules,
                              gate_mode=gate_mode, autofix=autofix, aspect=aspect,
-                             nonpng_policy=nonpng_policy)
+                             nonpng_policy=nonpng_policy, decoded=decoded)
 
     monkeypatch.setattr(compliance, "gate", flaky_gate)
     created = env.post("/api/image/tasks", headers=headers, json={

@@ -20,6 +20,7 @@ import hashlib
 import math
 import re
 import threading
+import time
 from dataclasses import dataclass
 
 from app.agents_image.rag.corpus import Doc, corpus_fingerprint, load_corpus
@@ -287,7 +288,16 @@ def _cache_key(key: tuple) -> str:
 def _cache_get(key: tuple):
     cache = _shared_cache()
     if cache is None:
-        return _LOCAL_CACHE.get(key, {}).get("value")
+        entry = _LOCAL_CACHE.get(key)
+        if entry is None:
+            return None
+        # P2-8（第十二轮）：本地兜底缓存必须有 TTL。上一版只写不删：索引指纹不变时
+        # 结果永不刷新（新加的 KB 文档要等到进程重启/重建索引才可见），
+        # 而且与 Redis 路径的 `rag_cache_ttl_seconds` 语义不一致。
+        if float(entry.get("expire_at", 0.0)) <= time.monotonic():
+            _LOCAL_CACHE.pop(key, None)
+            return None
+        return entry.get("value")
     try:
         value = cache.get(_cache_key(key))
     except Exception:  # noqa: BLE001 —— 旁路缓存不许拖垮检索
@@ -295,18 +305,24 @@ def _cache_get(key: tuple):
     return value
 
 
+def _local_put(key: tuple, value) -> None:
+    """写本地兜底缓存（带 TTL + 512 条上限，双路径共用）。"""
+    _LOCAL_CACHE[key] = {"value": value,
+                         "expire_at": time.monotonic() + float(_cache_ttl())}
+    if len(_LOCAL_CACHE) > 512:              # 进程内兜底也不许无限涨
+        for stale in list(_LOCAL_CACHE)[: len(_LOCAL_CACHE) - 512]:
+            _LOCAL_CACHE.pop(stale, None)
+
+
 def _cache_set(key: tuple, value) -> None:
     cache = _shared_cache()
     if cache is None:
-        _LOCAL_CACHE[key] = {"value": value}
-        if len(_LOCAL_CACHE) > 512:              # 进程内兜底也不许无限涨
-            for stale in list(_LOCAL_CACHE)[: len(_LOCAL_CACHE) - 512]:
-                _LOCAL_CACHE.pop(stale, None)
+        _local_put(key, value)
         return
     try:
         cache.set(_cache_key(key), value, _cache_ttl())
-    except Exception:  # noqa: BLE001
-        _LOCAL_CACHE[key] = {"value": value}
+    except Exception:  # noqa: BLE001 —— 共享缓存写失败就退回本地（同样带 TTL）
+        _local_put(key, value)
 
 
 def cache_stats() -> dict:
