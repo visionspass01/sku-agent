@@ -75,3 +75,26 @@ def test_duplicate_index_error_is_recognized():
     assert _duplicate_index_error(Exception("(1061, 'Duplicate key name')"))
     assert _duplicate_index_error(Exception("index uq_x already exists"))
     assert not _duplicate_index_error(Exception("syntax error near IF"))
+
+
+def test_model_declared_indexes_are_covered_by_upgrade_path(_db):
+    """P2-1（第九轮）：模型里声明的索引（如采纳唯一索引）也必须在升级路径里补。
+
+    过去 `_ensure_indexes` 只遍历 `_INDEXES`：`create_all` 又不会给已存在的表补索引，
+    于是 `uq_image_feedback_asset`（并发采纳的唯一兜底）在旧库升级后永远建不出来。
+    """
+    from app.agents_image.store.schema import _index_specs
+
+    specs = {name for name, _, _, _ in _index_specs()}
+    assert "uq_image_feedback_asset" in specs, "模型声明的唯一索引必须纳入升级清单"
+
+    # 真删掉再 ensure，必须被重新建出来
+    from app.db.engine import get_engine
+
+    ensure_image_schema()
+    with get_engine().begin() as conn:
+        conn.execute(text("DROP INDEX IF EXISTS uq_image_feedback_asset"))
+        assert "uq_image_feedback_asset" not in _existing_index_names(
+            conn, "image_feedback", "sqlite")
+    result = ensure_image_schema()
+    assert "uq_image_feedback_asset" in result["indexes"], result

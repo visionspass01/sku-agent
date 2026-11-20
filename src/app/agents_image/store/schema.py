@@ -155,10 +155,33 @@ def _duplicate_index_error(exc: BaseException) -> bool:
             or "already exists" in text_of)
 
 
+def _index_specs() -> list[tuple[str, str, tuple[str, ...], bool]]:
+    """需要保证存在的索引：`_INDEXES` 清单 + **模型里声明的索引**（P2-1，第九轮）。
+
+    为什么要把模型索引也纳入：`create_all` 不会给"已存在的表"补索引，而升级路径
+    （`_ensure_indexes`）过去只遍历 `_INDEXES`。于是模型后来新增的索引（例如
+    `uq_image_feedback_asset`——并发采纳的唯一兜底）在旧库升级后**永远建不出来**，
+    并发改判会出现重复反馈行。这里统一收集，升级与新建走同一份清单。
+    """
+    specs: list[tuple[str, str, tuple[str, ...], bool]] = list(_INDEXES)
+    known = {name for name, _, _, _ in specs}
+    for table in _tables():
+        for index in table.indexes:
+            name = str(index.name or "")
+            if not name or name in known:
+                continue
+            columns = tuple(str(column.name) for column in index.columns)
+            if not columns:
+                continue
+            specs.append((name, table.name, columns, bool(index.unique)))
+            known.add(name)
+    return specs
+
+
 def _ensure_indexes(engine) -> list[str]:
     created: list[str] = []
     dialect = str(getattr(engine.dialect, "name", "") or "")
-    for name, table, columns, unique in _INDEXES:
+    for name, table, columns, unique in _index_specs():
         keyword = "UNIQUE INDEX" if unique else "INDEX"
         try:
             with engine.begin() as conn:
