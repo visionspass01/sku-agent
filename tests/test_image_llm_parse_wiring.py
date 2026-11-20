@@ -223,6 +223,43 @@ class _StubLLM:
         return self.raw
 
 
+def test_parse_usage_is_per_request_not_global_delta(env, monkeypatch):
+    """P2-A：并发/无关调用不得污染本次解析的 token 台账。
+
+    桩在本次调用期间额外往**全局 stats** 里塞了「别的任务」的量：上一版用全局差量
+    会把 5000+500 token 算到本次解析头上；现在只认 `turn_usage_context()` 里的 50+20。
+    """
+    from app import llm as real_llm
+    from app.agents_image import metrics as image_metrics
+
+    class _Stub:
+        def __init__(self):
+            self.stats = {"calls": 3, "input_tokens": 500, "output_tokens": 300}
+
+        async def invoke_text(self, system, user, max_tokens=None, *, json_mode=False):
+            real_llm.add_turn_usage(50, 20)          # 本次解析的真实用量
+            self.stats["calls"] += 1
+            self.stats["input_tokens"] += 50
+            self.stats["output_tokens"] += 20
+            # 另一个并发任务同时用了一次模型（只进全局，不进本次上下文）
+            self.stats["calls"] += 5
+            self.stats["input_tokens"] += 5000
+            self.stats["output_tokens"] += 500
+            return '{"color_hex": "#C8B7A6", "product_type": "针织开衫（短款）"}'
+
+    monkeypatch.setenv("IMAGE_LLM_PARSE_ENABLED", "true")
+    reset_image_settings()
+    monkeypatch.setattr(real_llm, "get_llm", lambda: _Stub())
+    state = ImageTaskState(task_id="t-usage", prompt="白底主图")
+    before = image_metrics.snapshot()
+    attrs, warnings = asyncio.run(llm_parse.parse_text(state, get_image_settings()))
+    after = image_metrics.snapshot()
+    assert attrs is not None and attrs["color_hex"] == "#C8B7A6"
+    assert warnings == []
+    assert after["llm_calls"] - before["llm_calls"] == 1
+    assert after["llm_tokens"] - before["llm_tokens"] == 70, "不得把并发任务的 token 算进来"
+
+
 def _seed_task(monkeypatch, *, attrs: dict, tmp_path=None) -> str:
     base = Path(tmp_path) if tmp_path else Path(tempfile.mkdtemp(prefix="img-llm-"))
     monkeypatch.setenv("IMAGE_IMAGES_ROOT", str(base / "images"))

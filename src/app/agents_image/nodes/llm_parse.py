@@ -89,23 +89,17 @@ def _user_prompt(state) -> str:
     )
 
 
-def _llm_usage_snapshot() -> dict:
-    try:
-        from app.llm import get_llm
+def _record_usage(usage: dict | None) -> None:
+    """把**本次解析**的用量记进图像指标（P2-A：不再用全局 stats 差量）。
 
-        stats = dict(getattr(get_llm(), "stats", {}) or {})
-        return {"calls": int(stats.get("calls") or 0),
-                "input_tokens": int(stats.get("input_tokens") or 0),
-                "output_tokens": int(stats.get("output_tokens") or 0)}
-    except Exception:  # noqa: BLE001
-        return {"calls": 0, "input_tokens": 0, "output_tokens": 0}
-
-
-def _record_usage(before: dict) -> None:
-    after = _llm_usage_snapshot()
-    calls = max(0, after["calls"] - before["calls"])
-    tokens = max(0, after["input_tokens"] - before["input_tokens"]
-                 + after["output_tokens"] - before["output_tokens"])
+    上一版用 `get_llm().stats` 前后快照做差：并发任务同时在跑时，别的链路的 token
+    会被算进本次解析，台账整体虚高（且随并发度漂移）。现在用量由
+    `app.llm.turn_usage_context()`（contextvar，任务内隔离）归集，这里只搬数字。
+    """
+    data = dict(usage or {})
+    calls = max(0, int(data.get("calls") or 0))
+    tokens = (max(0, int(data.get("input_tokens") or 0))
+              + max(0, int(data.get("output_tokens") or 0)))
     if calls or tokens:
         image_metrics.record_llm(calls=calls, tokens=tokens)
 
@@ -136,17 +130,28 @@ async def parse_text(state, settings, *, base_attrs: dict | None = None
     if not bool(getattr(settings, "llm_parse_enabled", False)):
         return None, []
     try:
-        from app.llm import get_llm
+        import importlib
+
+        # 走 importlib 而不是 `from app import llm`：后者会命中父包的属性缓存，
+        # 测试里用 sys.modules 替换的桩模块会被绕过去。
+        llm_mod = importlib.import_module("app.llm")
     except Exception as exc:  # noqa: BLE001 —— 模型依赖不可用
         return None, [f"IMG_LLM_PARSE_DEGRADED: 模型不可用（{type(exc).__name__}），已退回启发式"]
-    before = _llm_usage_snapshot()
+    usage: dict = {}
     try:
-        raw = await get_llm().invoke_text(PARSE_SYSTEM, _user_prompt(state), json_mode=True)
+        scope = getattr(llm_mod, "turn_usage_context", None)
+        if scope is None:  # 测试桩模块不一定带上下文归集
+            raw = await llm_mod.get_llm().invoke_text(
+                PARSE_SYSTEM, _user_prompt(state), json_mode=True)
+        else:
+            with scope() as usage:
+                raw = await llm_mod.get_llm().invoke_text(
+                    PARSE_SYSTEM, _user_prompt(state), json_mode=True)
     except Exception as exc:  # noqa: BLE001 —— 无 Key/网络/限流：降级不阻断
         logger.warning("LLM 解析失败，退回启发式：%s", exc)
         return None, [f"IMG_LLM_PARSE_DEGRADED: 模型解析失败（{type(exc).__name__}），已退回启发式"]
     finally:
-        _record_usage(before)
+        _record_usage(usage)
     attrs, warnings = _raw_to_attrs(state, raw, base_attrs=base_attrs)
     return attrs, warnings
 
@@ -215,18 +220,28 @@ async def parse_with_vision(state, settings, *, base_attrs: dict | None = None
     ], "temperature": 0.1}
     base = str(getattr(settings, "ark_base_url", "") or "").rstrip("/")
     timeout = float(getattr(settings, "vision_timeout_seconds", 15.0) or 15.0)
-    before = _llm_usage_snapshot()
+    usage: dict = {}
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(f"{base}/chat/completions", json=payload,
                                      headers={"Authorization": f"Bearer {api_key}"})
             resp.raise_for_status()
-            raw = resp.json()["choices"][0]["message"]["content"]
+            body = resp.json()
+            raw = body["choices"][0]["message"]["content"]
+            # P2-A：视觉调用不经过 get_llm()，用量从响应体里自取（缺就只记 1 次调用）
+            tokens = body.get("usage") or {}
+            usage = {
+                "calls": 1,
+                "input_tokens": int(tokens.get("prompt_tokens")
+                                    or tokens.get("input_tokens") or 0),
+                "output_tokens": int(tokens.get("completion_tokens")
+                                     or tokens.get("output_tokens") or 0),
+            }
     except Exception as exc:  # noqa: BLE001 —— 视觉解析失败退回启发式
         logger.warning("视觉解析失败，退回启发式：%s", exc)
         return None, [f"IMG_VISION_DEGRADED: 视觉解析失败（{type(exc).__name__}），已退回启发式"]
     finally:
-        _record_usage(before)
+        _record_usage(usage)
     attrs, warnings = _raw_to_attrs(state, raw, source="vision", base_attrs=base_attrs)
     return attrs, warnings
 
