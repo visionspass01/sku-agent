@@ -162,6 +162,9 @@ def test_retry_failed_task_requeues_and_reserves_quota(env, monkeypatch):
 
     monkeypatch.setattr("app.agents_image.api.routes.get_dispatcher",
                         lambda: _StubDispatcher())
+    # P1-2（第九轮）：重试统一走 batch_routes.retry_one，派发器桩也要覆盖它
+    monkeypatch.setattr("app.agents_image.api.batch_routes.get_dispatcher",
+                        lambda: _StubDispatcher())
     headers = login(env, "worker1", "hhw111")
     with session_scope() as session:
         quota_store.grant(session, "worker1", period_type="day", period_limit=10)
@@ -236,6 +239,9 @@ def test_retry_clears_previous_run_state(env, monkeypatch):
             return task_id
 
     monkeypatch.setattr("app.agents_image.api.routes.get_dispatcher",
+                        lambda: _StubDispatcher())
+    # P1-2（第九轮）：重试统一走 batch_routes.retry_one，派发器桩也要覆盖它
+    monkeypatch.setattr("app.agents_image.api.batch_routes.get_dispatcher",
                         lambda: _StubDispatcher())
     headers = login(env)
     task_id = "20261118000000cc04"

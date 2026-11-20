@@ -69,6 +69,23 @@ def test_core_has_no_business_dependency():
     assert not offenders, "app/core 必须是业务无关的：" + "; ".join(offenders)
 
 
+def test_http_layer_does_not_import_orchestration_nodes():
+    """P2-8（第九轮）：规划逻辑收进 `planning.py` 后，HTTP 路由不再直接依赖编排节点。
+
+    过去 `api/routes.py` 直接 import `nodes.plan_slots` / `nodes.validate`，
+    规划口径与校验规则在"API 层 + 编排层"两处各写一份；现在只有 planning 一处。
+    """
+    from app.agents_image import planning
+    from app.agents_image.api import routes
+
+    source = Path(routes.__file__).read_text(encoding="utf-8")
+    assert "from app.agents_image.nodes" not in source, "HTTP 层不应直接依赖编排节点"
+    # 兼容别名：老测试/脚本按 routes._xxx 引用
+    assert routes._attrs_for_target is planning.attrs_for_target
+    assert routes._variant_matrix is planning.variant_matrix
+    assert routes._resolve_targets is planning.resolve_targets
+
+
 def test_parse_modules_default_and_override():
     from app.main import parse_modules
 
