@@ -279,7 +279,7 @@ async def image_catalog(request: Request) -> JSONResponse:
     """构图 / 场景风格 / 图位策略 / 平台规则（全部来自中台，前端只用这里给的值）。"""
     trace = trace_id_of(request)
     try:
-        require_user(request)
+        await require_user_async(request)      # P1-2（第十一轮）：认证丢线程池
         platform = (request.query_params.get("platform") or "淘系").strip()
         category = (request.query_params.get("category") or "").strip()
         catalog = get_catalog()
@@ -348,23 +348,46 @@ async def create_tasks(request: Request) -> JSONResponse:
         # P1-3（第九轮）：幂等键必须绑定请求体。上一版只看 key：同一个 request_id
         # 换参数重发会静默重放**旧响应**（用户以为新参数生效，实际什么都没发生）。
         payload_hash = _request_fingerprint(body)
-        if idempotency_key:
+
+        def _read_idempotency() -> tuple[bool, dict | None, str]:
             with session_scope() as session:
                 from app.agents_image.store.models import ImageRequest
 
-                row = session.get(ImageRequest, idempotency_key)
-                replay = dict(row.response_json or {}) if row is not None else None
-                stored_hash = str(getattr(row, "payload_hash", "") or "") if row is not None else ""
-            if row is not None and stored_hash and stored_hash != payload_hash:
+                found = session.get(ImageRequest, idempotency_key)
+                if found is None:
+                    return False, None, ""
+                return (True, dict(found.response_json or {}),
+                        str(getattr(found, "payload_hash", "") or ""))
+
+        if idempotency_key:
+            # P1-2（第十一轮）：幂等预读是同步 DB，丢线程池（事件循环不占）
+            from app.observability.trace import run_in_trace
+
+            row_exists, replay, stored_hash = await run_in_trace(_read_idempotency)
+            if row_exists and stored_hash and stored_hash != payload_hash:
                 raise ImageError(
                     "IMG_TASK_CONFLICT",
                     "同一个 request_id / Idempotency-Key 携带了不同参数；"
                     "请换一个新的 request_id（幂等键只用于重放同样的请求）",
                     retryable=False)
             if replay:
+                if not stored_hash:
+                    # P2-3（第十一轮）：比 `payload_hash` 列更早落库的老记录没有指纹，
+                    # 只能按兼容语义重放；但要把**本次**请求的指纹补写回去，
+                    # 否则这条老记录永远无法校验，"同 key 换参数"永远挡不住。
+                    def _backfill_hash() -> None:
+                        with session_scope() as session:
+                            from app.agents_image.store.models import ImageRequest
+
+                            found = session.get(ImageRequest, idempotency_key)
+                            if found is not None and not getattr(found, "payload_hash", ""):
+                                found.payload_hash = payload_hash
+
+                    await run_in_trace(_backfill_hash)
+                    logger.warning("幂等重放命中无指纹的历史记录，已补写指纹：%s", idempotency_key)
                 replay.update({"idempotent": True, "trace_id": trace})
                 return JSONResponse(status_code=200, content=replay)
-            if row is not None:
+            if row_exists:
                 # 同 key 的首次请求还在处理（已抢占、尚未提交响应）
                 return _idempotent_conflict(trace)
 
@@ -430,9 +453,11 @@ async def create_tasks(request: Request) -> JSONResponse:
 
         base_params = params_by_platform[platforms[0]]
 
-        # 复用计划（只读、在建任务之前）：决定"实际要出多少张"，配额/成本按它算
-        with session_scope() as session:
-            reuse_plan = await _reuse_plan(session, user, body, targets)
+        # 复用计划（只读、在建任务之前）：决定"实际要出多少张"，配额/成本按它算。
+        # P1-2（第十一轮）：只读 DB 丢线程池。
+        from app.observability.trace import run_in_trace
+
+        reuse_plan = await run_in_trace(_reuse_plan, user, body, targets)
 
         def _reuse_targets(target, platform: str, variant: dict) -> bool:
             """该目标是否与基础任务同 (颜色, 平台, 变体)：决定是否记录 base_task_id 血统。"""
@@ -493,11 +518,17 @@ async def create_tasks(request: Request) -> JSONResponse:
 
         plan_by_task = [_gap_of(item) for item in planned_states]
         planned_images = sum(plan_by_task)
-        with session_scope() as session:
-            from app.agents_image.store import quota as quota_store
+        def _check_quota() -> dict:
+            with session_scope() as session:
+                from app.agents_image.store import quota as quota_store
 
-            quota = quota_store.check(session, user.username, planned_images,
-                                     is_admin=user.is_admin)
+                return quota_store.check(session, user.username, planned_images,
+                                         is_admin=user.is_admin)
+
+        from app.observability.trace import run_in_trace
+
+        # P1-2（第十一轮）：quota.check 是同步 DB 读，丢线程池
+        quota = await run_in_trace(_check_quota)
         if not quota["allowed"]:
             raise ImageError("IMG_QUOTA_EXCEEDED",
                              f"配额不足：本期（{quota['period_type']}）剩余 {quota['remaining']} 张，"
@@ -808,16 +839,23 @@ def _reuse_miss_warnings(base, base_task_id: str, target, platform: str,
     ]
 
 
-async def _reuse_plan(session, user, body: dict, targets) -> dict | None:
+def _reuse_plan(user, body: dict, targets) -> dict | None:
     """C2/W4：`mode=iterate` + `base_task_id` → 主图重做，其余 generate 图位能复用就复用。
 
     基础任务缺图位（比如只出了主图）时**不再报错**：可复用集合为空，剩下的图位按
     `image_count` 差额补齐（W4），并只按实际要出的张数占额度。
+
+    P1-2（第十一轮）：自建会话（调用方用 `run_in_trace` 丢线程池）。
     """
     mode = str(body.get("mode") or "standard").strip().lower()
     base_task_id = str(body.get("base_task_id") or "").strip()
     if mode != "iterate" or not base_task_id:
         return None
+    with session_scope() as session:
+        return _reuse_plan_in_session(session, user, targets, base_task_id)
+
+
+def _reuse_plan_in_session(session, user, targets, base_task_id: str) -> dict | None:
     base = task_store.get_task(session, base_task_id)
     if base is None:
         raise ImageError("IMG_TASK_NOT_FOUND", f"基础任务不存在：{base_task_id}")

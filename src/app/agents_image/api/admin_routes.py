@@ -238,7 +238,10 @@ async def admin_metrics(request: Request) -> JSONResponse:
         # P2-9（第十轮）：缓存命中时 runtime 派生字段（LLM 调用/缓存命中率/在途）必须现算，
         # 否则面板"现在有多少在跑、多少次 LLM 调用"会滞后到 30s。
         cards = _with_fresh_runtime(cards, runtime)
-        outbox = outbox_store.stats()
+        # P1-2（第十一轮）：outbox 统计是同步 DB 读，丢线程池
+        from app.observability.trace import run_in_trace
+
+        outbox = await run_in_trace(outbox_store.stats)
     except ImageError as exc:
         return error_response(exc, trace)
     except ValueError as exc:
@@ -467,7 +470,8 @@ def _validate_department(value: str | None) -> str | None:
 async def admin_create_user(request: Request) -> JSONResponse:
     trace = trace_id_of(request)
     try:
-        admin = require_admin(request)
+        # P1-2（第十一轮）：async 端点的认证/写库都是同步 IO，一律丢线程池
+        admin = await require_admin_async(request)
         body = await request.json()
         body = body if isinstance(body, dict) else {}
         username = str(body.get("username") or "").strip()
@@ -481,9 +485,15 @@ async def admin_create_user(request: Request) -> JSONResponse:
             raise ImageError(
                 "IMG_INPUT_INVALID",
                 "普通账号必须绑定部门（男装 / 女装）；只有管理员可以不绑定")
-        with session_scope() as session:
-            user_store.create_user(session, username=username, password=password,
-                                   role=role, department=department)
+
+        def _create_user() -> None:
+            with session_scope() as session:
+                user_store.create_user(session, username=username, password=password,
+                                       role=role, department=department)
+
+        from app.observability.trace import run_in_trace
+
+        await run_in_trace(_create_user)
     except ImageError as exc:
         return error_response(exc, trace)
     except Exception as exc:  # noqa: BLE001
@@ -498,28 +508,35 @@ async def admin_create_user(request: Request) -> JSONResponse:
 async def admin_update_user(username: str, request: Request) -> JSONResponse:
     trace = trace_id_of(request)
     try:
-        require_admin(request)
+        await require_admin_async(request)
         body = await request.json()
         body = body if isinstance(body, dict) else {}
-        with session_scope() as session:
-            row = user_store.get_user(session, username)
-            if row is None:
-                # 更新一个不存在的账号不该"返回 ok 其实什么也没做"
-                raise ImageError("IMG_USER_NOT_FOUND", f"账号不存在：{username}")
-            role = str(getattr(row, "role", "") or "user")
-            if body.get("password"):
-                if len(str(body["password"])) < 6:
-                    raise ImageError("IMG_INPUT_INVALID", "密码至少 6 位")
-                user_store.set_password(session, username, str(body["password"]))
-            if "enabled" in body:
-                user_store.set_enabled(session, username, bool(body["enabled"]))
-            if "department" in body:
-                # P0-5：允许把历史"无部门"账号修回白名单部门；改完仍是空 + 非管理员 → 拒绝
-                department = _validate_department(body.get("department"))
-                if role != "admin" and not department:
-                    raise ImageError("IMG_INPUT_INVALID",
-                                     "普通账号必须绑定部门（男装 / 女装）")
-                user_store.set_department(session, username, department)
+
+        def _update_user() -> None:
+            with session_scope() as session:
+                row = user_store.get_user(session, username)
+                if row is None:
+                    # 更新一个不存在的账号不该"返回 ok 其实什么也没做"
+                    raise ImageError("IMG_USER_NOT_FOUND", f"账号不存在：{username}")
+                role = str(getattr(row, "role", "") or "user")
+                if body.get("password"):
+                    if len(str(body["password"])) < 6:
+                        raise ImageError("IMG_INPUT_INVALID", "密码至少 6 位")
+                    user_store.set_password(session, username, str(body["password"]))
+                if "enabled" in body:
+                    user_store.set_enabled(session, username, bool(body["enabled"]))
+                if "department" in body:
+                    # P0-5：允许把历史"无部门"账号修回白名单部门；改完仍是空 + 非管理员 → 拒绝
+                    department = _validate_department(body.get("department"))
+                    if role != "admin" and not department:
+                        raise ImageError("IMG_INPUT_INVALID",
+                                         "普通账号必须绑定部门（男装 / 女装）")
+                    user_store.set_department(session, username, department)
+
+        from app.observability.trace import run_in_trace
+
+        # P1-2（第十一轮）：写库丢线程池
+        await run_in_trace(_update_user)
     except ImageError as exc:
         return error_response(exc, trace)
     return JSONResponse(status_code=200, content={"ok": True, "username": username,
@@ -542,19 +559,26 @@ def admin_quota(request: Request) -> JSONResponse:
 async def admin_grant_quota(username: str, request: Request) -> JSONResponse:
     trace = trace_id_of(request)
     try:
-        admin = require_admin(request)
+        admin = await require_admin_async(request)
         body = await request.json()
         body = body if isinstance(body, dict) else {}
         period_type = str(body.get("period_type") or "day")
         limit = int(body.get("period_limit") or 0)
         if period_type not in {"day", "week", "month", "unlimited"}:
             raise ImageError("IMG_INPUT_INVALID", f"不支持的周期：{period_type}")
-        with session_scope() as session:
-            row = quota_store.grant(session, username, period_type=period_type,
-                                    period_limit=limit, granted_by=admin.username)
-            payload = {"username": row.username, "period_type": row.period_type,
-                       "period_limit": int(row.period_limit or 0),
-                       "remaining": quota_store.remaining(row)}
+
+        def _grant() -> dict:
+            with session_scope() as session:
+                row = quota_store.grant(session, username, period_type=period_type,
+                                        period_limit=limit, granted_by=admin.username)
+                return {"username": row.username, "period_type": row.period_type,
+                        "period_limit": int(row.period_limit or 0),
+                        "remaining": quota_store.remaining(row)}
+
+        from app.observability.trace import run_in_trace
+
+        # P1-2（第十一轮）：写库丢线程池
+        payload = await run_in_trace(_grant)
     except ImageError as exc:
         return error_response(exc, trace)
     return JSONResponse(status_code=200, content={**payload, "trace_id": trace})
@@ -599,11 +623,20 @@ async def admin_replay_outbox(request: Request) -> JSONResponse:
     """手动重放回写队列（P1-5：网络 IO 在会话之外，只有读统计时才开会话）。"""
     trace = trace_id_of(request)
     try:
-        require_admin(request)
+        await require_admin_async(request)
+
+        def _stats() -> dict:
+            return outbox_store.stats()
+
+        def _pending() -> list:
+            with session_scope() as session:
+                return outbox_store.list_outbox(session, status="pending")
+
+        from app.observability.trace import run_in_trace
+
+        # P1-2（第十一轮）：重放本身是异步网络 IO；统计/待办读取是同步 DB，丢线程池
         result = await outbox_store.replay(limit=50)
-        stats = outbox_store.stats()
-        with session_scope() as session:
-            pending = outbox_store.list_outbox(session, status="pending")
+        stats, pending = await asyncio.gather(run_in_trace(_stats), run_in_trace(_pending))
     except ImageError as exc:
         return error_response(exc, trace)
     return JSONResponse(status_code=200, content={**result, "stats": stats,
