@@ -107,7 +107,7 @@ def test_graph_merges_prior_attempts_into_failure_stats(env, monkeypatch):
                          extra={"provider_calls": 1, "generated": 1, "cost_cny": 0.4})
         raise exc
 
-    async def fake_run(payload):
+    async def fake_run(payload, *, on_slot=None):
         _boom(payload)
 
     monkeypatch.setattr(graph.generator_handler, "run", fake_run)

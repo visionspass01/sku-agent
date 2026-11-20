@@ -195,8 +195,13 @@ async def _generate_with_retry(provider, request, *, deadline_at: float = 0.0) -
         raise
 
 
-async def run(payload: dict[str, Any]) -> dict[str, Any]:
-    """payload 见 `local_generator._payload_for_task()`；返回 {slots: [...], provider, model}。"""
+async def run(payload: dict[str, Any], *, on_slot=None) -> dict[str, Any]:
+    """payload 见 `local_generator._payload_for_task()`；返回 {slots: [...], provider, model}。
+
+    `on_slot`（P1-1，第十一轮）：每个图位成功后回调一次（累计发起量/已生成张数/已发生成本），
+    让编排层把"已经花掉的钱"**增量落库**。handler 本身仍然不碰数据库（可独立打 SCF 包），
+    落库由调用方注入的回调完成；进程崩溃/租约被抢时也能看到已发生成本。
+    """
     provider = get_provider(payload.get("provider") or None)
     refs: list[ImageInput] = [
         ImageInput(data=item["data"], mime=item.get("mime") or "image/png",
@@ -238,6 +243,12 @@ async def run(payload: dict[str, Any]) -> dict[str, Any]:
                 "latency_ms": result.latency_ms,
                 "meta": result.meta,
             })
+            if on_slot is not None:
+                await on_slot({
+                    "provider_calls": provider_calls,
+                    "generated": sum(len(item.get("images") or []) for item in results),
+                    "cost_cny": sum(float(item.get("cost_cny") or 0.0) for item in results),
+                })
     except BaseException as exc:  # noqa: BLE001 —— P1-6/P1-2：失败也要把已发生的事实带出去
         # 已经成功跑完的图位（张数 + 成本 + 发起次数）+ 失败图位自己的发起次数
         done_images = sum(len(item.get("images") or []) for item in results)

@@ -194,7 +194,9 @@ async def _generate_or_attach_partial(settings, refs: list[dict], drafts,
                                       *, attempted: int, spent: float,
                                       provider_calls: int,
                                       llm_cost: float = 0.0,
-                                      deadline_at: float = 0.0) -> dict:
+                                      deadline_at: float = 0.0,
+                                      task_id: str = "",
+                                      state: ImageTaskState | None = None) -> dict:
     """调生图 provider；失败时把**前几轮已发生**的张数/成本/发起量挂到异常上（第七轮 P1-2）。
 
     `handler.run` 只知道自己这一次调用里已经生成了多少；重试轮次（第 2 轮失败）与前几轮
@@ -202,7 +204,31 @@ async def _generate_or_attach_partial(settings, refs: list[dict], drafts,
     发起量，使用量/成本口径被系统性低估（过去实测 attempted=0、¥0）。
 
     `deadline_at`（P1，第十轮）：任务级截止时间透传给 generator（API 最大等待 360s）。
+
+    P1-1（第十一轮）：把每个图位完成后的累计值**增量落库**（`on_slot`）。
+    进程崩溃/被 kill/租约被抢时，"已经花掉的发起量与成本"仍能在任务台账里看到，
+    看门狗补账时才有数据源（过去只能在结算时一次性写，崩溃就全丢）。
     """
+    async def _persist_incremental(stats: dict) -> None:
+        try:
+            from app.observability.trace import run_in_trace
+
+            values = {
+                "provider_calls": provider_calls + int(stats.get("provider_calls") or 0),
+                "attempted_images": attempted + int(stats.get("generated") or 0),
+                "external_cost_cny": round(spent + float(stats.get("cost_cny") or 0.0), 6),
+                "llm_cost_cny": round(
+                    float(getattr(state, "llm_cost_cny", 0.0) or 0.0) if state else 0.0, 6),
+            }
+
+            def _write() -> None:
+                with session_scope() as session:
+                    task_store.update_task(session, task_id, **values)
+
+            await run_in_trace(_write)
+        except Exception as exc:  # noqa: BLE001 —— 台账写失败不能中断出图
+            logger.warning("增量记账失败（继续出图）：task=%s %s", task_id, exc)
+
     try:
         return await generator_handler.run({
             "provider": settings.provider,
@@ -213,7 +239,7 @@ async def _generate_or_attach_partial(settings, refs: list[dict], drafts,
             "height": drafts[0].height,
             "preserve": drafts[0].preserve,
             "deadline_at": float(deadline_at or 0.0),
-        })
+        }, on_slot=_persist_incremental if task_id else None)
     except BaseException as exc:  # noqa: BLE001 —— 失败也要把已发生的事实带出去
         stats = generator_handler.failure_stats_of(exc)
         generator_handler.attach_failure_stats(
@@ -429,7 +455,8 @@ async def execute_task(task_id: str) -> ImageTaskState:
                                                    provider_calls=provider_calls,
                                                    llm_cost=float(getattr(state, "llm_cost_cny",
                                                                           0.0) or 0.0),
-                                                   deadline_at=deadline_at)
+                                                   deadline_at=deadline_at,
+                                                   task_id=task_id, state=state)
         image_costs = [float(slot.get("cost_cny") or 0.0)
                        for slot in (result.get("slots") or [])]
         images = _collect_images(result)

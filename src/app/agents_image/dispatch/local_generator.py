@@ -138,6 +138,10 @@ class LocalGenerator:
         重投次数封顶：`recoveries > IMAGE_MAX_RECOVERIES` 时直接判失败并释放预留额度，
         避免"坏任务被无限重投、每次都产生真实成本"。第三轮 P0-2：只有**认领成功**的重投
         才 +recoveries——排队中但已被认领的任务不再被反复计数（过去 90–120 秒就被误杀）。
+
+        P1-1（第十一轮）：接管一个"租约过期的 running"任务前，先把任务台账里**已经发生的**
+        发起量/张数/成本结算进使用量流水，再把台账字段清零给新一次执行用。
+        否则崩溃/被抢的任务重投会重复花钱，而账一直是 0（第二次结算只记本轮）。
         """
         lease = int(getattr(self.settings, "task_lease_seconds", 300) or 300)
         grace = int(getattr(self.settings, "claim_grace_seconds", 30) or 0)
@@ -155,6 +159,8 @@ class LocalGenerator:
                                                        lease_seconds=lease)
                 if not claimed:
                     continue                 # 别人抢先接管/任务已不在候选状态
+                if candidate.kind != "queued":
+                    _flush_partial_cost(session, candidate.task_id)
                 recoveries = task_store.bump_recoveries(session, candidate.task_id)
                 if recoveries > max_recoveries:
                     task_store.mark_failed(
@@ -180,3 +186,30 @@ class LocalGenerator:
                 task.cancel()
         self._tasks.clear()
         self._in_flight = 0
+
+
+def _flush_partial_cost(session, task_id: str) -> None:  # noqa: ANN001 —— sqlalchemy Session
+    """P1-1（第十一轮）：把任务台账里"已经发生"的发起量/张数/成本结算进使用量流水，
+    并把台账字段清零（新一次执行从 0 开始，避免重复记账）。
+
+    触发场景：进程崩溃/被 kill 后被看门狗接管；或单个 provider 调用超时超过租约被抢。
+    过去这些已花的钱没有任何数据源，重投又再花一遍，账却一直是 0。
+    """
+    from app.agents_image.store import usage as usage_store
+
+    task = task_store.get_task(session, task_id)
+    if task is None:
+        return
+    attempted = int(getattr(task, "attempted_images", 0) or 0)
+    calls = int(getattr(task, "provider_calls", 0) or 0)
+    cost = float(getattr(task, "external_cost_cny", 0.0) or 0.0)
+    llm_cost = float(getattr(task, "llm_cost_cny", 0.0) or 0.0)
+    if not (attempted or calls or cost or llm_cost):
+        return
+    usage_store.record(session, username=task.username, department=task.department,
+                       attempted=attempted, delivered=attempted, provider_calls=calls,
+                       cost=cost, llm_cost=llm_cost)
+    task_store.update_task(session, task_id, attempted_images=0, external_cost_cny=0.0,
+                           llm_cost_cny=0.0, provider_calls=0)
+    logger.warning("接管已中断任务：先把已发生成本入账（task=%s 张数=%s 成本=%s 发起=%s）",
+                   task_id, attempted, round(cost, 4), calls)
