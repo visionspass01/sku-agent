@@ -36,6 +36,9 @@ class ImageSettings(BaseSettings):
     # ---- 商品与参考图（v6：用户只选商品，参考图来自中台；M3：按「商品+颜色」粒度）----
     max_refs: int = Field(default=6, ge=1, le=12)           # 每个「商品+颜色」的参考图合计上限
     refs_per_item: int = Field(default=2, ge=1, le=6)        # 每个颜色取几张（主图 + 细节）
+    # P1-8（第十二轮）：参考图下载并发与整体预算（过去逐张串行，最坏 6×5s=30s）
+    refs_download_concurrency: int = Field(default=4, ge=1, le=16)
+    refs_download_budget_seconds: float = Field(default=20.0, ge=1.0, le=120.0)
     max_tasks_per_request: int = Field(default=60, ge=1, le=200)  # 颜色×平台×变体后的任务上限
     max_batch_products: int = Field(default=5, ge=1, le=10)   # 一次批量最多选几个商品
     max_total_images: int = Field(default=9, ge=1, le=9)
@@ -52,10 +55,14 @@ class ImageSettings(BaseSettings):
     provider_retries: int = Field(default=2, ge=0, le=5)
     provider_retry_backoff_seconds: float = Field(default=0.2, ge=0.0, le=10.0)
     max_task_retries: int = Field(default=3, ge=0, le=10)  # 失败任务可被人工重试的次数上限
-    # 商品上下文批量取数（W2）：同一 3 秒窗口内的请求合并成一次 MCP 调用
+    # 商品上下文批量取数（W2）：同一窗口内到达的请求合并成一次 MCP 调用。
+    # P1-9（第十二轮）：窗口只对"下一批"生效——首个请求立即发车，不再固定等满窗口。
     context_batch_window_seconds: float = Field(default=3.0, ge=0.0, le=30.0)
     context_batch_max_ids: int = Field(default=50, ge=1, le=200)
     context_cache_ttl_seconds: float = Field(default=60.0, ge=0.0, le=600.0)
+    # P1-4（第十二轮）：一次合并取数的总等待上限；超时按 IMG_UPSTREAM_MCP_UNAVAILABLE 失败，
+    # 不允许请求挂在没有超时的 future 上（过去会把连接和 worker 槽位一起泄漏）。
+    context_batch_timeout_seconds: float = Field(default=20.0, ge=1.0, le=120.0)
     recovery_interval_seconds: int = Field(default=30, ge=0, le=3600)  # 看门狗扫描间隔（0=关）
     # 任务租约（W1）：执行期每阶段续约；只有租约过期才允许看门狗重投。
     # P1（第十轮）：租约必须**大于任务最长执行时间**（默认 task_max_seconds=360），

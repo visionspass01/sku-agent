@@ -22,6 +22,20 @@ from app.core.errors import ImageError
 
 logger = logging.getLogger("sku-agent.image.catalog.batch")
 
+# P1-4（第十二轮）：一次合并取数的总等待上限（窗口 + 上游往返 + 重试）。
+# 取数卡住时必须**报错**，不能让建任务请求永久挂起。
+_DEFAULT_BUDGET_SECONDS = 20.0
+
+
+def _budget_seconds() -> float:
+    try:
+        settings = get_image_settings()
+        budget = float(getattr(settings, "context_batch_timeout_seconds",
+                               _DEFAULT_BUDGET_SECONDS) or _DEFAULT_BUDGET_SECONDS)
+    except Exception:  # noqa: BLE001 —— 配置读不到就按默认预算
+        budget = _DEFAULT_BUDGET_SECONDS
+    return max(1.0, budget)
+
 
 async def fetch_products_context(catalog, product_ids: list[str]) -> dict[str, ProductData]:
     """取一批商品上下文：catalog 支持批量就用批量，否则退回逐个取（语义一致）。"""
@@ -97,31 +111,55 @@ class ProductContextBatcher:
         if not self._flushing:
             self._flushing = True
             self._flush_task = asyncio.create_task(self._flush())
-        found.update(await future)
+        # P1-4（第十二轮）：等待必须有上限。上一版裸 `await future`：合并任务若在把结果
+        # 分发给 waiter 之前就退出（被取消/配置读取失败/异常路径），future 永远不会被 set，
+        # 调用方的 HTTP 请求就**永久挂起**（连接与 worker 槽位一起泄漏，还没有任何错误码）。
+        budget = _budget_seconds()
+        try:
+            found.update(await asyncio.wait_for(future, timeout=budget))
+        except (asyncio.TimeoutError, TimeoutError) as exc:
+            raise ImageError("IMG_UPSTREAM_MCP_UNAVAILABLE",
+                             f"商品上下文取数超时（合并窗口 {budget:g}s），请稍后重试",
+                             retryable=True) from exc
         return found
 
     # ------------------------------------------------------------ 合并
     async def _flush(self) -> None:
+        """合并循环：**首个请求立即发车**，后续到达的请求并入下一批（P1-9）。
+
+        上一版是"先 `sleep(window)` 再取数"：即使窗口内只有它自己一个请求，也要先静置
+        满 3s 才发车——建任务与商品列表两个首屏接口因此固定 +3s（测试里窗口配 0，
+        所以基线延迟把这条掩盖了）。现在的顺序是：先取走当前 waiter 发一批，若这批
+        执行期间又来了新 waiter，再攒一个窗口合并下一批。
+        """
         settings = get_image_settings()
         window = max(0.0, float(getattr(settings, "context_batch_window_seconds", 0.0) or 0.0))
         try:
             while True:
-                if window > 0:
-                    await asyncio.sleep(window)      # 攒够一个窗口，再发一次合并请求
                 pending, self._waiters = self._waiters, []
                 if not pending:
                     return
                 await self._run_batch(pending, settings)
-                if window > 0:
-                    continue
-                # P2-7（第八轮）：window=0 时旧实现处理完这一批就 return，
-                # 批次执行期间新到的 waiter 永远没人唤醒 → 请求永久挂起。
-                # 现在只要还有 waiter 就继续处理；空了才退出（退出时 finally 复位 flushing）。
                 if not self._waiters:
                     return
+                if window > 0:
+                    await asyncio.sleep(window)   # 只为"下一批"攒窗口，首屏不再等待
         finally:
             self._flushing = False
             self._flush_task = None
+            self._fail_pending("商品上下文合并取数中断（服务重启或任务取消），请重试")
+
+    def _fail_pending(self, message: str) -> None:
+        """把没人认领的 waiter 全部唤起为失败（P1-4）：绝不让请求挂在 future 上。
+
+        典型场景：`_flush` 在 batch 之间被取消（关机/热重载），或 `_run_batch` 抛出
+        未预期异常——上一版这种情况下 waiter 永远等不到结果。
+        """
+        leftover, self._waiters = self._waiters, []
+        for _ids, future in leftover:
+            if not future.done():
+                future.set_exception(
+                    ImageError("IMG_UPSTREAM_MCP_UNAVAILABLE", message, retryable=True))
 
     async def _run_batch(self, pending: list[tuple[list[str], asyncio.Future]],
                          settings) -> None:
@@ -159,10 +197,19 @@ class ProductContextBatcher:
             if not missing:
                 future.set_result(got)
             elif error is not None:
-                future.set_exception(error)
+                future.set_exception(_as_image_error(error))
             else:
                 future.set_exception(ImageError("IMG_PRODUCT_NOT_FOUND",
                                                 f"商品不存在：{missing[0]}"))
+
+
+def _as_image_error(exc: BaseException) -> ImageError:
+    """上游取数异常统一收敛成 503（P1-4）：原样抛 RuntimeError 会变成 500，
+    而这类失败（中台不可用/超时）对调用方是**可重试**的 503。"""
+    if isinstance(exc, ImageError):
+        return exc
+    return ImageError("IMG_UPSTREAM_MCP_UNAVAILABLE",
+                      f"商品上下文取数失败：{type(exc).__name__}", retryable=True)
 
 
 _BATCHERS: dict[str, ProductContextBatcher] = {}
