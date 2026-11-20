@@ -19,11 +19,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 from dataclasses import dataclass, field
 
 import httpx
 
+from app.agents_image.config import get_image_settings
 from app.agents_image.sources.product_source import PlatformCatalog, ProductData, ProductImage
 from app.agents_image.state import RefImage
 from app.agents_image.store import assets as asset_store
@@ -98,8 +100,12 @@ class RefResolution:
         return [item.asset_id for item in self.refs.get(color_key) or []]
 
 
-async def _fetch(image, *, timeout: float, catalog=None) -> bytes:
-    """取商品图字节：优先用 catalog 自己的取图实现（mcp 实现会带中台令牌）。"""
+async def _fetch(image, *, timeout: float, catalog=None, client=None) -> bytes:
+    """取商品图字节：优先用 catalog 自己的取图实现（mcp 实现会带中台令牌）。
+
+    `client`（P1-8，第十二轮）：批量下载时复用同一个 `httpx.AsyncClient`，
+    避免每张图都新建连接池（握手/关闭开销 + 无连接复用）。
+    """
     fetcher = getattr(catalog, "fetch_image_bytes", None)
     if fetcher is not None:
         return await fetcher(image)
@@ -111,13 +117,63 @@ async def _fetch(image, *, timeout: float, catalog=None) -> bytes:
     if not image.url:
         raise ImageError("IMG_UPSTREAM_INVALID", f"商品图缺少地址：{image.image_id or '-'}")
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        if client is not None:
             response = await client.get(image.url)
+            response.raise_for_status()
+            return response.content
+        async with httpx.AsyncClient(timeout=timeout) as own_client:
+            response = await own_client.get(image.url)
             response.raise_for_status()
             return response.content
     except Exception as exc:  # noqa: BLE001 —— 网络/超时/非 2xx 一律视为中台不可用
         raise ImageError("IMG_UPSTREAM_MCP_UNAVAILABLE",
                          f"下载商品图失败（{image.image_id or image.url}）：{type(exc).__name__}",
+                         retryable=True) from exc
+
+
+def _needs_http(image, catalog) -> bool:  # noqa: ANN001 —— ProductImage
+    """这张图是否需要走 HTTP（P1-8）：catalog 自带取图实现 / 内嵌 base64 都不需要。
+
+    `httpx.AsyncClient` 的构造本身就有成本（Windows 下实测 ~0.5s：SSL 上下文 + 代理探测），
+    对"中台返回 base64"或"catalog 自己带令牌取图"的主流路径，建 client 纯属白等。
+    """
+    if callable(getattr(catalog, "fetch_image_bytes", None)):
+        return False
+    if getattr(image, "bytes_b64", ""):
+        return False
+    return bool(getattr(image, "url", ""))
+
+
+async def _fetch_many(items: list[tuple[object, object]], *, timeout: float, catalog=None) -> list[bytes]:
+    """并发下载一批商品图（P1-8）：限并发 + 复用 client + 整体预算，失败**快速失败**。
+
+    上一版是逐张 `await`（最多 6 张 × 5s 超时 = 30s 串行，无整体预算），
+    中台一抖动建任务就顶到调用方超时；同一批图之间其实完全独立。
+    """
+    if not items:
+        return []
+    settings = get_image_settings()
+    concurrency = max(1, int(getattr(settings, "refs_download_concurrency", 4) or 4))
+    budget = max(1.0, float(getattr(settings, "refs_download_budget_seconds", 20.0) or 20.0))
+    gate = asyncio.Semaphore(concurrency)
+    needs_http = any(_needs_http(image, catalog) for _target, image in items)
+
+    async def _one(image, client):  # noqa: ANN001 —— ProductImage
+        async with gate:
+            return await _fetch(image, timeout=timeout, catalog=catalog, client=client)
+
+    async def _run(client) -> list[bytes]:  # noqa: ANN001
+        return await asyncio.wait_for(
+            asyncio.gather(*[_one(image, client) for _target, image in items]), timeout=budget)
+
+    try:
+        if not needs_http:                       # 无需 HTTP：不建 client（省掉构造开销）
+            return await _run(None)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            return await _run(client)
+    except (asyncio.TimeoutError, TimeoutError) as exc:
+        raise ImageError("IMG_UPSTREAM_MCP_UNAVAILABLE",
+                         f"参考图下载超时（{budget:g}s 预算内未完成 {len(items)} 张）",
                          retryable=True) from exc
 
 
@@ -194,6 +250,8 @@ async def plan_refs(
                     "请减少颜色数量，或把 IMAGE_REFS_PER_ITEM 调到 1")
 
     plan = RefPlan(products=unique_products)
+    # 1) 先只做"选哪几张图"（纯内存）：保持原有的预算/截断口径不变
+    selected: list[tuple[RefTarget, list]] = []
     used = 0
     for target in targets:
         data = unique_products[target.product_id]
@@ -203,26 +261,35 @@ async def plan_refs(
             # P1-2：颜色锁不住要可见，不能静默串色
             plan.warnings.append(_color_mismatch_warning(
                 target.product_id, target, data.images, ordered))
-        picked = 0
+        picked: list = []
         for image in ordered:
-            if picked >= per_item or used >= max_refs:
-                plan.truncated += max(0, len(ordered) - picked)
+            if len(picked) >= per_item or used >= max_refs:
+                plan.truncated += max(0, len(ordered) - len(picked))
                 break
             if not image.has_payload:
                 continue
-            raw = await _fetch(image, timeout=timeout_seconds, catalog=catalog)
+            picked.append(image)
+            used += 1
+        if not picked:
+            raise_image("IMG_REFERENCE_REQUIRED",
+                        f"所选商品没有可用参考图：{target.product_id}"
+                        f"{('（颜色 ' + target.color + '）') if target.color else ''}")
+        selected.append((target, picked))
+    # 2) 并发下载（P1-8）：限并发 + 复用 client + 整体预算
+    pairs = [(target, image) for target, images_ in selected for image in images_]
+    blobs = await _fetch_many(pairs, timeout=timeout_seconds, catalog=catalog)
+    # 3) 按选中顺序组装（与串行版的结果顺序一致）
+    cursor = 0
+    for target, images_ in selected:
+        for image in images_:
+            raw = blobs[cursor]
+            cursor += 1
             plan.refs.setdefault(target.color_key, []).append(PlannedRef(
                 data=raw, mime=image.mime or "image/png", source="mcp",
                 product_id=target.product_id, color_key=target.color_key,
                 color=target.color, color_hex=target.color_hex or image.color_hex,
                 image_id=image.image_id,
             ))
-            picked += 1
-            used += 1
-        if not plan.refs.get(target.color_key):
-            raise_image("IMG_REFERENCE_REQUIRED",
-                        f"所选商品没有可用参考图：{target.product_id}"
-                        f"{('（颜色 ' + target.color + '）') if target.color else ''}")
     return plan
 
 
@@ -337,44 +404,48 @@ async def plan_pailitao_refs(
 
     plan = RefPlan(products=unique)
     payload_cache: dict[str, bytes] = {}     # 同一张相似款主图只下载一次
-    for product_id in unique:
-        data = unique[product_id]
-        if shared_similar is not None:
-            similar = shared_similar
-        else:
-            # 用**该商品自己**的目标颜色选图（P1-7）
-            color = next((target.color for target in targets
-                          if target.product_id == product_id), "")
-            ordered = _pick_images(data.images, color)
-            usable = [item for item in ordered if item.has_payload]
-            if not usable:
-                raise_image("IMG_REFERENCE_REQUIRED",
-                            f"商品 {product_id} 没有可用于搜图的图片（也没勾选素材库图）")
-            raw = await _fetch(usable[0], timeout=timeout_seconds, catalog=catalog)
-            similar = _rank(await finder(raw, min_sales=int(min_sales), top_n=int(top_n)))
-        picked: list[PlannedRef] = []
-        for item in similar:
-            if len(picked) >= max(1, int(max_refs)):
-                break
-            if item.image is None or not item.image.has_payload:
-                continue
-            image_key = str(getattr(item.image, "image_id", "")
-                            or getattr(item.image, "sha256", "") or "")
-            payload = payload_cache.get(image_key)
-            if payload is None:
-                payload = await _fetch(item.image, timeout=timeout_seconds, catalog=catalog)
-                if image_key:
-                    payload_cache[image_key] = payload
-            picked.append(PlannedRef(data=payload, mime=item.image.mime or "image/png",
-                                     source="pailitao", product_id=product_id,
-                                     color_hex=item.image.color_hex,
-                                     image_id=item.image.image_id))
-        if not picked:
-            raise_image("IMG_SIMILAR_NOT_FOUND",
-                        f"未搜到销量超{int(min_sales)}的近似商品")
-        for target in targets:
-            if target.product_id == product_id:
-                plan.refs[target.color_key] = list(picked)
+    # P1-8（第十二轮）：整个拍立淘阶段复用同一个 client（与 mcp 来源同款处理）
+    async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+        for product_id in unique:
+            data = unique[product_id]
+            if shared_similar is not None:
+                similar = shared_similar
+            else:
+                # 用**该商品自己**的目标颜色选图（P1-7）
+                color = next((target.color for target in targets
+                              if target.product_id == product_id), "")
+                ordered = _pick_images(data.images, color)
+                usable = [item for item in ordered if item.has_payload]
+                if not usable:
+                    raise_image("IMG_REFERENCE_REQUIRED",
+                                f"商品 {product_id} 没有可用于搜图的图片（也没勾选素材库图）")
+                raw = await _fetch(usable[0], timeout=timeout_seconds, catalog=catalog,
+                                   client=client)
+                similar = _rank(await finder(raw, min_sales=int(min_sales), top_n=int(top_n)))
+            picked: list[PlannedRef] = []
+            for item in similar:
+                if len(picked) >= max(1, int(max_refs)):
+                    break
+                if item.image is None or not item.image.has_payload:
+                    continue
+                image_key = str(getattr(item.image, "image_id", "")
+                                or getattr(item.image, "sha256", "") or "")
+                payload = payload_cache.get(image_key)
+                if payload is None:
+                    payload = await _fetch(item.image, timeout=timeout_seconds,
+                                           catalog=catalog, client=client)
+                    if image_key:
+                        payload_cache[image_key] = payload
+                picked.append(PlannedRef(data=payload, mime=item.image.mime or "image/png",
+                                         source="pailitao", product_id=product_id,
+                                         color_hex=item.image.color_hex,
+                                         image_id=item.image.image_id))
+            if not picked:
+                raise_image("IMG_SIMILAR_NOT_FOUND",
+                            f"未搜到销量超{int(min_sales)}的近似商品")
+            for target in targets:
+                if target.product_id == product_id:
+                    plan.refs[target.color_key] = list(picked)
     return plan
 
 

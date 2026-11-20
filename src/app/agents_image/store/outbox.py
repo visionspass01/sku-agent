@@ -17,7 +17,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, or_, select, update
 
 from app.agents_image.store.models import ImageOutbox
 
@@ -69,13 +69,22 @@ def enqueue(session, *, task_id: str, payload: dict, error: str = "") -> ImageOu
 
 
 def _due_rows(session, *, limit: int = 20, now: dt.datetime | None = None) -> list[ImageOutbox]:
+    """到期待重放的行。
+
+    P1-7（第十二轮）：时间条件必须**下推到 SQL**。上一版是"先 `LIMIT N` 取最老的 pending，
+    再在 Python 里过滤 `next_retry_at <= now`"——只要最老的 N 行都还在指数退避期，
+    查询就返回空，真正到期的行（排在它们后面）**永远等不到重放**：
+    中台侧会长期缺这批回写，而任务台账一直显示"回写失败等待重放"。
+    """
     moment = now or dt.datetime.now()
     rows = session.execute(
-        select(ImageOutbox).where(ImageOutbox.status == "pending")
-        .order_by(ImageOutbox.created_at).limit(max(1, int(limit)))
+        select(ImageOutbox).where(ImageOutbox.status == "pending",
+                                  or_(ImageOutbox.next_retry_at.is_(None),
+                                      ImageOutbox.next_retry_at <= moment))
+        .order_by(ImageOutbox.next_retry_at, ImageOutbox.created_at)
+        .limit(max(1, int(limit)))
     ).scalars().all()
-    return [row for row in rows
-            if row.next_retry_at is None or row.next_retry_at <= moment]
+    return list(rows)
 
 
 def pending_payloads(*, limit: int = 20, now: dt.datetime | None = None) -> list[dict]:

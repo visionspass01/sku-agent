@@ -85,12 +85,22 @@ def settle_done(session, task_id: str, *, delivered: int, attempted: int, cost: 
     username = task.username
     if planned and not _is_admin(session, username):
         if not quota_store.commit_reserve(session, username, charged):
-            mismatch = (f"IMG_QUOTA_SETTLE_MISMATCH: 预留额度与结算张数不一致"
-                        f"（计划 {planned} 张 / 结算 {charged} 张），已按剩余预留释放")
-            if warnings is not None:
-                warnings.append(mismatch)
-            logger.warning("配额结算对账不一致：task=%s planned=%s charged=%s",
-                           task_id, planned, charged)
+            # P1-11（第十二轮）：跨周期结算。`commit_reserve` 的守卫是
+            # `period_key == 当前周期 AND reserved >= charged`，而 `_rollover` 会把
+            # 上一周期的 reserved 清 0 —— 于是"23:59 建、00:01 交付"的任务命中 0 行，
+            # 已出的张数既不占 used 也不占 reserved（**免扣额度**），只在 warning 里留痕。
+            # 这里退化成"直接占用当期额度"，账与人看到的交付数才对得上。
+            if not quota_store.consume(session, username, charged):
+                mismatch = (f"IMG_QUOTA_SETTLE_MISMATCH: 预留额度与结算张数不一致"
+                            f"（计划 {planned} 张 / 结算 {charged} 张），"
+                            "当期额度不足，已按剩余预留释放")
+                if warnings is not None:
+                    warnings.append(mismatch)
+                logger.warning("配额结算对账不一致：task=%s planned=%s charged=%s",
+                               task_id, planned, charged)
+            else:
+                logger.info("跨周期结算：预留已随周期清零，改为直接占用当期 %s 张（task=%s）",
+                            charged, task_id)
         quota_store.release(session, username, max(0, planned - charged))
     usage_store.record(session, username=username, department=task.department,
                        delivered=attempted, attempted=attempted, tasks=1, cost=cost,
