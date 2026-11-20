@@ -74,3 +74,28 @@ def test_fix_doc_matches_respects_kind_keywords():
     assert not graph._fix_doc_matches(docs["fix-white-bg-dirty"], ["aspect"])
     assert graph._fix_doc_matches(docs["fix-white-bg-dirty"], ["identity"]) is False
     assert graph._fix_doc_matches(docs["fix-identity-drift"], ["identity"])
+
+
+def test_rag_disabled_skips_kb_repair_retrieval(monkeypatch):
+    """P1-3（第七轮）：`rag_enabled=False` 时必须跳过 KB 修复检索。
+
+    上一版只有 `_recall_for_slots` 看这个开关，关掉 RAG 的部署里 Critic 失败仍会打 KB，
+    行为与开关承诺不一致；记忆（不是 RAG）不受影响。
+    """
+    calls = {"n": 0}
+
+    def _spy(*args, **kwargs):  # noqa: ANN002, ANN003
+        calls["n"] += 1
+        return []
+
+    from app.agents_image.config import get_image_settings
+
+    settings = get_image_settings()
+    monkeypatch.setattr(rag_index, "retrieve", _spy)
+    monkeypatch.setattr(settings, "rag_enabled", False)
+    state = _state("KB品类-rag-off")
+    result = graph._repair_experience(state, "aspect|KB品类-rag-off")
+    assert result == {"patches": {}, "source": ""}, result
+    assert calls["n"] == 0, "rag_enabled=False 不应调用 KB 检索"
+    assert not any("IMG_REPAIR_KB" in item for item in state.warnings)
+

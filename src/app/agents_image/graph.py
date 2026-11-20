@@ -173,6 +173,12 @@ def _repair_experience(state: ImageTaskState, signature: str) -> dict:
         state.warnings.append(
             f"IMG_REPAIR_REUSED: 复用同部门历史修法（{signature}），本轮按经验修复")
         return {"patches": patches, "source": "memory"}
+    settings = get_image_settings()
+    # P1-3（第七轮）：`rag_enabled` 必须同时闸住修复经验的 KB 检索。
+    # 上一版只有 `_recall_for_slots` 看这个开关，关掉 RAG 的部署里 Critic 失败仍会打 KB，
+    # 与"RAG 已关"的承诺不一致；记忆（不是 RAG）不受影响，照常先查。
+    if not getattr(settings, "rag_enabled", True):
+        return {"patches": {}, "source": ""}
     try:
         from app.agents_image.rag import index as rag_index
 
@@ -181,7 +187,6 @@ def _repair_experience(state: ImageTaskState, signature: str) -> dict:
         query = " ".join(part for part in (
             str((state.attrs or {}).get("product_type") or ""),
             " ".join(hints.get(kind, "") for kind in kinds), " ".join(kinds), "修复") if part)
-        settings = get_image_settings()
         hits = rag_index.retrieve(
             query, top_k=3, kind="fix",
             min_score=float(getattr(settings, "rag_min_score", 0.0) or 0.0))
