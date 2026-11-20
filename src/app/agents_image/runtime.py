@@ -137,9 +137,14 @@ async def _cleanup_loop(interval_seconds: int) -> None:
             pruned = await asyncio.to_thread(_prune_outbox)
             # P1-4：修复经验按 TTL 清理（人工采纳/驳回样本不动）
             pruned_memory = await asyncio.to_thread(_prune_memory)
-            if result.get("removed") or expired_tokens or pruned or pruned_memory:
-                logger.info("本地清理：文件 %s 个，令牌 %s 条，outbox %s 条，修复经验 %s 条",
-                            result.get("removed"), expired_tokens, pruned, pruned_memory)
+            # P2-4（第九轮）：幂等表 image_request（含完整响应体）按保留期清理
+            pruned_requests = await asyncio.to_thread(_prune_requests)
+            if (result.get("removed") or expired_tokens or pruned or pruned_memory
+                    or pruned_requests):
+                logger.info("本地清理：文件 %s 个，令牌 %s 条，outbox %s 条，"
+                            "修复经验 %s 条，幂等记录 %s 条",
+                            result.get("removed"), expired_tokens, pruned, pruned_memory,
+                            pruned_requests)
         except asyncio.CancelledError:  # pragma: no cover —— 关机时正常退出
             raise
         except Exception as exc:  # noqa: BLE001 —— 清理失败不影响服务
@@ -153,6 +158,17 @@ def _prune_outbox() -> int:
         return outbox_store.prune()
     except Exception as exc:  # noqa: BLE001 —— 清理失败不影响其它清理
         logger.warning("outbox 清理失败：%s", exc)
+        return 0
+
+
+def _prune_requests() -> int:
+    """幂等表清理（P2-4）：done 行按保留期、pending 行按滞留期删除。"""
+    try:
+        from app.agents_image.store import requests as request_store
+
+        return request_store.prune()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("幂等表清理失败：%s", exc)
         return 0
 
 

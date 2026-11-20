@@ -74,6 +74,9 @@ class ImageSettings(BaseSettings):
     # 第四轮 P1-5/P2-7：重放占位时长（防并发重发同一批）与已回写记录的保留时长
     outbox_claim_seconds: int = Field(default=120, ge=5, le=3600)
     outbox_keep_hours: int = Field(default=72, ge=1, le=24 * 30)
+    # P2-4（第九轮）：幂等表 image_request 的保留期（done 行）与滞留期（pending 行）
+    request_keep_hours: int = Field(default=72, ge=1, le=24 * 30)
+    request_pending_minutes: int = Field(default=60, ge=5, le=24 * 60)
 
     # ---- 本地知识库（RAG：写法片段 / 修复经验，不提供参数与规则真相）----
     rag_enabled: bool = True
