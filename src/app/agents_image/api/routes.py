@@ -99,7 +99,12 @@ def image_health() -> dict:
 
 
 def _department_health() -> dict:
-    """P0-5：有多少普通账号没绑定部门（这些账号会被 403，运维要提前看到）。"""
+    """P0-5：有多少普通账号没绑定部门（这些账号会被 403，运维要提前看到）。
+
+    第六轮 P1-1：**只给计数，不给账号名单**。`/health` 是匿名可读的，
+    上一版把前 10 个账号名挂在这里等于公开账号枚举面；
+    具体是哪些账号请走管理员接口 `GET /admin/users`。
+    """
     try:
         from app.agents_image.store import users as user_store
 
@@ -107,10 +112,9 @@ def _department_health() -> dict:
             rows = user_store.list_users(session)
     except Exception:  # noqa: BLE001 —— 账号表读失败不影响 health 其它字段
         return {}
-    missing = [str(row.get("username") or "") for row in rows
+    missing = [row for row in rows
                if str(row.get("role") or "") != "admin" and not row.get("department")]
-    return {"users_without_department": len(missing),
-            "users_without_department_list": missing[:10]}
+    return {"users_without_department": len(missing)}
 
 
 @router.get("/metrics", include_in_schema=False)

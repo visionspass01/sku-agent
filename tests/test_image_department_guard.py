@@ -135,8 +135,17 @@ def test_admin_cannot_clear_department_of_normal_user(env):
 
 # ---------------------------------------------------------------- 健康位
 def test_health_exposes_users_without_department(env):
-    username, _password = _make_user(None)
+    """只暴露计数，不暴露账号名（/health 匿名可读，名单会变成账号枚举面）。"""
+    _username, _password = _make_user(None)
     body = env.get("/api/image/health").json()
-    assert "users_without_department" in body
     assert body["users_without_department"] >= 1
-    assert username in body["users_without_department_list"]
+    assert "users_without_department_list" not in body, "健康检查不得泄露账号名单"
+
+
+def test_admin_users_endpoint_lists_dirty_accounts(env):
+    """具体是哪些账号走管理员接口（需要 admin 鉴权）。"""
+    username, _password = _make_user(None)
+    headers = login(env)
+    rows = env.get("/api/image/admin/users", headers=headers).json()["users"]
+    mine = [row for row in rows if row["username"] == username]
+    assert mine and mine[0]["department"] is None
