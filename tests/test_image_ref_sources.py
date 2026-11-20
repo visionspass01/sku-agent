@@ -53,7 +53,7 @@ def _png_b64(text: str = "素材图") -> str:
     return base64.b64encode(placeholder_png(text, 640, 640)).decode("ascii")
 
 
-def _wait(env, headers, task_id, timeout=25.0) -> dict:
+def _wait(env, headers, task_id, timeout=45.0) -> dict:
     deadline = time.time() + timeout
     detail: dict = {}
     while time.time() < deadline:

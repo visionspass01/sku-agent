@@ -128,7 +128,7 @@ def test_reserve_then_commit_on_success(env):
                     json={"product_ids": ["P-1002"], "prompt": "白底主图", "n": 2})
     assert resp.status_code == 201, resp.text
     task_id = resp.json()["tasks"][0]["task_id"]
-    deadline = time.time() + 20
+    deadline = time.time() + 45
     while time.time() < deadline:
         detail = env.get(f"/api/image/tasks/{task_id}", headers=headers).json()
         if detail["status"] in {"done", "failed"} and detail["backfill_status"] != "pending":
@@ -211,7 +211,7 @@ def test_cost_comes_from_provider_not_settings(env, monkeypatch):
     created = env.post("/api/image/tasks", headers=headers,
                        json={"product_ids": ["P-3001"], "prompt": "白底主图", "n": 2})
     task_id = created.json()["tasks"][0]["task_id"]
-    deadline = time.time() + 20
+    deadline = time.time() + 45
     while time.time() < deadline:
         detail = env.get(f"/api/image/tasks/{task_id}", headers=headers).json()
         if detail["status"] in {"done", "failed"}:

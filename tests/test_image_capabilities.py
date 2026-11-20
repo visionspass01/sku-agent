@@ -109,7 +109,7 @@ def test_douxi_prompts_have_no_copy_text(env):
     })
     assert resp.status_code == 201
     task_id = resp.json()["tasks"][0]["task_id"]
-    deadline = time.time() + 20
+    deadline = time.time() + 45
     detail: dict = {}
     while time.time() < deadline:
         detail = env.get(f"/api/image/admin/tasks/{task_id}", headers=headers).json()

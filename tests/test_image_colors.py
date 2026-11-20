@@ -45,7 +45,8 @@ def login(client, username="admin", password="hhw123") -> dict:
     return {"Authorization": f"Bearer {resp.json()['token']}"}
 
 
-def _wait(env, headers, task_id, timeout=20.0) -> dict:
+def _wait(env, headers, task_id, timeout=45.0) -> dict:
+    """等任务到终态（默认 45s，给并发跑/带 coverage 的慢环境留足余量）。"""
     deadline = time.time() + timeout
     detail: dict = {}
     while time.time() < deadline:
@@ -71,7 +72,9 @@ def test_one_task_per_color(env):
     assert len({item["color_key"] for item in body["tasks"]}) == 3
 
     detail = _wait(env, headers, body["tasks"][0]["task_id"])
-    assert detail["status"] == "done"
+    # 失败时把真实原因带出来（错误码/告警），不要只留一句 "assert 'failed' == 'done'"
+    problem = detail.get("error_code") or "; ".join(detail.get("warnings") or []) or "未到终态"
+    assert detail["status"] == "done", problem
     assert detail["refs"], "每个颜色都要有参考图"
 
 

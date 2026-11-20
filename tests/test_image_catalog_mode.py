@@ -155,7 +155,7 @@ def test_mcp_mode_full_chain_and_backfill(mcp_env):
     assert created.status_code == 201, created.text
     task_id = created.json()["tasks"][0]["task_id"]
 
-    deadline = time.time() + 20
+    deadline = time.time() + 45
     detail: dict = {}
     while time.time() < deadline:
         detail = mcp_env.get(f"/api/image/tasks/{task_id}", headers=headers).json()

@@ -510,4 +510,4 @@ MCP server 现在**不碰任何数据库**：它们是「工具名 → `/api/v1/
 | P1-6 | **发起量/成本与使用量同源** | `record_provider_calls` 移到 `settlement`（交付/失败/取消三路径都经过，`settled_at` CAS 保证只记一次）；`/metrics` 与 `image_usage.provider_calls` 口径一致 |
 | P1-7 | **阶段耗时标签修正** | `image_stage_seconds{stage}` 记的是**该阶段自身**耗时（过去错位一格，generate 被算到 critic 名下）；timeline 增 `prev_stage` 字段 |
 
-> P2 级问题不进本轮接口契约，已登记在 `docs/myself/技术债.md`（不在仓库提交范围内）。
+> P2 级问题不进本轮接口契约，按模块登记在项目内的技术债清单（不随仓库发布）。

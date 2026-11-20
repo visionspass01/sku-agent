@@ -97,10 +97,25 @@ def test_deadline_before_first_call_counts_zero(env, monkeypatch):
 
 
 def test_deadline_between_retries_counts_only_real_calls(env, monkeypatch):
-    """第 1 次真实调用失败（可重试），退避后到点：只应记 1 次（旧实现记 2 次）。"""
+    """第 1 次真实调用失败（可重试），下一轮开始前到点：只应记 1 次（旧实现记 2 次）。
+
+    确定性写法（P1-1 CI 稳定性）：把 handler 里的 `time` 换成可控时钟，并让"每次真实
+    调用"推进 1 秒；截止时间固定为 1000.5s。于是第 1 次调用之后必然越过截止时间，
+    不依赖机器快慢——旧写法用 `time.time() + 0.02`，带 `--cov` 时真实时钟节奏漂移，
+    会出现"第一次调用前就到点"的随机失败。
+    """
     monkeypatch.setenv("IMAGE_PROVIDER_RETRIES", "3")
-    monkeypatch.setenv("IMAGE_PROVIDER_RETRY_BACKOFF_SECONDS", "0.05")
+    monkeypatch.setenv("IMAGE_PROVIDER_RETRY_BACKOFF_SECONDS", "0")
     reset_image_settings()
+
+    clock = {"now": 1000.0}
+
+    class _FakeTime:
+        @staticmethod
+        def time() -> float:
+            return clock["now"]
+
+    monkeypatch.setattr(generator_handler, "time", _FakeTime)
 
     calls = {"n": 0}
 
@@ -109,12 +124,14 @@ def test_deadline_between_retries_counts_only_real_calls(env, monkeypatch):
 
         async def generate(self, req: ImageRequest):
             calls["n"] += 1
+            clock["now"] += 1.0               # 一次真实调用推进 1s（下次循环前必然到点）
             raise ImageError("IMG_PROVIDER_RATE_LIMITED", "限流", retryable=True)
 
     with pytest.raises(ImageError) as info:
         asyncio.run(generator_handler._generate_with_retry(
-            _SlowFail(), ImageRequest(prompt="A", n=1), deadline_at=time.time() + 0.02))
-    assert calls["n"] == 1
+            _SlowFail(), ImageRequest(prompt="A", n=1), deadline_at=1000.5))
+    assert info.value.code == "IMG_TIMEOUT"
+    assert calls["n"] == 1, "第 2 次根本没发出去，不能算调用"
     assert generator_handler._provider_calls_of(info.value) == 1
 
 

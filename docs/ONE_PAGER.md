@@ -26,7 +26,7 @@ Python 3.11 · LangGraph 1.2（StateGraph/subgraph/checkpointer）· LangChain T
 
 ## 三个数字
 
-- **1075** 条离线测试通过，覆盖率 **89%**，`ruff` 全绿（CI 十二步：lint → compileall → pytest+覆盖率门槛 → 答案质量自检 → 检索门槛 → 路由门槛 → 作用域矩阵 → 溯源闸门 → **中台治理矩阵** → **Agent 工具面/写路径** → 并发写自检 → 前端冒烟）+ MySQL service 跑关键子集
+- **1700+** 条离线测试通过，覆盖率 **89%**，`ruff` 全绿（CI 十二步：lint → compileall → pytest+覆盖率门槛 → 答案质量自检 → 检索门槛 → 路由门槛 → 作用域矩阵 → 溯源闸门 → **中台治理矩阵** → **Agent 工具面/写路径** → 并发写自检 → 前端冒烟）+ MySQL service 跑关键子集
 - 检索 **R@1 100% / R@3 100% / R@5 100% / MRR 1.000**（38 题；语料 14 篇 / 67 chunk，定位为回归门槛；消融 bm25 92.1% / vector 94.7% / rrf 100%）
 - 对话并发：闸门 2 → 5.2s / 4.7 rps，闸门 8 → 2.7s / 9.0 rps（`scripts/bench_chat.py --mock`，模型桩 300ms、24 请求）
 - 上下文缓存：提示词「静态在前、动态在后」，命中率见 `run_detail.llm.prompt_cache`（本地连问 3 轮实测 31%~71%，随 Agent 切换与工具结果长度波动）

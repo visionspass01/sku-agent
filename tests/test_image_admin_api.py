@@ -54,7 +54,7 @@ def make_task(client, headers, product_ids=("P-1001",), n=1) -> dict:
     return resp.json()
 
 
-def wait_done(client, headers, task_id, timeout=20.0) -> dict:
+def wait_done(client, headers, task_id, timeout=45.0) -> dict:
     deadline = time.time() + timeout
     payload = {}
     while time.time() < deadline:

@@ -2,7 +2,7 @@
 
 为什么放在中台而不是 Agent：v6 的定位是"**参数与商品数据只有中台一份真相**"，
 Agent 侧只保留开发用的 fake 替身（`agents_image/sources/fake_catalog.py`），
-两边形状一致（见 `docs/myself/IMAGE_AGENT_PLAN.md` §4），便于契约测试对照。
+两边形状一致（见 `docs/ARCHITECTURE.md` 的「生图 Agent 架构」一节），便于契约测试对照。
 
 商品数据本身在真实中台来自 `dim_sku`/商品库；这里用固定 mock（8 个商品 + 2 个"无图"商品），
 预设类数据则由 `image_catalog` 表承载（首次启动按本文件的 `PRESETS` 播种，之后可改库热更新）。

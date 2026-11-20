@@ -83,7 +83,7 @@ def test_sweep_marks_purged_assets(env, tmp_path):
     created = env.post("/api/image/tasks", headers=login(env),
                        json={"product_ids": ["P-3002"], "prompt": "白底主图", "image_count": 1})
     task_id = created.json()["tasks"][0]["task_id"]
-    deadline = time.time() + 20
+    deadline = time.time() + 45
     while time.time() < deadline:
         detail = env.get(f"/api/image/tasks/{task_id}",
                          headers=login(env)).json()
@@ -303,7 +303,7 @@ def test_metrics_cards_are_db_based(env):
     created = env.post("/api/image/tasks", headers=headers,
                        json={"product_ids": ["P-1002"], "prompt": "白底主图", "image_count": 1})
     task_id = created.json()["tasks"][0]["task_id"]
-    deadline = time.time() + 20
+    deadline = time.time() + 45
     while time.time() < deadline:
         detail = env.get(f"/api/image/tasks/{task_id}", headers=headers).json()
         if detail["status"] in {"done", "failed"}:

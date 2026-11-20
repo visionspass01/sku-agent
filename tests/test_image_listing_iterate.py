@@ -42,7 +42,7 @@ def login(client, username="admin", password="hhw123") -> dict:
     return {"Authorization": f"Bearer {resp.json()['token']}"}
 
 
-def _done(env, headers, body: dict, timeout=25.0) -> dict:
+def _done(env, headers, body: dict, timeout=45.0) -> dict:
     created = env.post("/api/image/tasks", headers=headers, json=body)
     assert created.status_code == 201, created.text
     task_id = created.json()["tasks"][0]["task_id"]

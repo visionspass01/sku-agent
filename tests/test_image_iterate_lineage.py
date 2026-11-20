@@ -49,7 +49,7 @@ def login(client, username="admin", password="hhw123") -> dict:
     return {"Authorization": f"Bearer {resp.json()['token']}"}
 
 
-def _wait(env, headers, task_id, timeout=30.0) -> dict:
+def _wait(env, headers, task_id, timeout=45.0) -> dict:
     deadline = time.time() + timeout
     detail: dict = {}
     while time.time() < deadline:

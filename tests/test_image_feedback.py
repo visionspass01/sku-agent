@@ -53,7 +53,7 @@ def _done_task(env, headers, product="P-1002", **extra) -> dict:
     created = env.post("/api/image/tasks", headers=headers, json=body)
     assert created.status_code == 201, created.text
     task_id = created.json()["tasks"][0]["task_id"]
-    deadline = time.time() + 25
+    deadline = time.time() + 45
     detail: dict = {}
     while time.time() < deadline:
         detail = env.get(f"/api/image/tasks/{task_id}", headers=headers).json()
