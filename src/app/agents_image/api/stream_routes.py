@@ -20,7 +20,7 @@ from app.agents_image.api.common import (
     error_response,
     is_terminal,
 )
-from app.agents_image.api.deps import require_user, trace_id_of
+from app.agents_image.api.deps import require_user, require_user_async, trace_id_of
 from app.agents_image.dispatch.task_dispatcher import get_dispatcher
 from app.agents_image.store import assets as asset_store
 from app.agents_image.store import quota as quota_store
@@ -126,14 +126,21 @@ async def stream_task(task_id: str, request: Request):
     """
     trace = trace_id_of(request)
     try:
-        user = require_user(request)
-        with session_scope() as session:
-            task = task_store.get_task(session, task_id)
-            if task is None:
-                raise ImageError("IMG_TASK_NOT_FOUND", f"任务不存在：{task_id}")
-            if not user.is_admin and task.username != user.username:
-                raise ImageError("IMG_FORBIDDEN", "无权访问他人的任务")
-            snapshot = _snapshot_payload(task)
+        user = await require_user_async(request)
+
+        def _snapshot_of() -> dict:
+            with session_scope() as session:
+                task = task_store.get_task(session, task_id)
+                if task is None:
+                    raise ImageError("IMG_TASK_NOT_FOUND", f"任务不存在：{task_id}")
+                if not user.is_admin and task.username != user.username:
+                    raise ImageError("IMG_FORBIDDEN", "无权访问他人的任务")
+                return _snapshot_payload(task)
+
+        # P1-3：首帧快照的同步 DB 查询丢线程池
+        from app.observability.trace import run_in_trace
+
+        snapshot = await run_in_trace(_snapshot_of)
     except ImageError as exc:
         return error_response(exc, trace)
 
@@ -210,8 +217,11 @@ async def cancel_task(task_id: str, request: Request) -> JSONResponse:
     """
     trace = trace_id_of(request)
     try:
-        user = require_user(request)
-        outcome = cancel_one(user, task_id)
+        user = await require_user_async(request)
+        from app.observability.trace import run_in_trace
+
+        # P1-3：取消判定是同步 DB，丢线程池
+        outcome = await run_in_trace(cancel_one, user, task_id)
         if not outcome.get("needs_dispatch"):
             return JSONResponse(status_code=409, content={
                 "ok": False, "canceled": False, "provider_in_flight": True,

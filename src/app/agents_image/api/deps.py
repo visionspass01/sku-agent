@@ -63,6 +63,24 @@ def require_admin(request: Request) -> AuthUser:
     return user
 
 
+async def require_user_async(request: Request) -> AuthUser:
+    """`async def` 端点用的版本：把「2 次同步 DB 查询」丢线程池（P1-3，第十轮）。
+
+    认证在**每个请求**都要做（令牌黑名单 + 账号查询），是 async 端点里最稳定的同步 IO；
+    留在事件循环里时，MySQL 网络往返会把单 worker 的吞吐上限压到个位数。
+    结果仍然缓存在 `request.state.image_user`，线程池里再调一次也不会重复查库。
+    """
+    from app.observability.trace import run_in_trace
+
+    return await run_in_trace(require_user, request)
+
+
+async def require_admin_async(request: Request) -> AuthUser:
+    from app.observability.trace import run_in_trace
+
+    return await run_in_trace(require_admin, request)
+
+
 def trace_id_of(request: Request) -> str:
     """本次请求的 trace：**优先用中间件已建立的**（响应头/响应体/日志三处必须一致）。
 
@@ -92,4 +110,5 @@ def client_ip(request: Request) -> str:
 
 
 __all__ = ["AuthUser", "current_user_optional", "require_user", "require_admin",
-           "trace_id_of", "client_ip", "get_throttle"]
+           "require_user_async", "require_admin_async", "trace_id_of", "client_ip",
+           "get_throttle"]

@@ -15,7 +15,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from app.agents_image.api.common import asset_payload, error_response
-from app.agents_image.api.deps import require_admin, trace_id_of
+from app.agents_image.api.deps import require_admin, require_admin_async, trace_id_of
 from app.agents_image.store import assets as asset_store
 from app.agents_image.store import outbox as outbox_store
 from app.agents_image.store import quota as quota_store
@@ -206,7 +206,8 @@ async def admin_metrics(request: Request) -> JSONResponse:
     """
     trace = trace_id_of(request)
     try:
-        require_admin(request)
+        # P1-3：认证（2 次同步 DB 查询）丢线程池
+        await require_admin_async(request)
         granularity = (request.query_params.get("granularity") or "day").strip().lower()
         username = (request.query_params.get("username") or "").strip() or None
         department = (request.query_params.get("department") or "").strip() or None

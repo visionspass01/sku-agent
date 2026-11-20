@@ -12,7 +12,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from app.agents_image.api.common import TERMINAL_STATUSES, error_response
-from app.agents_image.api.deps import require_user, trace_id_of
+from app.agents_image.api.deps import require_user, require_user_async, trace_id_of
 from app.agents_image.config import get_image_settings
 from app.agents_image.dispatch.task_dispatcher import get_dispatcher
 from app.agents_image.store import quota as quota_store
@@ -61,32 +61,42 @@ async def retry_one(user, task_id: str) -> dict:
     否则两个并发重试都会各 reserve 一份、只有一次 claim 成功，多占的额度永远不释放。
     """
     settings = get_image_settings()
-    with session_scope() as session:
-        task = task_store.get_task(session, task_id)
-        if task is None:
-            raise ImageError("IMG_TASK_NOT_FOUND", f"任务不存在：{task_id}")
-        if not user.is_admin and task.username != user.username:
-            raise ImageError("IMG_FORBIDDEN", "无权重试他人的任务")
-        if task.status not in {"failed", "canceled"}:
-            raise ImageError("IMG_TASK_CONFLICT",
-                             f"只有 failed / canceled 的任务可以重试（当前 {task.status}）")
-        retries = int(getattr(task, "retries", 0) or 0)
-        if retries >= int(settings.max_task_retries):
-            raise ImageError("IMG_TASK_CONFLICT",
-                             f"该任务已重试 {retries} 次，达到上限 {settings.max_task_retries}")
-        planned = int(task.image_count or 0)
-        username = task.username
-        # P1-2：先用条件 UPDATE 抢重试权（同时清 settled_at/租约/告警/上架等）。
-        # 抢不到说明别的请求已经重置过它（状态/重试次数已变），直接 409。
-        if not task_store.begin_retry(session, task_id, retries=retries):
-            raise ImageError("IMG_TASK_CONFLICT",
-                             "任务状态已变化（可能已被其它请求重试），请刷新后重试")
-        # 预留与重置同一事务：reserve 失败会抛错 → 整个事务回滚（重试权一起撤销）
-        if not user.is_admin and planned and not quota_store.reserve(session, username, planned):
-            quota = quota_store.check(session, username, planned)
-            raise ImageError("IMG_QUOTA_EXCEEDED",
-                             f"配额不足：本期剩余 {quota['remaining']} 张，重试需要 {planned} 张",
-                             retryable=False)
+
+    def _begin_retry_db() -> int:
+        with session_scope() as session:
+            task = task_store.get_task(session, task_id)
+            if task is None:
+                raise ImageError("IMG_TASK_NOT_FOUND", f"任务不存在：{task_id}")
+            if not user.is_admin and task.username != user.username:
+                raise ImageError("IMG_FORBIDDEN", "无权重试他人的任务")
+            if task.status not in {"failed", "canceled"}:
+                raise ImageError("IMG_TASK_CONFLICT",
+                                 f"只有 failed / canceled 的任务可以重试（当前 {task.status}）")
+            retries = int(getattr(task, "retries", 0) or 0)
+            if retries >= int(settings.max_task_retries):
+                raise ImageError("IMG_TASK_CONFLICT",
+                                 f"该任务已重试 {retries} 次，达到上限 {settings.max_task_retries}")
+            planned = int(task.image_count or 0)
+            username = task.username
+            # P1-2：先用条件 UPDATE 抢重试权（同时清 settled_at/租约/告警/上架等）。
+            # 抢不到说明别的请求已经重置过它（状态/重试次数已变），直接 409。
+            if not task_store.begin_retry(session, task_id, retries=retries):
+                raise ImageError("IMG_TASK_CONFLICT",
+                                 "任务状态已变化（可能已被其它请求重试），请刷新后重试")
+            # 预留与重置同一事务：reserve 失败会抛错 → 整个事务回滚（重试权一起撤销）
+            if (not user.is_admin and planned
+                    and not quota_store.reserve(session, username, planned)):
+                quota = quota_store.check(session, username, planned)
+                raise ImageError(
+                    "IMG_QUOTA_EXCEEDED",
+                    f"配额不足：本期剩余 {quota['remaining']} 张，重试需要 {planned} 张",
+                    retryable=False)
+            return retries
+
+    # P1-3：重试的 DB 事务丢线程池（async 端点里不占事件循环）
+    from app.observability.trace import run_in_trace
+
+    retries = await run_in_trace(_begin_retry_db)
     try:
         await get_dispatcher().submit(task_id)
     except Exception:  # noqa: BLE001 —— 已入库，看门狗会补投
@@ -110,7 +120,7 @@ async def cancel_batch(request: Request) -> JSONResponse:
     """整批取消：逐任务按两分支语义处理，返回每个任务的结果与统计。"""
     trace = trace_id_of(request)
     try:
-        user = require_user(request)
+        user = await require_user_async(request)
         batch_id = _body_batch_id(await request.json())
         with session_scope() as session:
             rows = _batch_tasks(session, batch_id)
@@ -123,7 +133,10 @@ async def cancel_batch(request: Request) -> JSONResponse:
         results = []
         for task_id in ids:
             try:
-                outcome = cancel_one(user, task_id)
+                # P1-3：cancel_one 是同步 DB 判定，丢线程池
+                from app.observability.trace import run_in_trace
+
+                outcome = await run_in_trace(cancel_one, user, task_id)
                 if not outcome.get("needs_dispatch"):
                     results.append(outcome)
                     continue

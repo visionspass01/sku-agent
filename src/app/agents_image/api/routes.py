@@ -32,7 +32,7 @@ from app.agents_image.api.common import (
     is_terminal,
     verify_asset_signature,
 )
-from app.agents_image.api.deps import require_user, trace_id_of
+from app.agents_image.api.deps import require_user, require_user_async, trace_id_of
 from app.agents_image.api.library_routes import router as library_router
 from app.agents_image.api.ratelimit import check_rate_limit
 from app.agents_image.api.stream_routes import router as stream_router
@@ -221,7 +221,7 @@ async def list_products(request: Request) -> JSONResponse:
     """商品清单（转发 MCP `image_list_products`）：前端只从这里多选，不能上传图片。"""
     trace = trace_id_of(request)
     try:
-        user = require_user(request)
+        user = await require_user_async(request)
         keyword = (request.query_params.get("keyword") or "").strip()
         try:
             limit = int(request.query_params.get("limit") or 20)
@@ -309,7 +309,7 @@ async def create_tasks(request: Request) -> JSONResponse:
     trace = trace_id_of(request)
     settings = get_image_settings()
     try:
-        user = require_user(request)
+        user = await require_user_async(request)
         # P1-6（第九轮）：请求级限流（配额按周期，挡不住短时间狂点建任务打爆中台）
         check_rate_limit(user.username, "create_tasks")
         # P0-2：真实 provider + 单价 0 → 预算闸（按张数估算）会永远不触发，等于没有护栏。
@@ -523,133 +523,144 @@ async def create_tasks(request: Request) -> JSONResponse:
                 timeout_seconds=settings.mcp_timeout_seconds,
             )
 
-        # 阶段 C：短写事务（幂等抢占 + 预留 + 参考图落库 + 建任务）
-        with session_scope() as session:
-            from sqlalchemy.exc import IntegrityError
+        def _write_txn():
+            """P1-3（第十轮）：建任务的同步写事务整体丢线程池，不占事件循环。"""
+            # 阶段 C：短写事务（幂等抢占 + 预留 + 参考图落库 + 建任务）
+            with session_scope() as session:
+                from sqlalchemy.exc import IntegrityError
 
-            from app.agents_image.store import quota as quota_store
+                from app.agents_image.store import quota as quota_store
 
-            # 幂等抢占：先插 pending 行；并发同 key 的第二个请求会撞主键 → 409
-            if idempotency_key:
-                from app.agents_image.store.models import ImageRequest
+                # 幂等抢占：先插 pending 行；并发同 key 的第二个请求会撞主键 → 409
+                if idempotency_key:
+                    from app.agents_image.store.models import ImageRequest
 
-                session.add(ImageRequest(request_id=idempotency_key, status="pending",
-                                         batch_id="", username=user.username,
-                                         payload_hash=payload_hash,
-                                         response_json={}))
-                try:
-                    session.flush()
-                except IntegrityError:
-                    session.rollback()
-                    return _idempotent_conflict(trace)
-
-            # 预留：占住本次计划张数，防止并发下超发（交付成功转 used，失败/取消由事务回滚/结算释放）
-            if not user.is_admin:
-                if not quota_store.reserve(session, user.username, planned_images):
-                    raise ImageError("IMG_QUOTA_EXCEEDED",
-                                     f"配额不足：本期剩余 {quota['remaining']} 张，"
-                                     f"本次需要 {planned_images} 张", retryable=False)
-
-            resolution = refs_source.persist_refs(session, ref_plan, username=user.username,
-                                                  department=user.department)
-            batch_id = new_batch_id()
-            created: list[dict] = []
-            first_slots: list[dict] = []
-            for index, (target, platform, variant, state) in enumerate(planned_states):
-                params = params_by_platform[platform]
-                # 参考图在事务内落库后再绑定到 state（复用预演出来的图位与身份锁定）
-                state.refs = resolution.refs_of(target.color_key)
-                # P2-8：校验规则在 planning 里（与执行期同一套），API 不再直接依赖编排节点
-                planning.validate_state(state, settings)
-                # 复用只保留本次图位窗口内的 slot（第三轮 P1-2）
-                reuse_map = _reuse_window(state, _reuse_of(target, platform, variant))
-                # P1-3/P1-4：iterate 但一张图位都复用不到时必须解释清楚（基座 + 目标三元组）
-                task_warnings = _reuse_miss_warnings(
-                    base_task_id_hint, base_task, target, platform,
-                    str(state.variant_id or ""), reuse_map) + list(prompt_warnings)
-                # P1-2（第八轮）：目标颜色没有对应参考图时，参考图解析会退回别颜色的图，
-                # 这条告警必须落到任务上（否则运营只看到"颜色不对"却不知道原因）
-                task_warnings.extend(resolution.warnings)
-                task = task_store.create_task(
-                    session, task_id=new_task_id(), username=user.username,
-                    department=user.department, batch_id=batch_id,
-                    product_id=target.product_id, color_key=target.color_key,
-                    variant_id=state.variant_id,
-                    prompt=prompt, platform=platform, aspect=params["aspect"],
-                    n=params["image_count"],
-                    ref_asset_ids=resolution.asset_ids_of(target.color_key),
-                    compositions=params["compositions"], scene_styles=params["scene_styles"],
-                    slots=[item.model_dump() for item in state.slots],
-                    prompt_pack=[], request_id=idempotency_key,
-                    ref_source=ref_source,
-                    trace_id=trace, attrs=state.attrs,
-                    image_count=plan_by_task[index],
-                    slot_count=len(state.slots),
-                    # 血统只记"同一 (颜色, 平台, 变体) 的 iterate 目标"（即便没有可复用图位）
-                    base_task_id=(reuse_plan or {}).get("base_task_id")
-                    if (reuse_plan and _reuse_targets(target, platform, variant))
-                    else None,
-                    reuse_asset_ids=reuse_map,
-                    reused_images=len(reuse_map),
-                    warnings=task_warnings,
-                )
-                asset_store.bind_refs_to_task(session, task.ref_asset_ids, task.task_id)
-                created.append({"task_id": task.task_id, "product_id": target.product_id,
-                                "ref_source": task.ref_source,
-                                "color": target.color, "color_key": target.color_key,
-                                "platform": platform, "variant_id": state.variant_id,
-                                "variant_direction": state.variant_direction,
-                                "status": task.status,
-                                "refs": len(task.ref_asset_ids),
-                                "image_count": task.image_count,
-                                "slot_count": task.slot_count,
-                                "base_task_id": task.base_task_id,
-                                "reused_images": task.reused_images})
-                first_slots = first_slots or [item.model_dump() for item in state.slots]
-            payload = {
-                "batch_id": batch_id, "tasks": created, "slots": first_slots,
-                "platforms": platforms,
-                "variants": [item.get("id", "") for item in variants],
-                "slot_count": base_params["slot_count"],
-                "image_count": base_params["image_count"],
-                "limits": {"max_refs": max_refs,
-                           "max_refs_configured": settings.max_refs,
-                           "refs_per_item": settings.refs_per_item,
-                           "max_batch_products": settings.max_batch_products,
-                           "max_tasks_per_request": settings.max_tasks_per_request,
-                           "max_prompt_chars": max_prompt_chars,
-                           "refs_truncated": resolution.truncated},
-                "planned_images": planned_images,
-                "ref_source": ref_source,
-                # 复用口径（P2-8）：`reused_images` 是**图片张数**，`reused_tasks` 是**任务数**
-                "reused_images": sum(len(_reuse_window(state, _reuse_of(target, platform, variant)))
-                                     for (target, platform, variant, state) in planned_states),
-                "reused_tasks": sum(1 for (target, platform, variant, state) in planned_states
-                                    if _reuse_window(state, _reuse_of(target, platform, variant))),
-                "trace_id": trace, "idempotent": False,
-            }
-            if idempotency_key:
-                from app.agents_image.store.models import ImageRequest
-
-                row = session.get(ImageRequest, idempotency_key)
-                if row is None:
-                    session.add(ImageRequest(request_id=idempotency_key, status="done",
-                                             batch_id=batch_id, username=user.username,
+                    session.add(ImageRequest(request_id=idempotency_key, status="pending",
+                                             batch_id="", username=user.username,
                                              payload_hash=payload_hash,
-                                             response_json=payload))
-                else:
-                    row.batch_id = batch_id
-                    row.response_json = payload
-                    row.payload_hash = payload_hash
-                    row.status = "done"
-                session.flush()
+                                             response_json={}))
+                    try:
+                        session.flush()
+                    except IntegrityError:
+                        session.rollback()
+                        return "__conflict__"
+
+                # 预留：占住本次计划张数，防止并发下超发（交付成功转 used，失败/取消由事务回滚/结算释放）
+                if not user.is_admin:
+                    if not quota_store.reserve(session, user.username, planned_images):
+                        raise ImageError("IMG_QUOTA_EXCEEDED",
+                                         f"配额不足：本期剩余 {quota['remaining']} 张，"
+                                         f"本次需要 {planned_images} 张", retryable=False)
+
+                resolution = refs_source.persist_refs(session, ref_plan, username=user.username,
+                                                      department=user.department)
+                batch_id = new_batch_id()
+                created: list[dict] = []
+                first_slots: list[dict] = []
+                for index, (target, platform, variant, state) in enumerate(planned_states):
+                    params = params_by_platform[platform]
+                    # 参考图在事务内落库后再绑定到 state（复用预演出来的图位与身份锁定）
+                    state.refs = resolution.refs_of(target.color_key)
+                    # P2-8：校验规则在 planning 里（与执行期同一套），API 不再直接依赖编排节点
+                    planning.validate_state(state, settings)
+                    # 复用只保留本次图位窗口内的 slot（第三轮 P1-2）
+                    reuse_map = _reuse_window(state, _reuse_of(target, platform, variant))
+                    # P1-3/P1-4：iterate 但一张图位都复用不到时必须解释清楚（基座 + 目标三元组）
+                    task_warnings = _reuse_miss_warnings(
+                        base_task_id_hint, base_task, target, platform,
+                        str(state.variant_id or ""), reuse_map) + list(prompt_warnings)
+                    # P1-2（第八轮）：目标颜色没有对应参考图时，参考图解析会退回别颜色的图，
+                    # 这条告警必须落到任务上（否则运营只看到"颜色不对"却不知道原因）
+                    task_warnings.extend(resolution.warnings)
+                    task = task_store.create_task(
+                        session, task_id=new_task_id(), username=user.username,
+                        department=user.department, batch_id=batch_id,
+                        product_id=target.product_id, color_key=target.color_key,
+                        variant_id=state.variant_id,
+                        prompt=prompt, platform=platform, aspect=params["aspect"],
+                        n=params["image_count"],
+                        ref_asset_ids=resolution.asset_ids_of(target.color_key),
+                        compositions=params["compositions"], scene_styles=params["scene_styles"],
+                        slots=[item.model_dump() for item in state.slots],
+                        prompt_pack=[], request_id=idempotency_key,
+                        ref_source=ref_source,
+                        trace_id=trace, attrs=state.attrs,
+                        image_count=plan_by_task[index],
+                        slot_count=len(state.slots),
+                        # 血统只记"同一 (颜色, 平台, 变体) 的 iterate 目标"（即便没有可复用图位）
+                        base_task_id=(reuse_plan or {}).get("base_task_id")
+                        if (reuse_plan and _reuse_targets(target, platform, variant))
+                        else None,
+                        reuse_asset_ids=reuse_map,
+                        reused_images=len(reuse_map),
+                        warnings=task_warnings,
+                    )
+                    asset_store.bind_refs_to_task(session, task.ref_asset_ids, task.task_id)
+                    created.append({"task_id": task.task_id, "product_id": target.product_id,
+                                    "ref_source": task.ref_source,
+                                    "color": target.color, "color_key": target.color_key,
+                                    "platform": platform, "variant_id": state.variant_id,
+                                    "variant_direction": state.variant_direction,
+                                    "status": task.status,
+                                    "refs": len(task.ref_asset_ids),
+                                    "image_count": task.image_count,
+                                    "slot_count": task.slot_count,
+                                    "base_task_id": task.base_task_id,
+                                    "reused_images": task.reused_images})
+                    first_slots = first_slots or [item.model_dump() for item in state.slots]
+                payload = {
+                    "batch_id": batch_id, "tasks": created, "slots": first_slots,
+                    "platforms": platforms,
+                    "variants": [item.get("id", "") for item in variants],
+                    "slot_count": base_params["slot_count"],
+                    "image_count": base_params["image_count"],
+                    "limits": {"max_refs": max_refs,
+                               "max_refs_configured": settings.max_refs,
+                               "refs_per_item": settings.refs_per_item,
+                               "max_batch_products": settings.max_batch_products,
+                               "max_tasks_per_request": settings.max_tasks_per_request,
+                               "max_prompt_chars": max_prompt_chars,
+                               "refs_truncated": resolution.truncated},
+                    "planned_images": planned_images,
+                    "ref_source": ref_source,
+                    # 复用口径（P2-8）：`reused_images` 是**图片张数**，`reused_tasks` 是**任务数**
+                    "reused_images": sum(len(_reuse_window(state, _reuse_of(target, platform, variant)))
+                                         for (target, platform, variant, state) in planned_states),
+                    "reused_tasks": sum(1 for (target, platform, variant, state) in planned_states
+                                        if _reuse_window(state, _reuse_of(target, platform, variant))),
+                    "trace_id": trace, "idempotent": False,
+                }
+                if idempotency_key:
+                    from app.agents_image.store.models import ImageRequest
+
+                    row = session.get(ImageRequest, idempotency_key)
+                    if row is None:
+                        session.add(ImageRequest(request_id=idempotency_key, status="done",
+                                                 batch_id=batch_id, username=user.username,
+                                                 payload_hash=payload_hash,
+                                                 response_json=payload))
+                    else:
+                        row.batch_id = batch_id
+                        row.response_json = payload
+                        row.payload_hash = payload_hash
+                        row.status = "done"
+                    session.flush()
+            return payload
+        # P1-3（第十轮）：幂等抢占 + 配额预留 + 参考图落库 + 任务写入是一个同步事务，
+        # 整体丢线程池执行（MySQL 网络往返下这是建任务里最重的一段）。
+        from app.observability.trace import run_in_trace
+
+        persisted = await run_in_trace(_write_txn)
+        if persisted == "__conflict__":
+            return _idempotent_conflict(trace)
+        payload = persisted
         # 事务已提交：任务与预留都落库。派发失败不算建任务失败（任务保持 queued，看门狗会补投）
-        for item in created:
+        for item in payload["tasks"]:
             try:
                 await get_dispatcher().submit(item["task_id"])
             except Exception:  # noqa: BLE001
                 logger.warning("任务派发失败（保留 queued，由看门狗补投）：%s", item["task_id"])
-        metrics.record_task_created(len(created))
+        metrics.record_task_created(len(payload["tasks"]))
     except ImageError as exc:
         # 事务回滚已撤销预留 → 这里**不再显式释放**（否则会把别人的预留吃掉）
         return error_response(exc, trace)
@@ -859,8 +870,12 @@ async def adopt_asset(task_id: str, asset_id: str, request: Request) -> JSONResp
     """采纳（正样本）：只做人工判断，成本早已按 provider 成功计入，不因驳回返还。"""
     trace = trace_id_of(request)
     try:
-        user = require_user(request)
-        return _verdict_response(request, task_id, asset_id, "adopted", trace, user)
+        user = await require_user_async(request)
+        # P1-3：`_verdict_response` 里是同步 DB 写（反馈行 + 使用量 shift），丢线程池
+        from app.observability.trace import run_in_trace
+
+        return await run_in_trace(_verdict_response, request, task_id, asset_id,
+                                  "adopted", trace, user)
     except ImageError as exc:
         return error_response(exc, trace)
 
@@ -870,7 +885,7 @@ async def reject_asset(task_id: str, asset_id: str, request: Request) -> JSONRes
     """驳回（负样本）：必须给原因，原因会进 Reflexion 的候选补丁。"""
     trace = trace_id_of(request)
     try:
-        user = require_user(request)
+        user = await require_user_async(request)
         body = {}
         try:
             body = await request.json()
@@ -879,8 +894,11 @@ async def reject_asset(task_id: str, asset_id: str, request: Request) -> JSONRes
         reason = str((body or {}).get("reason") or "").strip()
         if not reason:
             raise ImageError("IMG_INPUT_INVALID", "驳回必须填写原因（reason）")
-        return _verdict_response(request, task_id, asset_id, "rejected", trace, user,
-                                 reason=reason)
+        # P1-3：同上（驳回也是同步 DB 写）
+        from app.observability.trace import run_in_trace
+
+        return await run_in_trace(_verdict_response, request, task_id, asset_id,
+                                  "rejected", trace, user, reason=reason)
     except ImageError as exc:
         return error_response(exc, trace)
 
@@ -959,20 +977,27 @@ async def update_listing(task_id: str, request: Request) -> JSONResponse:
     """
     trace = trace_id_of(request)
     try:
-        user = require_user(request)
+        user = await require_user_async(request)
         body = await request.json()
         body = body if isinstance(body, dict) else {}
         status = str(body.get("status") or "").strip().lower()
         url = str(body.get("listing_url") or "").strip()
-        with session_scope() as session:
-            task = task_store.get_task(session, task_id)
-            if task is None:
-                raise ImageError("IMG_TASK_NOT_FOUND", f"任务不存在：{task_id}")
-            _ensure_owner(task.username, user, "任务")
-            if status == "listed" and not url:
-                raise ImageError("IMG_INPUT_INVALID", "标记已上架时必须填 listing_url（商品链接）")
-            task_store.update_listing(session, task_id, status=status, url=url)
-            payload = {"task_id": task_id, "status": status, "listing_url": url}
+        def _write_listing():
+            with session_scope() as session:
+                task = task_store.get_task(session, task_id)
+                if task is None:
+                    raise ImageError("IMG_TASK_NOT_FOUND", f"任务不存在：{task_id}")
+                _ensure_owner(task.username, user, "任务")
+                if status == "listed" and not url:
+                    raise ImageError("IMG_INPUT_INVALID",
+                                     "标记已上架时必须填 listing_url（商品链接）")
+                task_store.update_listing(session, task_id, status=status, url=url)
+                return {"task_id": task_id, "status": status, "listing_url": url}
+
+        # P1-3：同步 DB 写丢线程池
+        from app.observability.trace import run_in_trace
+
+        payload = await run_in_trace(_write_listing)
     except ImageError as exc:
         return error_response(exc, trace)
     return JSONResponse(status_code=200, content={**payload, "trace_id": trace})
@@ -989,7 +1014,7 @@ async def retry_task(task_id: str, request: Request) -> JSONResponse:
     """
     trace = trace_id_of(request)
     try:
-        user = require_user(request)
+        user = await require_user_async(request)
         result = await _retry_one(user, task_id)
         payload = {"task_id": result["task_id"], "status": result["status"],
                    "retries": result["retries"]}
