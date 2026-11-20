@@ -43,6 +43,31 @@ _REPAIR_QUERY_HINTS: dict[str, str] = {
     "prompt": "五槽位 提示词完整",
 }
 
+# 第六轮 P1-4：KB 修复文档的**相关性门槛**。
+# 只有 fix 文档的 tags/标题/正文里出现该 issue 类型的关键词，才允许拿它的修法去改 Prompt；
+# 否则（例如 aspect 失败却命中"白底不纯"）宁可退回内置规则，也不注入不相关修法——
+# 错误修法一旦在"失败→成功"里被归档，还会顺着记忆自我放大。
+_ISSUE_KIND_TAGS: dict[str, tuple[str, ...]] = {
+    "identity": ("身份", "颜色", "版型", "logo", "漂移"),
+    "aspect": ("比例不符", "画幅", "裁切", "长宽比", "拉伸"),
+    "banned_words": ("禁用", "极限词", "促销文字"),
+    "text_policy": ("图内文字", "角标", "叠字"),
+    "mime": ("输出格式", "图片类型", "png"),
+    "empty": ("空输出", "完整商品图"),
+    "prompt": ("提示词", "槽位"),
+}
+
+
+def _fix_doc_matches(doc, kinds: list[str]) -> bool:
+    """fix 文档是否与 issue 类型同源（tags 优先，其次标题/正文关键词）。"""
+    tags = [str(item) for item in (getattr(doc, "tags", None) or [])]
+    text = f"{getattr(doc, 'title', '')} {getattr(doc, 'body', '')}"
+    for kind in kinds:
+        for keyword in _ISSUE_KIND_TAGS.get(kind, ()):
+            if keyword in tags or keyword in text:
+                return True
+    return False
+
 
 def _renew_lease(task_id: str, settings) -> None:
     """执行期续约（W1）：每个阶段续一次，保证在途任务不会被看门狗重投。"""
@@ -151,18 +176,24 @@ def _repair_experience(state: ImageTaskState, signature: str) -> dict:
     try:
         from app.agents_image.rag import index as rag_index
 
-        # 修复查询带上 issue 类型的关键词，避免"碰巧命中"不相关的修复经验（P1-1 的同一思路）
+        # 修复查询带上 issue 类型的关键词，并**按 kinds 过滤**：不相关修法宁可不用（P1-4）
         hints = _REPAIR_QUERY_HINTS
         query = " ".join(part for part in (
             str((state.attrs or {}).get("product_type") or ""),
             " ".join(hints.get(kind, "") for kind in kinds), " ".join(kinds), "修复") if part)
-        hits = rag_index.retrieve(query, top_k=1, kind="fix")
-        if hits:
-            snippet = str(hits[0].snippet or "").strip()
-            if snippet:
-                state.warnings.append(
-                    f"IMG_REPAIR_KB: 命中知识库修复经验（{hits[0].doc.doc_id}），本轮按它修复")
-                return {"patches": {kind: snippet for kind in kinds}, "source": "kb"}
+        settings = get_image_settings()
+        hits = rag_index.retrieve(
+            query, top_k=3, kind="fix",
+            min_score=float(getattr(settings, "rag_min_score", 0.0) or 0.0))
+        for hit in hits:
+            if not _fix_doc_matches(hit.doc, kinds):
+                continue
+            snippet = str(hit.snippet or "").strip()
+            if not snippet:
+                continue
+            state.warnings.append(
+                f"IMG_REPAIR_KB: 命中知识库修复经验（{hit.doc.doc_id}），本轮按它修复")
+            return {"patches": {kind: snippet for kind in kinds}, "source": "kb"}
     except Exception as exc:  # noqa: BLE001 —— KB 检索失败退回内置规则
         logger.warning("修复经验检索失败（走内置规则）：%s", exc)
     return {"patches": {}, "source": ""}
