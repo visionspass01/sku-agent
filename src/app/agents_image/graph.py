@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import logging
 
@@ -80,6 +81,12 @@ def _renew_lease(task_id: str, settings) -> None:
 
 
 def _load_refs(session, ref_ids: list[str]) -> list[dict]:
+    """同步读参考图字节（DB 查询 + 存储读盘）。
+
+    P2-4（第八轮）：**不要在事件循环里直接调**——本地/COS 读盘是阻塞 IO，8 个并发任务
+    同时进 execute_task 时会把 loop 卡住（SSE 心跳、取消检查、别的任务都被拖后）。
+    执行体走 `_load_refs_async()`（`asyncio.to_thread`），本函数保留给同步测试调用。
+    """
     storage = get_storage()
     refs: list[dict] = []
     for asset_id in ref_ids:
@@ -97,6 +104,16 @@ def _load_refs(session, ref_ids: list[str]) -> list[dict]:
         refs.append({"asset_id": asset.asset_id, "data": data,
                      "mime": asset.mime, "sha256": asset.sha256})
     return refs
+
+
+def _load_refs_sync(ref_ids: list[str]) -> list[dict]:
+    """线程池里跑用的入口：自己开一个独立会话（session 不跨线程共享）。"""
+    with session_scope() as session:
+        return _load_refs(session, ref_ids)
+
+
+async def _load_refs_async(ref_ids: list[str]) -> list[dict]:
+    return await asyncio.to_thread(_load_refs_sync, list(ref_ids))
 
 
 async def _platform_rules(state: ImageTaskState):
@@ -246,7 +263,7 @@ async def execute_task(task_id: str) -> ImageTaskState:
             raise RuntimeError(f"任务不存在：{task_id}")
         if task.status in {"canceled", "done", "failed"}:
             return ImageTaskState(task_id=task_id)
-        refs = _load_refs(session, list(task.ref_asset_ids or []))
+        ref_ids = list(task.ref_asset_ids or [])
         state = ImageTaskState(
             task_id=task.task_id, request_id=task.request_id, trace_id=task.trace_id,
             batch_id=task.batch_id or "", product_id=task.product_id,
@@ -254,10 +271,7 @@ async def execute_task(task_id: str) -> ImageTaskState:
             platform=task.platform, aspect=task.aspect, count=task.n,
             compositions=list(task.compositions or []),
             scene_styles=list(task.scene_styles or []),
-            refs=[RefImage(asset_id=item["asset_id"], sha256=item["sha256"],
-                           mime=item["mime"],
-                           product_id=str(task.product_id or ""),
-                           source=task.ref_source or "mcp") for item in refs],
+            refs=[],
             attrs=dict(task.attrs_json or {}),
             reuse_asset_ids=dict(getattr(task, "reuse_asset_ids", {}) or {}),
             ref_source=task.ref_source or "mcp",
@@ -265,6 +279,12 @@ async def execute_task(task_id: str) -> ImageTaskState:
             slots=[SlotPlan(**item) for item in (task.slots_json or [])]
             or plan_slots.build_slots(ImageTaskState(count=task.n, aspect=task.aspect)),
         )
+    # P2-4：参考图字节读取（DB + 文件 IO）丢线程池，不阻塞事件循环
+    refs = await _load_refs_async(ref_ids)
+    state.refs = [RefImage(asset_id=item["asset_id"], sha256=item["sha256"],
+                           mime=item["mime"],
+                           product_id=str(state.product_id or ""),
+                           source=state.ref_source or "mcp") for item in refs]
 
     _renew_lease(task_id, settings)
     state.touch("understand")
