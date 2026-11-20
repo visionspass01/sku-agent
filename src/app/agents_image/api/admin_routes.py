@@ -313,25 +313,46 @@ def admin_users(request: Request) -> JSONResponse:
     return JSONResponse(status_code=200, content={"users": rows, "trace_id": trace})
 
 
+def _validate_department(value: str | None) -> str | None:
+    """部门校验（第五轮 P0-5）：只允许白名单内的部门，空值表示"不绑定"。"""
+    from app.agents_image.api.common import DEPARTMENTS
+
+    department = str(value or "").strip()
+    if not department:
+        return None
+    if department not in DEPARTMENTS:
+        raise ImageError("IMG_INPUT_INVALID",
+                         f"不支持的部门：{department}（可选：{'、'.join(DEPARTMENTS)}）")
+    return department
+
+
 @router.post("/admin/users")
 async def admin_create_user(request: Request) -> JSONResponse:
     trace = trace_id_of(request)
     try:
         admin = require_admin(request)
         body = await request.json()
-        username = str((body or {}).get("username") or "").strip()
-        password = str((body or {}).get("password") or "")
+        body = body if isinstance(body, dict) else {}
+        username = str(body.get("username") or "").strip()
+        password = str(body.get("password") or "")
+        role = str(body.get("role") or "user")
         if not username or len(password) < 6:
             raise ImageError("IMG_INPUT_INVALID", "用户名不能为空，密码至少 6 位")
+        department = _validate_department(body.get("department"))
+        if role != "admin" and not department:
+            # P0-5：普通账号没有部门 = 无可见范围；建号时就必须指定，避免"少填一个字段就全权限"
+            raise ImageError(
+                "IMG_INPUT_INVALID",
+                "普通账号必须绑定部门（男装 / 女装）；只有管理员可以不绑定")
         with session_scope() as session:
             user_store.create_user(session, username=username, password=password,
-                                   role=str((body or {}).get("role") or "user"),
-                                   department=(body or {}).get("department") or None)
+                                   role=role, department=department)
     except ImageError as exc:
         return error_response(exc, trace)
     except Exception as exc:  # noqa: BLE001
         return error_response(exc, trace)
     return JSONResponse(status_code=201, content={"ok": True, "username": username,
+                                                  "role": role, "department": department,
                                                   "granted_by": admin.username,
                                                   "trace_id": trace})
 
@@ -344,15 +365,24 @@ async def admin_update_user(username: str, request: Request) -> JSONResponse:
         body = await request.json()
         body = body if isinstance(body, dict) else {}
         with session_scope() as session:
-            if user_store.get_user(session, username) is None:
+            row = user_store.get_user(session, username)
+            if row is None:
                 # 更新一个不存在的账号不该"返回 ok 其实什么也没做"
                 raise ImageError("IMG_USER_NOT_FOUND", f"账号不存在：{username}")
+            role = str(getattr(row, "role", "") or "user")
             if body.get("password"):
                 if len(str(body["password"])) < 6:
                     raise ImageError("IMG_INPUT_INVALID", "密码至少 6 位")
                 user_store.set_password(session, username, str(body["password"]))
             if "enabled" in body:
                 user_store.set_enabled(session, username, bool(body["enabled"]))
+            if "department" in body:
+                # P0-5：允许把历史"无部门"账号修回白名单部门；改完仍是空 + 非管理员 → 拒绝
+                department = _validate_department(body.get("department"))
+                if role != "admin" and not department:
+                    raise ImageError("IMG_INPUT_INVALID",
+                                     "普通账号必须绑定部门（男装 / 女装）")
+                user_store.set_department(session, username, department)
     except ImageError as exc:
         return error_response(exc, trace)
     return JSONResponse(status_code=200, content={"ok": True, "username": username,

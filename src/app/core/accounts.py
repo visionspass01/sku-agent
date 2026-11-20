@@ -190,6 +190,16 @@ def set_enabled(session, username: str, enabled: bool) -> bool:
     return True
 
 
+def set_department(session, username: str, department: str | None) -> bool:
+    """改部门（第五轮 P0-5）：用于把"建号时没填部门"的历史账号修回可见范围。"""
+    row = get_user(session, username)
+    if row is None:
+        return False
+    row.department = (department or None)
+    session.flush()
+    return True
+
+
 def list_users(session) -> list[dict]:
     from sqlalchemy import select
 
@@ -242,4 +252,5 @@ def migrate_image_user(session) -> int:
 
 __all__ = ["Account", "DEFAULT_USERS", "LEGACY_SALT", "hash_password", "verify_password",
            "legacy_hash", "source_mode", "ensure_seed", "get_user", "authenticate",
-           "create_user", "set_password", "set_enabled", "list_users", "migrate_image_user"]
+           "create_user", "set_password", "set_enabled", "set_department", "list_users",
+           "migrate_image_user"]

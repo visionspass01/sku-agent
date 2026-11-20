@@ -50,6 +50,10 @@ def set_enabled(session, username: str, enabled: bool) -> bool:
     return accounts.set_enabled(session, username, enabled)
 
 
+def set_department(session, username: str, department: str | None) -> bool:
+    return accounts.set_department(session, username, department)
+
+
 def list_users(session) -> list[dict]:
     return accounts.list_users(session)
 
@@ -62,5 +66,5 @@ def touch_login(session, username: str) -> None:
 
 
 __all__ = ["SEED_USERS", "ensure_seed_users", "migrate_legacy_users", "get_user",
-           "authenticate", "create_user", "set_password", "set_enabled", "list_users",
-           "touch_login"]
+           "authenticate", "create_user", "set_password", "set_enabled", "set_department",
+           "list_users", "touch_login"]

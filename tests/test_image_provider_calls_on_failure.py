@@ -135,7 +135,9 @@ def test_failed_task_records_provider_calls(env, monkeypatch):
     user = f"u-pcf-{uuid.uuid4().hex[:8]}"
     password = "pw-pcf-123"
     with session_scope() as session:
-        user_store.create_user(session, username=user, password=password, role="user")
+        # P0-5：普通账号必须绑定部门（P-3001 是女装）
+        user_store.create_user(session, username=user, password=password, role="user",
+                               department="女装")
         quota_store.grant(session, user, period_type="day", period_limit=10)
     headers = login(env, user, password)
     created = env.post("/api/image/tasks", headers=headers,

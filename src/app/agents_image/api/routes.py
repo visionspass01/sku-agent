@@ -24,6 +24,7 @@ from app.agents_image.api.admin_routes import router as admin_router
 from app.agents_image.api.auth_routes import router as auth_router
 from app.agents_image.api.batch_routes import router as batch_router
 from app.agents_image.api.common import (
+    DEPARTMENTS,
     asset_payload,
     error_response,
     is_terminal,
@@ -81,9 +82,25 @@ def image_health() -> dict:
         "max_batch_products": settings.max_batch_products,
         "secret_is_default": settings.secret_is_default,
         "context_batches": _context_batches(),
+        **_department_health(),
         **_degraded_state(),
         **metrics.snapshot(),
     }
+
+
+def _department_health() -> dict:
+    """P0-5：有多少普通账号没绑定部门（这些账号会被 403，运维要提前看到）。"""
+    try:
+        from app.agents_image.store import users as user_store
+
+        with session_scope() as session:
+            rows = user_store.list_users(session)
+    except Exception:  # noqa: BLE001 —— 账号表读失败不影响 health 其它字段
+        return {}
+    missing = [str(row.get("username") or "") for row in rows
+               if str(row.get("role") or "") != "admin" and not row.get("department")]
+    return {"users_without_department": len(missing),
+            "users_without_department_list": missing[:10]}
 
 
 def _degraded_state() -> dict:
@@ -131,18 +148,19 @@ async def list_products(request: Request) -> JSONResponse:
             raise ImageError("IMG_INPUT_INVALID", "limit 必须是整数") from exc
         catalog = get_catalog()
         rows = await catalog.list_products(keyword=keyword, limit=max(1, min(limit, 100)))
-        # 部门过滤（P2-2）+ 颜色候选（第三轮 P1-11）：一次批量取商品上下文，
-        # 顺便消掉过去"每个商品回一次中台"的 N+1
+        # 颜色候选（第三轮 P1-11）：一次批量取商品上下文，顺便消掉"每个商品回一次中台"的 N+1
         products = await batch_context.get_product_batcher(catalog).get_many(
             [row.product_id for row in rows])
+        # P0-5：普通账号必须先有部门（缺部门 403），再按部门过滤清单
         visible = []
+        department_of_user = "" if user.is_admin else _require_department(user)
         for row in rows:
             data = products.get(row.product_id)
             if data is None:
                 continue
             if not user.is_admin:
                 department = _department_of(data.category)
-                if department and user.department and department != user.department:
+                if department != department_of_user:
                     continue
             item = row.model_dump()
             item["colors"] = [{"color": entry.get("color", ""),
@@ -728,19 +746,39 @@ def _department_of(category: str | None) -> str | None:
     return mapping.get((category or "").strip())
 
 
+def _require_department(user) -> str:
+    """普通账号必须有部门（第五轮 P0-5）：缺部门 = 不能出图，而不是"全部门都能看"。
+
+    过去 `if user.department and ...` 只在**有部门且不匹配**时拦截，于是"建号时没填部门"
+    的账号反而能看到/出所有部门的商品——权限模型被"少填一个字段"绕过。
+    """
+    department = str(getattr(user, "department", "") or "").strip()
+    if user.is_admin:
+        return department
+    if not department:
+        raise ImageError(
+            "IMG_FORBIDDEN",
+            "账号未绑定部门，不能出图；请联系管理员在「账号管理」里设置部门（男装 / 女装）")
+    if department not in DEPARTMENTS:
+        raise ImageError("IMG_FORBIDDEN",
+                         f"账号部门「{department}」不在允许范围：{'、'.join(DEPARTMENTS)}")
+    return department
+
+
 def _ensure_department(product, user) -> None:
-    """部门隔离（P2-2）：普通账号只能出自己部门的商品；类目未维护 → 一律拒绝（W2）。"""
+    """部门隔离：普通账号只能出自己部门的商品；类目未维护 → 一律拒绝。"""
     if user.is_admin:
         return
+    department_of_user = _require_department(user)
     category = str(getattr(product, "category", "") or "").strip()
     department = _department_of(category)
     if not department:
         raise ImageError("IMG_FORBIDDEN",
                          f"商品类目「{category or '空'}」无法映射到部门，普通账号不能出图；"
                          "请在中台把该类目归到男装/女装（含童装）")
-    if user.department and department != user.department:
+    if department != department_of_user:
         raise ImageError("IMG_FORBIDDEN",
-                         f"无权操作 {department} 部门的商品（当前账号：{user.department}）")
+                         f"无权操作 {department} 部门的商品（当前账号：{department_of_user}）")
 
 
 def _base_snapshot(task) -> SimpleNamespace:

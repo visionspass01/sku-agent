@@ -6,6 +6,9 @@ from fastapi.responses import JSONResponse
 
 from app.core.errors import error_headers, failure_payload, normalize
 
+# 业务部门白名单（第五轮 P0-5）：普通账号必须落在其中一个部门，缺部门一律拒绝出图
+DEPARTMENTS = ("男装", "女装")
+
 # 终态集合（第四轮 P1-9）：只有终态才谈"部分成功"，排队/运行中一律 in_progress
 TERMINAL_STATUSES = frozenset({"done", "failed", "canceled"})
 
