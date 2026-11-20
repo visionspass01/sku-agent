@@ -112,7 +112,12 @@ class ProductContextBatcher:
                 if not pending:
                     return
                 await self._run_batch(pending, settings)
-                if window <= 0:
+                if window > 0:
+                    continue
+                # P2-7（第八轮）：window=0 时旧实现处理完这一批就 return，
+                # 批次执行期间新到的 waiter 永远没人唤醒 → 请求永久挂起。
+                # 现在只要还有 waiter 就继续处理；空了才退出（退出时 finally 复位 flushing）。
+                if not self._waiters:
                     return
         finally:
             self._flushing = False
