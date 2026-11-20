@@ -143,6 +143,34 @@ def _recall_for_slots(state: ImageTaskState, settings) -> dict[int, list[str]]:
         return {}
 
 
+async def _generate_or_attach_partial(settings, refs: list[dict], drafts,
+                                      *, attempted: int, spent: float,
+                                      provider_calls: int) -> dict:
+    """调生图 provider；失败时把**前几轮已发生**的张数/成本/发起量挂到异常上（第七轮 P1-2）。
+
+    `handler.run` 只知道自己这一次调用里已经生成了多少；重试轮次（第 2 轮失败）与前几轮
+    已经花掉的钱在 graph 手里，必须在这里合并，否则 dispatcher 结算只会记失败那一格的
+    发起量，使用量/成本口径被系统性低估（过去实测 attempted=0、¥0）。
+    """
+    try:
+        return await generator_handler.run({
+            "provider": settings.provider,
+            "refs": refs,
+            "slots": [{"slot": draft.slot, "prompt": draft.prompt,
+                       "negative_prompt": draft.negative_prompt, "n": 1} for draft in drafts],
+            "width": drafts[0].width,
+            "height": drafts[0].height,
+            "preserve": drafts[0].preserve,
+        })
+    except BaseException as exc:  # noqa: BLE001 —— 失败也要把已发生的事实带出去
+        stats = generator_handler.failure_stats_of(exc)
+        generator_handler.attach_failure_stats(
+            exc, provider_calls=provider_calls + stats["provider_calls"],
+            generated=attempted + stats["generated"],
+            cost_cny=spent + stats["cost_cny"])
+        raise
+
+
 def _collect_images(result: dict) -> list[critic_mod.CheckedImage]:
     images: list[critic_mod.CheckedImage] = []
     for slot in result.get("slots") or []:
@@ -302,15 +330,11 @@ async def execute_task(task_id: str) -> ImageTaskState:
         with session_scope() as session:
             task_store.update_task(session, task_id,
                                    provider_started_at=dt.datetime.now())
-        result = await generator_handler.run({
-            "provider": settings.provider,
-            "refs": refs,
-            "slots": [{"slot": draft.slot, "prompt": draft.prompt,
-                       "negative_prompt": draft.negative_prompt, "n": 1} for draft in current],
-            "width": current[0].width,
-            "height": current[0].height,
-            "preserve": current[0].preserve,
-        })
+        result = await _generate_or_attach_partial(settings, refs, current,
+                                                   attempted=attempted,
+                                                   spent=sum(float(item or 0.0)
+                                                             for item in image_costs),
+                                                   provider_calls=provider_calls)
         image_costs = [float(slot.get("cost_cny") or 0.0)
                        for slot in (result.get("slots") or [])]
         images = _collect_images(result)

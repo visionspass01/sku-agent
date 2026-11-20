@@ -67,19 +67,27 @@ class LocalGenerator:
             except Exception as exc:  # noqa: BLE001 —— 任务失败必须落库，不能只打日志
                 logger.warning("生图任务执行失败 %s：%s", task_id, exc)
                 from app.agents_image import settlement
+                from app.agents_image.generator import handler as generator_handler
                 from app.core.errors import normalize
 
                 err = normalize(exc)
-                # P1-6：失败路径也要记发起量（provider 真实打了几次，含限流重试），
-                # 否则"使用量/发起量"的 API 可用率会虚高
-                calls = int((getattr(err, "extra", {}) or {}).get("provider_calls") or 0)
+                # P1-6/P1-2：失败路径要记**真实发生的事**——发起量 + 已生成张数 + 成本。
+                # provider 跑到第 N 张失败时，前 N-1 张已经生成、已经计费；过去只带发起量，
+                # 结算就记成 attempted=0、成本 0（使用量/成本口径系统性低估）。
+                stats = generator_handler.failure_stats_of(err)
+                calls = stats["provider_calls"]
+                generated = stats["generated"]
+                spent = stats["cost_cny"]
                 with session_scope() as session:
                     task_store.mark_failed(session, task_id, code=err.code, detail=err.detail)
-                    if calls:
-                        task_store.update_task(session, task_id, provider_calls=calls)
+                    if calls or generated or spent:
+                        task_store.update_task(session, task_id, provider_calls=calls,
+                                               attempted_images=generated,
+                                               external_cost_cny=spent)
                     # 释放预留 + 记失败使用量（图已经生成过，钱已经花掉）；
                     # 若 graph 内部已经结算过（如全被门禁拦下），这里会被 settled_at 拦掉
-                    settlement.settle_cancel(session, task_id, provider_calls=calls)
+                    settlement.settle_cancel(session, task_id, attempted=generated,
+                                             provider_calls=calls, cost=spent)
             finally:
                 self._in_flight -= 1
                 self._tasks.pop(task_id, None)

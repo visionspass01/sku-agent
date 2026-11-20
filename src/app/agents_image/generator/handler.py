@@ -72,9 +72,57 @@ def _set_provider_calls(exc: BaseException, calls: int) -> None:
     发起量是 API 可用性的分母（使用量/发起量）。provider 抛错时过去只丢一句"失败"，
     重试次数全部蒸发，指标里的可用率就会虚高（显示 100% 实际打了 3 次）。
     """
+    attach_failure_stats(exc, provider_calls=calls)
+
+
+def _extra_dict(exc: BaseException) -> dict | None:
+    """取（或挂上）异常的 `extra` 字典；挂不上就返回 None（只读异常对象，尽力而为）。"""
     extra = getattr(exc, "extra", None)
     if isinstance(extra, dict):
-        extra["provider_calls"] = max(0, int(calls))
+        return extra
+    extra = {}
+    try:
+        exc.extra = extra  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 —— 有些异常对象带 __slots__
+        return None
+    return extra
+
+
+def attach_failure_stats(exc: BaseException, *, provider_calls: int = 0,
+                         generated: int = 0, cost_cny: float = 0.0) -> None:
+    """把失败时**已经真实发生**的发起量/生成张数/成本挂到异常上（第七轮 P1-2）。
+
+    只有 `provider_calls` 是不够的：provider 跑到第 N 张失败时，前 N-1 张已经生成、
+    已经计费。若只带发起量不带张数与成本，结算会记成「attempted=0、成本 0」，
+    使用量/成本口径就被系统性低估。这里**写绝对值**（不是累加），调用方自己先把
+    前几轮/本次的增量加好。
+    """
+    extra = _extra_dict(exc)
+    if extra is None:
+        return
+    extra["provider_calls"] = max(0, int(provider_calls or 0))
+    extra["generated"] = max(0, int(generated or 0))
+    extra["cost_cny"] = max(0.0, float(cost_cny or 0.0))
+
+
+def failure_stats_of(exc: BaseException) -> dict:
+    """读回 `attach_failure_stats` 挂上去的失败统计（缺省全 0）。"""
+    extra = getattr(exc, "extra", None)
+    if not isinstance(extra, dict):
+        return {"provider_calls": 0, "generated": 0, "cost_cny": 0.0}
+
+    def _int(key: str) -> int:
+        try:
+            return max(0, int(extra.get(key) or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    try:
+        cost = max(0.0, float(extra.get("cost_cny") or 0.0))
+    except (TypeError, ValueError):
+        cost = 0.0
+    return {"provider_calls": _int("provider_calls"), "generated": _int("generated"),
+            "cost_cny": cost}
 
 
 def _provider_calls_of(exc: BaseException) -> int:
@@ -165,9 +213,12 @@ async def run(payload: dict[str, Any]) -> dict[str, Any]:
                 "latency_ms": result.latency_ms,
                 "meta": result.meta,
             })
-    except BaseException as exc:  # noqa: BLE001 —— P1-6：失败也要把发起量带出去
-        # 已经成功跑完的图位 + 失败图位自己的发起次数 = 整轮真实发起量
-        _set_provider_calls(exc, provider_calls + _provider_calls_of(exc))
+    except BaseException as exc:  # noqa: BLE001 —— P1-6/P1-2：失败也要把已发生的事实带出去
+        # 已经成功跑完的图位（张数 + 成本 + 发起次数）+ 失败图位自己的发起次数
+        done_images = sum(len(item.get("images") or []) for item in results)
+        done_cost = sum(float(item.get("cost_cny") or 0.0) for item in results)
+        attach_failure_stats(exc, provider_calls=provider_calls + _provider_calls_of(exc),
+                             generated=done_images, cost_cny=done_cost)
         raise
     return {"slots": results, "provider": provider.name,
             "provider_calls": sum(int(item.get("provider_calls") or 0) for item in results),
