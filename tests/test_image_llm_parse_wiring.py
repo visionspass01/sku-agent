@@ -198,6 +198,20 @@ def test_vision_reads_reference_bytes_via_asset_key(env, monkeypatch):
     assert images[0]["image_url"]["url"].startswith("data:image/")
 
 
+def test_ref_bytes_runs_off_the_event_loop(env):
+    """P2-C：参考图字节读取必须是异步的（丢线程池），不能阻塞事件循环。"""
+    with session_scope() as session:
+        ref = asset_store.save_bytes(session, placeholder_png("thread-ref", 32, 32), kind="ref",
+                                     product_id="P-3001", username="admin")
+        ref_id = ref.asset_id
+    assert asyncio.iscoroutinefunction(llm_parse._ref_bytes), "必须异步，否则会卡住 loop"
+    got = asyncio.run(llm_parse._ref_bytes(RefImage(asset_id=ref_id)))
+    assert got is not None
+    data, mime = got
+    assert data.startswith(b"\x89PNG")
+    assert mime == "image/png"
+
+
 def test_vision_degrades_when_bytes_missing(env, monkeypatch):
     monkeypatch.setenv("IMAGE_VISION_ENABLED", "true")
     monkeypatch.setenv("IMAGE_ARK_API_KEY", "ark-test-key")

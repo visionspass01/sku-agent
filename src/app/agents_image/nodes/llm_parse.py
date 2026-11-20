@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 import re
@@ -210,11 +211,14 @@ async def parse_text(state, settings, *, base_attrs: dict | None = None
     return attrs, warnings
 
 
-def _ref_bytes(ref) -> tuple[bytes, str] | None:
+def _read_ref_bytes(ref) -> tuple[bytes, str] | None:
     """按 `asset_id → ImageAsset.key` 读参考图字节（第六轮 P1-2 的核心修复）。
 
     过去这里取 `ref.key`，而 `state.refs` 里是 `RefImage`（只有 asset_id/sha256/mime…），
     于是永远读不到字节、视觉解析 100% 走降级。现在走资产表拿 key 再读存储。
+
+    注意：这是**同步**函数（DB 查询 + 文件 IO），只能通过 `_ref_bytes()` 在线程池里跑，
+    不要在事件循环里直接调（P2-C：过去同步调用会把整个 loop 卡住几百毫秒）。
     """
     asset_id = str(getattr(ref, "asset_id", "") or "")
     if not asset_id:
@@ -238,6 +242,16 @@ def _ref_bytes(ref) -> tuple[bytes, str] | None:
         return None
 
 
+async def _ref_bytes(ref) -> tuple[bytes, str] | None:
+    """异步读参考图字节（第七轮 P2-C）：DB 查询 + 文件 IO 丢线程池，不阻塞事件循环。
+
+    多任务并发跑视觉解析时，同步读盘会让单个事件循环在数百毫秒内无法处理其它任务
+    （SSE 心跳、取消检查都被拖后）。`asyncio.to_thread` 把阻塞部分移出 loop，
+    返回语义与 `_read_ref_bytes()` 完全一致。
+    """
+    return await asyncio.to_thread(_read_ref_bytes, ref)
+
+
 async def parse_with_vision(state, settings, *, base_attrs: dict | None = None
                             ) -> tuple[dict | None, list[str]]:
     """视觉解析（Ark / OpenAI 兼容）：把参考图交给视觉模型，再走同一个 Schema 收口。"""
@@ -258,7 +272,7 @@ async def parse_with_vision(state, settings, *, base_attrs: dict | None = None
 
     content: list[dict] = [{"type": "text", "text": _user_prompt(state)}]
     for ref in refs[:2]:
-        got = _ref_bytes(ref)
+        got = await _ref_bytes(ref)
         if got is None:
             continue
         data, mime = got
