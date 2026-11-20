@@ -190,6 +190,16 @@ async def _generate_or_attach_partial(settings, refs: list[dict], drafts,
         raise
 
 
+async def _gate_image(image: critic_mod.CheckedImage, *, role: str, rules, gate_mode: str,
+                      autofix: bool, aspect: str, nonpng_policy: str):
+    """单图像素门禁（P1-4）：纯 Python 解码/统计单图可达数百毫秒到 1 秒，
+    必须丢线程池，不能占着事件循环——否则并发任务一多，SSE 心跳/取消/其它任务全被拖后。
+    """
+    return await asyncio.to_thread(
+        compliance.gate, image.data, slot=image.slot, role=role, platform_rules=rules,
+        gate_mode=gate_mode, autofix=autofix, aspect=aspect, nonpng_policy=nonpng_policy)
+
+
 def _collect_images(result: dict) -> list[critic_mod.CheckedImage]:
     images: list[critic_mod.CheckedImage] = []
     for slot in result.get("slots") or []:
@@ -427,11 +437,10 @@ async def execute_task(task_id: str) -> ImageTaskState:
     gated: list[tuple[int, str, object, str]] = []
     for image in images:
         role = _role_of(state, image.slot)
-        verdict = compliance.gate(
-            image.data, slot=image.slot, role=role, platform_rules=rules,
-            gate_mode=gate_mode, autofix=autofix_images, aspect=state.aspect,
-            nonpng_policy=nonpng_policy,
-        )
+        # P1-4：门禁在**线程池**里跑（纯 Python 像素统计单图 ~1s，不能阻塞事件循环）
+        verdict = await _gate_image(
+            image, role=role, rules=rules, gate_mode=gate_mode, autofix=autofix_images,
+            aspect=state.aspect, nonpng_policy=nonpng_policy)
         gated.append((image.slot, role, verdict, image.mime or "image/png"))
     with session_scope() as session:
         task = task_store.get_task(session, task_id)
