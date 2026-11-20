@@ -41,6 +41,20 @@ def _is_admin(session, username: str | None) -> bool:
         return False
 
 
+def _record_provider_metrics(provider_calls: int, cost: float) -> None:
+    """发起量/成本进 Prometheus 计数器（第六轮 P1-6：与使用量流水同源）。
+
+    放在结算里而不是 graph 里：结算被 `settled_at` CAS 兜住"只记一次"，
+    且**所有路径**（交付/失败/取消）都会经过这里，不会再出现"provider 失败漏计"。
+    """
+    try:
+        from app.agents_image import metrics as image_metrics
+
+        image_metrics.record_provider_calls(provider_calls, cost_cny=cost)
+    except Exception:  # noqa: BLE001 —— 度量失败不影响结算
+        logger.debug("发起量/成本指标写入失败（不影响结算）")
+
+
 def _write_warnings(session, task_id: str, warnings: list[str] | None) -> None:
     """把本轮告警写回任务（**合并**而不是覆盖，见 `task_store.merge_warnings`）。
 
@@ -80,6 +94,9 @@ def settle_done(session, task_id: str, *, delivered: int, attempted: int, cost: 
     usage_store.record(session, username=username, department=task.department,
                        delivered=attempted, attempted=attempted, tasks=1, cost=cost,
                        provider_calls=provider_calls, agent_passed=delivered)
+    # P1-6（第六轮）：发起量/真实成本与使用量流水**同源一处记账**，
+    # 否则 provider 失败（没进 graph 结算）这条路径的 /metrics 会漏计。
+    _record_provider_metrics(provider_calls, cost)
     _write_warnings(session, task_id, warnings)
     return {"settled": True, "charged": charged}
 
@@ -109,6 +126,7 @@ def settle_cancel(session, task_id: str, *, attempted: int = 0, provider_calls: 
     usage_store.record(session, username=task.username, department=task.department,
                        failed=1, tasks=1, attempted=attempted, delivered=attempted,
                        provider_calls=provider_calls, cost=cost)
+    _record_provider_metrics(provider_calls, cost)
     if mark_canceled:
         task_store.update_task(session, task_id, status="canceled",
                                finished_at=dt.datetime.now(),

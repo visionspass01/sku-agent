@@ -522,8 +522,7 @@ async def execute_task(task_id: str) -> ImageTaskState:
         _settle(session, state, delivered=delivered, attempted=attempted, cost=cost,
                 provider_calls=provider_calls)
     metrics.record_task_done(delivered=delivered, attempted=attempted)
-    # P1-7：发起量与真实成本进 Prometheus 计数器
-    metrics.record_provider_calls(provider_calls, cost_cny=external_cost)
+    # 发起量/成本由结算统一记（settlement._record_provider_metrics），这里不再重复计数
     state.attempted_images = attempted
     state.delivered_images = delivered
     state.cost_cny = cost
@@ -600,8 +599,7 @@ def _cancel_settle(session, state: ImageTaskState, *, attempted: int,
     settlement.settle_cancel(session, state.task_id, attempted=attempted,
                              provider_calls=provider_calls, cost=cost,
                              warnings=state.warnings)
-    # P1-7：取消/失败也计入发起量与成本（Prometheus 计数器与健康面板同源）
-    metrics.record_provider_calls(provider_calls, cost_cny=cost)
+    # 发起量/成本由结算统一记（settlement._record_provider_metrics），这里不再重复计数
 
 
 async def _plan_policy(state: ImageTaskState):
