@@ -79,10 +79,14 @@ def test_index_status_reports_corpus():
     assert status["fingerprint"]
 
 
-def test_recall_fragments_groups_by_query():
-    fragments = rag_index.recall_fragments(["主图 白底", "尺码对照 排版"], top_k=2)
-    assert set(fragments) == {"主图 白底", "尺码对照 排版"}
-    assert all(isinstance(items, list) for items in fragments.values())
+def test_multi_query_recall_groups_by_query():
+    """第五轮 P1-11 删掉了死代码 `recall_fragments`；按查询分组由调用方（graph）自己做，
+    这里验证「不同查询得到各自的片段组」这条契约仍然成立。"""
+    groups = {query: [hit.snippet for hit in rag_index.retrieve(query, top_k=2)]
+              for query in ("主图 白底", "尺码对照 排版")}
+    assert set(groups) == {"主图 白底", "尺码对照 排版"}
+    assert all(isinstance(items, list) for items in groups.values())
+    assert groups["主图 白底"], "主图查询应召回到写法片段"
 
 
 def test_compose_injects_per_slot_fragments():

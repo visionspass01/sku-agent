@@ -73,7 +73,11 @@ class ImageSettings(BaseSettings):
 
     # ---- 本地知识库（RAG：写法片段 / 修复经验，不提供参数与规则真相）----
     rag_enabled: bool = True
-    rag_top_k: int = Field(default=2, ge=1, le=6)
+    # 第五轮 P1-1：默认 top_k 提到 3（1..8）；min_score 阈值默认 0（标定后再开，避免误杀召回）；
+    # rerank 用启发式（标题命中 + 词覆盖），不引入 cross-encoder 依赖
+    rag_top_k: int = Field(default=3, ge=1, le=8)
+    rag_min_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    rag_rerank_backend: str = "heuristic"   # heuristic | none
     rag_kb_dir: str = ""              # 空 = data/kb_image
     # 修复经验（失败转成功才归档，P0-4）保留天数；过期由清理任务删除（人工样本不受影响）
     memory_keep_days: int = Field(default=90, ge=1, le=3650)

@@ -32,6 +32,17 @@ from app.db.engine import session_scope
 
 logger = logging.getLogger("sku-agent.image.graph")
 
+# Critic issue 类型 → 检索修复经验时补充的关键词（让 KB fixes 命中的是同一类问题）
+_REPAIR_QUERY_HINTS: dict[str, str] = {
+    "identity": "颜色 版型 logo 身份锁定",
+    "aspect": "比例 画幅 裁切",
+    "banned_words": "禁用词 促销文字",
+    "text_policy": "图内文字 角标",
+    "mime": "输出格式 图片类型",
+    "empty": "空输出 完整商品图",
+    "prompt": "五槽位 提示词完整",
+}
+
 
 def _renew_lease(task_id: str, settings) -> None:
     """执行期续约（W1）：每个阶段续一次，保证在途任务不会被看门狗重投。"""
@@ -75,14 +86,18 @@ async def _platform_rules(state: ImageTaskState):
 
 
 def _recall_for_slots(state: ImageTaskState, settings) -> dict[int, list[str]]:
-    """按图位召回「写法片段」（RAG）：检索失败只记 warning，不影响出图。"""
+    """按图位召回「写法片段」（RAG）：检索失败只记 warning，不影响出图。
+
+    第五轮 P1-1：查询改写 + kind 过滤（只用 slot/fragment/platform，`fix` 语料留给
+    Critic 失败时的 `_repair_experience`）+ 启发式重排 + 阈值（默认 0）。
+    """
     if not getattr(settings, "rag_enabled", True):
         return {}
     try:
         from app.agents_image.rag import index as rag_index
 
         product = str((state.attrs or {}).get("product_type") or "")
-        top_k = int(getattr(settings, "rag_top_k", 2) or 2)
+        top_k = int(getattr(settings, "rag_top_k", 3) or 3)
         fragments: dict[int, list[str]] = {}
         for item in state.slots or []:
             slot_no = int(getattr(item, "slot", 0) or 0)
@@ -91,7 +106,8 @@ def _recall_for_slots(state: ImageTaskState, settings) -> dict[int, list[str]]:
                 getattr(item, "composition_label", ""),
                 getattr(item, "scene_style_label", ""),
             ) if part)
-            hits = rag_index.retrieve(query, top_k=top_k)
+            hits = rag_index.retrieve(query, top_k=top_k,
+                                      kinds=("slot", "fragment", "platform"))
             fragments[slot_no] = [hit.snippet for hit in hits]
         state.touch("retrieve", slots=len(fragments),
                     hits=sum(len(items) for items in fragments.values()))
@@ -135,9 +151,11 @@ def _repair_experience(state: ImageTaskState, signature: str) -> dict:
     try:
         from app.agents_image.rag import index as rag_index
 
+        # 修复查询带上 issue 类型的关键词，避免"碰巧命中"不相关的修复经验（P1-1 的同一思路）
+        hints = _REPAIR_QUERY_HINTS
         query = " ".join(part for part in (
             str((state.attrs or {}).get("product_type") or ""),
-            " ".join(kinds), "修复") if part)
+            " ".join(hints.get(kind, "") for kind in kinds), " ".join(kinds), "修复") if part)
         hits = rag_index.retrieve(query, top_k=1, kind="fix")
         if hits:
             snippet = str(hits[0].snippet or "").strip()
