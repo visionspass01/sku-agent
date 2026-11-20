@@ -68,6 +68,7 @@ class RefPlan:
     refs: dict[str, list[PlannedRef]] = field(default_factory=dict)
     products: dict[str, ProductData] = field(default_factory=dict)
     truncated: int = 0
+    warnings: list[str] = field(default_factory=list)
 
     def refs_of(self, color_key: str) -> list[PlannedRef]:
         return list(self.refs.get(color_key) or [])
@@ -84,6 +85,7 @@ class RefResolution:
     refs: dict[str, list[RefImage]] = field(default_factory=dict)
     products: dict[str, ProductData] = field(default_factory=dict)
     truncated: int = 0
+    warnings: list[str] = field(default_factory=list)
 
     @property
     def total(self) -> int:
@@ -124,6 +126,27 @@ def _pick_images(images: list[ProductImage], color: str) -> list[ProductImage]:
     same = [image for image in images if (image.color or "") == (color or "")]
     chosen = same or [image for image in images if not image.color] or list(images)
     return sorted(chosen, key=lambda item: (not item.is_main, item.image_id))
+
+
+def _color_mismatch_warning(product_id: str, target: RefTarget,
+                            images: list[ProductImage],
+                            chosen: list[ProductImage]) -> str:
+    """目标颜色没有对应参考图时的告警文本（P1-2）。
+
+    为什么必须报出来：`_resolve_targets` 的颜色来自 **SKU**，参考图颜色来自**图片标签**；
+    两者不同步时 `_pick_images` 会退回"未标色的图/其它颜色的图"，而 Prompt 里的
+    `color_hex` 仍按目标颜色锁定 —— 等于让模型"照着黑色参考图画米色"，颜色必漂。
+    过去这条兜底完全静默，运营只会看到"图不对"却不知道原因。
+    """
+    untagged = [image for image in chosen if not (image.color or "").strip()]
+    if untagged:
+        used = "未标色的图"
+    else:
+        others = sorted({(image.color or "").strip() for image in chosen
+                         if (image.color or "").strip()})
+        used = f"其它颜色的图（{'、'.join(others[:5])}）"
+    return (f"IMG_REF_COLOR_MISMATCH: 商品 {product_id} 的目标颜色「{target.color}」"
+            f"没有对应参考图，已退回 {used}；颜色锁定可能失效（考虑在中台补齐该颜色图）")
 
 
 def _load_products(targets: list[RefTarget], products: dict[str, ProductData] | None) -> dict:
@@ -175,6 +198,11 @@ async def plan_refs(
     for target in targets:
         data = unique_products[target.product_id]
         ordered = _pick_images(data.images, target.color)
+        if target.color and not any((image.color or "").strip() == target.color.strip()
+                                    for image in data.images):
+            # P1-2：颜色锁不住要可见，不能静默串色
+            plan.warnings.append(_color_mismatch_warning(
+                target.product_id, target, data.images, ordered))
         picked = 0
         for image in ordered:
             if picked >= per_item or used >= max_refs:
@@ -358,7 +386,8 @@ def persist_refs(session, plan: RefPlan, *, username: str,
     素材库来源（`asset_id` 已存在）直接引用那一行，不复制——素材库是账号池，
     复制会让"删素材图"和"任务引用"两套记录打架。
     """
-    resolution = RefResolution(products=dict(plan.products or {}), truncated=plan.truncated)
+    resolution = RefResolution(products=dict(plan.products or {}), truncated=plan.truncated,
+                               warnings=list(plan.warnings or []))
     for color_key, items in (plan.refs or {}).items():
         out: list[RefImage] = []
         for planned in items:

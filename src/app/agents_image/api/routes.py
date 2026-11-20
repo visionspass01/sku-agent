@@ -593,6 +593,9 @@ async def create_tasks(request: Request) -> JSONResponse:
                 task_warnings = _reuse_miss_warnings(
                     base_task_id_hint, base_task, target, platform,
                     str(state.variant_id or ""), reuse_map) + list(prompt_warnings)
+                # P1-2（第八轮）：目标颜色没有对应参考图时，参考图解析会退回别颜色的图，
+                # 这条告警必须落到任务上（否则运营只看到"颜色不对"却不知道原因）
+                task_warnings.extend(resolution.warnings)
                 task = task_store.create_task(
                     session, task_id=new_task_id(), username=user.username,
                     department=user.department, batch_id=batch_id,
