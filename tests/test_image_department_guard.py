@@ -142,6 +142,23 @@ def test_health_exposes_users_without_department(env):
     assert "users_without_department_list" not in body, "健康检查不得泄露账号名单"
 
 
+def test_health_department_count_is_cached(env, monkeypatch):
+    """P2-3（第九轮）：/health 被高频探测，计数结果缓存 60s（不能每次都查账号表）。"""
+    from app.agents_image.store import users as user_store
+
+    calls = {"n": 0}
+    real = user_store.list_users
+
+    def spy(*args, **kwargs):
+        calls["n"] += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(user_store, "list_users", spy)
+    env.get("/api/image/health")
+    env.get("/api/image/health")
+    assert calls["n"] == 1, f"60s 内应只查一次账号表（实际 {calls['n']} 次）"
+
+
 def test_admin_users_endpoint_lists_dirty_accounts(env):
     """具体是哪些账号走管理员接口（需要 admin 鉴权）。"""
     username, _password = _make_user(None)

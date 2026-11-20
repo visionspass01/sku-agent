@@ -100,13 +100,28 @@ def image_health() -> dict:
     }
 
 
+_DEPT_HEALTH_CACHE: dict[str, float] = {}
+_DEPT_HEALTH_TTL = 60.0
+
+
+def reset_department_health_cache() -> None:
+    _DEPT_HEALTH_CACHE.clear()
+
+
 def _department_health() -> dict:
     """P0-5：有多少普通账号没绑定部门（这些账号会被 403，运维要提前看到）。
 
     第六轮 P1-1：**只给计数，不给账号名单**。`/health` 是匿名可读的，
     上一版把前 10 个账号名挂在这里等于公开账号枚举面；
     具体是哪些账号请走管理员接口 `GET /admin/users`。
+
+    P2-3（第九轮）：结果缓存 60s。`/health` 被 k8s/负载均衡高频探测，
+    每次探测都查账号表会给 DB 制造无意义的压力。
     """
+    now = time.monotonic()
+    cached = _DEPT_HEALTH_CACHE.get("value_at")
+    if cached is not None and now - cached < _DEPT_HEALTH_TTL:
+        return dict(_DEPT_HEALTH_CACHE.get("value") or {})
     try:
         from app.agents_image.store import users as user_store
 
@@ -116,7 +131,10 @@ def _department_health() -> dict:
         return {}
     missing = [row for row in rows
                if str(row.get("role") or "") != "admin" and not row.get("department")]
-    return {"users_without_department": len(missing)}
+    payload = {"users_without_department": len(missing)}
+    _DEPT_HEALTH_CACHE["value"] = payload
+    _DEPT_HEALTH_CACHE["value_at"] = now
+    return dict(payload)
 
 
 @router.get("/metrics", include_in_schema=False)

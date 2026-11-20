@@ -227,6 +227,7 @@ def _reset_process_singletons() -> None:
     不重置会跨用例传染：一个用例打出的熔断会让后续用例全部快失败；
     一个用例用临时库构建的检索器会让后续用例检索到别的知识库。
     """
+    from app.agents_image.api.routes import reset_department_health_cache
     from app.agents_image.sources.batch_context import reset_product_batcher
     from app.mcp_client import client as mcp_client
     from app.rag.hybrid import invalidate_retriever
@@ -234,6 +235,8 @@ def _reset_process_singletons() -> None:
     mcp_client._hub = None
     invalidate_retriever()
     reset_product_batcher()
+    # P2-3：/health 的"无部门账号计数"有 60s 缓存，测试间必须清掉（否则读到旧的 0）
+    reset_department_health_cache()
 
 
 @pytest.fixture(autouse=True)
