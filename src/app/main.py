@@ -277,22 +277,37 @@ _SECURITY_HEADERS = {
 async def add_no_cache_headers(request: Request, call_next):
     """静态资源不缓存 + 安全响应头 + 记录 /api/* 请求耗时（看板 P50/P95 采样）。"""
     import time
+    import uuid as _uuid
 
     started = time.perf_counter()
-    response = await call_next(request)
-    elapsed_ms = (time.perf_counter() - started) * 1000
     path = request.url.path
+    trace_token = None
+    request_trace = ""
+    if IMAGE_ENABLED and path.startswith("/api/image"):
+        # P1-1（第十轮）：生图侧必须真正建立 trace 上下文——
+        # 否则日志恒为 [trace=-]、MCP/中台的 X-Trace-Id 为空、响应头与响应体还不一致。
+        from app.observability import trace as trace_mod
+
+        request_trace = (request.headers.get("X-Trace-Id")
+                         or getattr(request.state, "image_trace_id", "")
+                         or _uuid.uuid4().hex[:12])
+        request.state.image_trace_id = request_trace
+        trace_token = trace_mod.bind_trace(request_trace, agent_id="image")
+    try:
+        response = await call_next(request)
+    finally:
+        if trace_token is not None:
+            from app.observability import trace as trace_mod
+
+            trace_mod.unbind_trace(trace_token)
+    elapsed_ms = (time.perf_counter() - started) * 1000
     if path == "/" or path.endswith(_NO_CACHE_SUFFIXES):
         response.headers["Cache-Control"] = "no-cache, must-revalidate"
     for name, value in _SECURITY_HEADERS.items():
         response.headers.setdefault(name, value)
-    if IMAGE_ENABLED and path.startswith("/api/image"):
-        # 成功响应也回传 trace：用户报障时直接给 id 就能串起日志与任务（错误响应由 core.errors 写）
-        if "X-Trace-Id" not in response.headers:
-            import uuid
-
-            response.headers["X-Trace-Id"] = (request.headers.get("X-Trace-Id")
-                                              or uuid.uuid4().hex[:12])
+    # 成功响应也回传 trace：用户报障时直接给 id 就能串起日志与任务（错误响应由 core.errors 写）
+    if request_trace and "X-Trace-Id" not in response.headers:
+        response.headers["X-Trace-Id"] = request_trace
     if path.startswith("/api/") and path not in _LATENCY_SKIP:
         latency.record("api", elapsed_ms)
     return response

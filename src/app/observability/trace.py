@@ -61,6 +61,23 @@ def trace_context(trace_id: str, *, agent_id: str = "", session_id: str = ""):
         _TRACE.reset(token)
 
 
+def bind_trace(trace_id: str, *, agent_id: str = "") -> contextvars.Token:
+    """同步设置 trace 上下文（中间件里用；配套 `unbind_trace` 还原）。
+
+    P1-1（第十轮）：HTTP 入口必须**真正建立** trace 上下文，否则日志格式化器只能打 `-`，
+    中台/MCP 的 `X-Trace-Id` 也会是空串（它们读的是 `current_trace_id()`）。
+    """
+    return _TRACE.set({"trace_id": str(trace_id or ""), "agent_id": agent_id,
+                       "session_id": ""})
+
+
+def unbind_trace(token: contextvars.Token) -> None:
+    try:
+        _TRACE.reset(token)
+    except ValueError:  # pragma: no cover —— 跨上下文还原
+        pass
+
+
 async def run_in_trace(func, /, *args, **kwargs):
     """在线程池里跑同步函数，并保证 trace 上下文不丢（`asyncio.to_thread` 不继承 contextvar）。"""
     import asyncio

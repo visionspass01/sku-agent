@@ -56,44 +56,58 @@ class LocalGenerator:
                 task = task_store.get_task(session, task_id)
                 if task is None or task.status in {"canceled", "done", "failed"}:
                     return
+                task_trace = str(getattr(task, "trace_id", "") or "")
                 task_store.mark_running(session, task_id)
                 # 拿到并发槽位后再续一次租约：排队时间再长也不会被别的实例/看门狗抢走
                 task_store.renew_lease(
                     session, task_id,
                     seconds=int(getattr(self.settings, "task_lease_seconds", 300) or 300))
             self._in_flight += 1
-            try:
-                await execute_task(task_id)
-            except Exception as exc:  # noqa: BLE001 —— 任务失败必须落库，不能只打日志
-                logger.warning("生图任务执行失败 %s：%s", task_id, exc)
-                from app.agents_image import settlement
-                from app.agents_image.generator import handler as generator_handler
-                from app.core.errors import normalize
+            # P1-1（第十轮）：后台执行体必须绑定任务的 trace——
+            # 否则执行期的日志（graph/settlement/provider）全部是 [trace=-]，
+            # 与创建请求的 trace 串不起来（task_id 只能串同一条任务，串不了请求）。
+            from app.observability import trace as trace_mod
 
-                err = normalize(exc)
-                # P1-6/P1-2：失败路径要记**真实发生的事**——发起量 + 已生成张数 + 成本。
-                # provider 跑到第 N 张失败时，前 N-1 张已经生成、已经计费；过去只带发起量，
-                # 结算就记成 attempted=0、成本 0（使用量/成本口径系统性低估）。
-                stats = generator_handler.failure_stats_of(err)
-                calls = stats["provider_calls"]
-                generated = stats["generated"]
-                spent = stats["cost_cny"]
-                llm_spent = stats["llm_cost_cny"]
-                with session_scope() as session:
-                    task_store.mark_failed(session, task_id, code=err.code, detail=err.detail)
-                    if calls or generated or spent or llm_spent:
-                        task_store.update_task(session, task_id, provider_calls=calls,
-                                               attempted_images=generated,
-                                               external_cost_cny=spent,
-                                               llm_cost_cny=llm_spent)
-                    # 释放预留 + 记失败使用量（图已经生成过，钱已经花掉）；
-                    # 若 graph 内部已经结算过（如全被门禁拦下），这里会被 settled_at 拦掉
-                    settlement.settle_cancel(session, task_id, attempted=generated,
-                                             provider_calls=calls, cost=spent,
-                                             llm_cost=llm_spent)
+            try:
+                if task_trace:
+                    with trace_mod.trace_context(task_trace, agent_id="image"):
+                        await self._execute(task_id, execute_task)
+                else:
+                    await self._execute(task_id, execute_task)
             finally:
                 self._in_flight -= 1
                 self._tasks.pop(task_id, None)
+
+    async def _execute(self, task_id: str, execute_task) -> None:  # noqa: ANN001 —— 可注入以便测试
+        try:
+            await execute_task(task_id)
+        except Exception as exc:  # noqa: BLE001 —— 任务失败必须落库，不能只打日志
+            logger.warning("生图任务执行失败 %s：%s", task_id, exc)
+            from app.agents_image import settlement
+            from app.agents_image.generator import handler as generator_handler
+            from app.core.errors import normalize
+
+            err = normalize(exc)
+            # P1-6/P1-2：失败路径要记**真实发生的事**——发起量 + 已生成张数 + 成本。
+            # provider 跑到第 N 张失败时，前 N-1 张已经生成、已经计费；过去只带发起量，
+            # 结算就记成 attempted=0、成本 0（使用量/成本口径系统性低估）。
+            stats = generator_handler.failure_stats_of(err)
+            calls = stats["provider_calls"]
+            generated = stats["generated"]
+            spent = stats["cost_cny"]
+            llm_spent = stats["llm_cost_cny"]
+            with session_scope() as session:
+                task_store.mark_failed(session, task_id, code=err.code, detail=err.detail)
+                if calls or generated or spent or llm_spent:
+                    task_store.update_task(session, task_id, provider_calls=calls,
+                                           attempted_images=generated,
+                                           external_cost_cny=spent,
+                                           llm_cost_cny=llm_spent)
+                # 释放预留 + 记失败使用量（图已经生成过，钱已经花掉）；
+                # 若 graph 内部已经结算过（如全被门禁拦下），这里会被 settled_at 拦掉
+                settlement.settle_cancel(session, task_id, attempted=generated,
+                                         provider_calls=calls, cost=spent,
+                                         llm_cost=llm_spent)
 
     async def cancel(self, task_id: str) -> bool:
         """取消任务：未调模型 → 释放预留额度并记一次失败；已结束的任务取消返回 False。"""

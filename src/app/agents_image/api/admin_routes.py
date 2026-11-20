@@ -8,7 +8,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 
@@ -222,7 +221,9 @@ async def admin_metrics(request: Request) -> JSONResponse:
             # P2-2（第九轮）：多表 count + 使用量窗口扫描是**同步** DB 聚合，
             # 放在 async 端点里会阻塞事件循环（面板轮询越频繁越明显）。
             # 丢线程池跑，loop 继续处理其它请求。
-            rows, cards = await asyncio.to_thread(
+            from app.observability.trace import run_in_trace
+
+            rows, cards = await run_in_trace(
                 _compute_metrics, granularity=granularity, count=count,
                 username=username, department=department, runtime=runtime)
             _metrics_cache_put(cache_key, {"buckets": rows, "cards": cards})

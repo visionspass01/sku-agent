@@ -64,10 +64,20 @@ def require_admin(request: Request) -> AuthUser:
 
 
 def trace_id_of(request: Request) -> str:
-    """优先用调用方带来的 X-Trace-Id，便于跨服务串联；没有就新生成一个短 id。"""
+    """本次请求的 trace：**优先用中间件已建立的**（响应头/响应体/日志三处必须一致）。
+
+    P1-1（第十轮）：上一版这里各自生成 uuid，中间件又生成一个 → 未带 `X-Trace-Id` 时
+    响应头与响应体是两个不同的值，而日志里根本没有（格式化器读 contextvar，没人 set）。
+    现在统一以 `request.state.image_trace_id` 为准（中间件负责设置并绑定上下文）。
+    """
     import uuid
 
-    return request.headers.get("X-Trace-Id") or uuid.uuid4().hex[:12]
+    cached = str(getattr(request.state, "image_trace_id", "") or "")
+    if cached:
+        return cached
+    trace = request.headers.get("X-Trace-Id") or uuid.uuid4().hex[:12]
+    request.state.image_trace_id = trace
+    return trace
 
 
 def client_ip(request: Request) -> str:

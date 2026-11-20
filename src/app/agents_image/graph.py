@@ -12,7 +12,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import datetime as dt
 import logging
 
@@ -113,7 +112,10 @@ def _load_refs_sync(ref_ids: list[str]) -> list[dict]:
 
 
 async def _load_refs_async(ref_ids: list[str]) -> list[dict]:
-    return await asyncio.to_thread(_load_refs_sync, list(ref_ids))
+    from app.observability.trace import run_in_trace
+
+    # P1-1（第十轮）：线程池不继承 contextvar，必须用 run_in_trace 带上 trace
+    return await run_in_trace(_load_refs_sync, list(ref_ids))
 
 
 async def _platform_rules(state: ImageTaskState):
@@ -134,7 +136,9 @@ async def _recall_for_slots_async(state: ImageTaskState, settings) -> dict[int, 
     真实 Redis 下每次召回都是两次阻塞往返（网络抖动时会把事件循环一起卡住）。
     与参考图读取/像素门禁同一套做法：`asyncio.to_thread`。
     """
-    return await asyncio.to_thread(_recall_for_slots, state, settings)
+    from app.observability.trace import run_in_trace
+
+    return await run_in_trace(_recall_for_slots, state, settings)
 
 
 def _recall_for_slots(state: ImageTaskState, settings) -> dict[int, list[str]]:
@@ -205,7 +209,9 @@ async def _gate_image(image: critic_mod.CheckedImage, *, role: str, rules, gate_
     """单图像素门禁（P1-4）：纯 Python 解码/统计单图可达数百毫秒到 1 秒，
     必须丢线程池，不能占着事件循环——否则并发任务一多，SSE 心跳/取消/其它任务全被拖后。
     """
-    return await asyncio.to_thread(
+    from app.observability.trace import run_in_trace
+
+    return await run_in_trace(
         compliance.gate, image.data, slot=image.slot, role=role, platform_rules=rules,
         gate_mode=gate_mode, autofix=autofix, aspect=aspect, nonpng_policy=nonpng_policy)
 
@@ -427,7 +433,9 @@ async def execute_task(task_id: str) -> ImageTaskState:
         # P0-4/P1-3：**只在 Critic 不通过、还要再试一轮时**检索修复经验
         # （同签名+同部门的历史修法 → KB fixes 语料 → 内置规则，见 reflexion.reflect）
         # P1-5（第九轮）：检索同样走线程池（同步 redis + BM25 不能占事件循环）
-        repair = await asyncio.to_thread(_repair_experience, state, last_signature)
+        from app.observability.trace import run_in_trace
+
+        repair = await run_in_trace(_repair_experience, state, last_signature)
         state.touch("reflexion", attempt=attempt, issues=len(critic.issues),
                     repair_source=repair.get("source", ""))
         reflection = reflexion.reflect(state, critic, current, rules=rules,

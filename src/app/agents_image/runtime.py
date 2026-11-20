@@ -134,11 +134,13 @@ async def _cleanup_loop(interval_seconds: int) -> None:
             result = sweep_local_files()
             expired_tokens = sweep_tokens()
             # P2-7：已回写（sent）的 outbox 行按保留期清理，否则表只涨不降
-            pruned = await asyncio.to_thread(_prune_outbox)
+            from app.observability.trace import run_in_trace
+
+            pruned = await run_in_trace(_prune_outbox)
             # P1-4：修复经验按 TTL 清理（人工采纳/驳回样本不动）
-            pruned_memory = await asyncio.to_thread(_prune_memory)
+            pruned_memory = await run_in_trace(_prune_memory)
             # P2-4（第九轮）：幂等表 image_request（含完整响应体）按保留期清理
-            pruned_requests = await asyncio.to_thread(_prune_requests)
+            pruned_requests = await run_in_trace(_prune_requests)
             if (result.get("removed") or expired_tokens or pruned or pruned_memory
                     or pruned_requests):
                 logger.info("本地清理：文件 %s 个，令牌 %s 条，outbox %s 条，"
