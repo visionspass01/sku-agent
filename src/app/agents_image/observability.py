@@ -109,6 +109,22 @@ def _render_builtin() -> str:
              [("", round(float(counters.get("cost_cny", 0.0) or 0.0), 6))])
     _gauge(lines, f"{_METRIC_PREFIX}_in_flight", "本实例正在生成的图片数",
            counters.get("in_flight_images", 0))
+    # P2-4（第十一轮）：把同步 IO 卸载到线程池之后，池子打满只会表现为"变慢"，
+    # 指标上看不出来。这里导出线程池的调用数/在飞/占用时长，便于定位排队。
+    from app.observability.trace import threadpool_stats
+
+    pool = threadpool_stats()
+    _counter(lines, f"{_METRIC_PREFIX}_threadpool_calls_total",
+             "同步 DB/IO 卸载到线程池的调用次数",
+             [("", pool.get("calls", 0))])
+    _counter(lines, f"{_METRIC_PREFIX}_threadpool_busy_seconds_total",
+             "线程池累计占用时长（含排队等待，秒）",
+             [("", round(float(pool.get("busy_seconds", 0.0) or 0.0), 6))])
+    _gauge(lines, f"{_METRIC_PREFIX}_threadpool_in_flight",
+           "线程池中正在执行/排队等待的任务数", pool.get("in_flight", 0))
+    _gauge(lines, f"{_METRIC_PREFIX}_threadpool_busy_seconds_max",
+           "单次线程池任务最长占用时长（秒）",
+           round(float(pool.get("busy_max_seconds", 0.0) or 0.0), 6))
     _histogram(lines, f"{_METRIC_PREFIX}_stage_seconds", "链路阶段耗时（秒）",
                image_metrics.stage_snapshot(), image_metrics.stage_bounds_ms())
     return "\n".join(lines) + "\n"

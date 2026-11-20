@@ -24,6 +24,7 @@ const state = {
   library: [],
   librarySelected: new Set(),
   streams: new Map(),
+  pendingRequest: null,            // P2-2：{fingerprint, request_id}，失败重试复用同一个幂等键
 };
 
 /* ---------------------------------------------------------------- 基础工具 */
@@ -80,6 +81,20 @@ function newTraceId() {
     return crypto.randomUUID().replace(/-/g, "").slice(0, 12);
   }
   return Math.random().toString(16).slice(2, 14);
+}
+
+/* P2-2（第十一轮）：建任务必须带 `request_id` —— 它就是服务端幂等键。
+ * 上一版前端从不发 request_id（也没发 Idempotency-Key 头），双击/断网重发会真的建出两批任务、
+ * 扣两次额度。这里按"请求体指纹"复用同一个键：同样的参数在没成功之前重试 = 同一个请求；
+ * 成功后再点一次是新的意图 → 换新键。 */
+function requestIdFor(payload) {
+  const fingerprint = JSON.stringify(payload);
+  if (state.pendingRequest && state.pendingRequest.fingerprint === fingerprint) {
+    return state.pendingRequest.request_id;
+  }
+  const requestId = newTraceId();
+  state.pendingRequest = { fingerprint, request_id: requestId };
+  return requestId;
 }
 
 async function api(path, options) {
@@ -542,8 +557,10 @@ async function createTasks() {
   const button = $("btn-create");
   button.disabled = true;
   setText("create-hint", "提交中…");
+  payload.request_id = requestIdFor(payload);   // P2-2：幂等键（同一请求体重试复用）
   try {
     const body = await api("/api/image/tasks", { json: payload });
+    state.pendingRequest = null;                 // 成功即收口：下次点击是新请求（新键）
     state.batchId = body.batch_id || "";
     if (state.batchId) localStorage.setItem(BATCH_KEY, state.batchId);
     setText("batch-badge", `batch: ${body.batch_id}`);
@@ -600,18 +617,25 @@ async function openStreamWithRetry(taskId, handlers, attempt = 0) {
 
 async function openStream(taskId, handlers) {
   const controller = new AbortController();
+  // P2-7（第十一轮）：SSE 也要带 X-Trace-Id —— 上一版只有普通 API 带，
+  // 断流时服务端日志里根本没有"是哪一次前端请求"，前端报错也拿不到 trace。
+  const streamTrace = newTraceId();
   let resp;
   try {
     resp = await fetch(`/api/image/tasks/${taskId}/stream`, {
-      headers: authHeaders({ Accept: "text/event-stream" }),
+      headers: authHeaders({ Accept: "text/event-stream", "X-Trace-Id": streamTrace }),
       signal: controller.signal,
     });
   } catch (err) {
+    err.trace = streamTrace;
     handlers.onError && handlers.onError(err);
     return controller;
   }
   if (!resp.ok || !resp.body) {
-    handlers.onError && handlers.onError(new Error("stream HTTP " + resp.status));
+    const err = new Error("stream HTTP " + resp.status);
+    err.trace = resp.headers.get("X-Trace-Id") || streamTrace;
+    err.status = resp.status;
+    handlers.onError && handlers.onError(err);
     return controller;
   }
   const reader = resp.body.getReader();
@@ -692,8 +716,12 @@ function watchTask(taskId, productId) {
   container.appendChild(row);
   const statusEl = row.querySelector(".pi-status");
   const nameEl = row.querySelector(".pi-name");
+  // P2-6（第十一轮）：SSE 到点会发 `timed_out` 的 done 事件（服务端不再等），但任务还在跑。
+  // 上一版只把状态写成"等待超时"就结束了 —— 后面真的完成/失败，界面上永远是超时。
+  // 收到 timed_out 就重新开一条流（重连后首帧就是最新快照），最多续看 3 次。
+  let timeouts = 0;
 
-  const controller = openStreamWithRetry(taskId, {
+  const handlers = {
     onEvent(event, data) {
       if (event === "snapshot") {
         nameEl.textContent = [data.product_id, data.platform, data.variant_id]
@@ -732,6 +760,16 @@ function watchTask(taskId, productId) {
           attachListingButtons(taskId, row);
           attachIterateButton(taskId, row, data);
         }
+        if (data.timed_out && timeouts < 3) {
+          timeouts += 1;
+          // 服务端只是"不再等"了，任务还在跑：5s 后续看一次最新状态
+          setTimeout(() => {
+            state.streams.delete(taskId);
+            openStreamWithRetry(taskId, handlers).then((next) => {
+              state.streams.set(taskId, next);
+            });
+          }, 5000);
+        }
         loadGallery(taskId);
         loadQuota();
       } else if (event === "fatal") {
@@ -740,13 +778,16 @@ function watchTask(taskId, productId) {
         row.className = "progress-item failed";
       }
     },
-    onError() {
+    onError(err) {
       statusEl.textContent = "连接断开";
+      if (err && err.trace) nameEl.textContent = `trace: ${err.trace}`;
     },
     onClose() {
       state.streams.delete(taskId);
     },
-  });
+  };
+
+  const controller = openStreamWithRetry(taskId, handlers);
   state.streams.set(taskId, controller);
 }
 
@@ -777,8 +818,10 @@ function attachIterateButton(taskId, row, data) {
     };
     if (data.color) payload.product_colors = [{ product_id: productId, colors: [data.color] }];
     if (data.platform) payload.platform = data.platform;
+    payload.request_id = requestIdFor(payload);   // P2-2：iterate 同样带幂等键
     try {
       const body = await api("/api/image/tasks", { json: payload });
+      state.pendingRequest = null;
       state.batchId = body.batch_id || state.batchId;
       if (state.batchId) localStorage.setItem(BATCH_KEY, state.batchId);
       setText("batch-badge", `batch: ${body.batch_id}`);

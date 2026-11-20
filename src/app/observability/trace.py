@@ -21,11 +21,31 @@ import contextlib
 import contextvars
 import functools
 import logging
+import threading
 
 _TRACE: contextvars.ContextVar[dict] = contextvars.ContextVar("trace_context", default={})
 
 # 没有轮次上下文时（脚本、启动期、单测）占位符
 NO_TRACE = "-"
+
+# P2-4（第十一轮）：`to_thread` 把同步 IO 丢进默认执行器后，池子本身没有任何可观测性。
+# 默认 `max_workers = min(32, cpu+4)`；打满以后调用**在队列里无声排队**——接口变慢，
+# 指标却还是一片绿。这里记调用数/当前在飞/累计占用/单次最长，导出到 metrics 端点。
+_POOL_STATS = {"calls": 0, "in_flight": 0, "busy_seconds": 0.0, "busy_max_seconds": 0.0}
+_POOL_LOCK = threading.Lock()
+
+
+def threadpool_stats() -> dict:
+    """线程池（同步 IO 卸载）的进程内统计快照。"""
+    with _POOL_LOCK:
+        return dict(_POOL_STATS)
+
+
+def reset_threadpool_stats() -> None:
+    """测试用：清零统计（进程内单例）。"""
+    with _POOL_LOCK:
+        _POOL_STATS.update({"calls": 0, "in_flight": 0, "busy_seconds": 0.0,
+                            "busy_max_seconds": 0.0})
 
 
 def current_trace() -> dict:
@@ -79,12 +99,29 @@ def unbind_trace(token: contextvars.Token) -> None:
 
 
 async def run_in_trace(func, /, *args, **kwargs):
-    """在线程池里跑同步函数，并保证 trace 上下文不丢（`asyncio.to_thread` 不继承 contextvar）。"""
+    """在线程池里跑同步函数，并保证 trace 上下文不丢（`asyncio.to_thread` 不继承 contextvar）。
+
+    P2-4（第十一轮）：顺带记录线程池统计（调用数/在飞/占用时长），
+    用于发现"同步 IO 打满默认执行器"这种只在延迟上体现的故障。
+    """
     import asyncio
+    import time
 
     snapshot = current_trace()
     wrapped = functools.partial(_with_trace, snapshot, func, *args, **kwargs)
-    return await asyncio.to_thread(wrapped)
+    with _POOL_LOCK:
+        _POOL_STATS["calls"] += 1
+        _POOL_STATS["in_flight"] += 1
+    started = time.monotonic()
+    try:
+        return await asyncio.to_thread(wrapped)
+    finally:
+        elapsed = max(0.0, time.monotonic() - started)
+        with _POOL_LOCK:
+            _POOL_STATS["in_flight"] -= 1
+            _POOL_STATS["busy_seconds"] += elapsed
+            if elapsed > _POOL_STATS["busy_max_seconds"]:
+                _POOL_STATS["busy_max_seconds"] = elapsed
 
 
 def _with_trace(snapshot: dict, func, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003

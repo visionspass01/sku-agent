@@ -167,6 +167,9 @@ async def _generate_with_retry(provider, request, *, deadline_at: float = 0.0) -
     backoff = max(0.0, float(getattr(settings, "provider_retry_backoff_seconds", 0.2) or 0.0))
     last_exc: BaseException | None = None
     attempt = 0
+    # P2-1（第十一轮）：发起量只数**真正发出去的调用**。上一版用循环下标 `max(1, attempt)`
+    # 记账：截止时间在「第 2 次重试前」命中时会把第 2 次（根本没发出）也算成已发起 → 多记 1 次。
+    made = 0
     try:
         for attempt in range(1, attempts + 1):
             _check_deadline(deadline_at)
@@ -176,7 +179,8 @@ async def _generate_with_retry(provider, request, *, deadline_at: float = 0.0) -
                 # 退避睡眠期间也占着全局并发槽位：一次限流重试会把
                 # IMAGE_PROVIDER_CONCURRENCY 个名额一起占住，吞吐被白白压掉。
                 async with _provider_semaphore():
-                    return await provider.generate(request), attempt
+                    made += 1
+                    return await provider.generate(request), made
             except ImageError as exc:
                 last_exc = exc
                 if attempt >= attempts or not _retryable(exc):
@@ -191,7 +195,7 @@ async def _generate_with_retry(provider, request, *, deadline_at: float = 0.0) -
         raise last_exc if last_exc is not None else ImageError("IMG_PROVIDER_UNAVAILABLE",
                                                               "生图调用失败")
     except BaseException as exc:  # noqa: BLE001 —— 失败也要带上真实发起次数
-        _set_provider_calls(exc, max(1, attempt))
+        _set_provider_calls(exc, made)
         raise
 
 

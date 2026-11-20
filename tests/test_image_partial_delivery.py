@@ -68,8 +68,9 @@ def _short_provider(monkeypatch, drop: int = 1) -> None:
     """让 provider 少返回 `drop` 个图位（模拟第三方部分失败）。"""
     original = generator_handler.run
 
-    async def short(payload):
-        result = await original(payload)
+    async def short(payload, *, on_slot=None):
+        # P1-1（第十一轮）：handler.run 增加 on_slot 增量成本回调，假实现要跟上签名
+        result = await original(payload, on_slot=on_slot)
         slots = result.get("slots") or []
         for item in slots[-drop:]:
             item["images"] = []
