@@ -127,6 +127,16 @@ async def _platform_rules(state: ImageTaskState):
     return await get_catalog().get_platform_rules(platform=state.platform)
 
 
+async def _recall_for_slots_async(state: ImageTaskState, settings) -> dict[int, list[str]]:
+    """P1-5（第九轮）：RAG 召回丢线程池。
+
+    `rag_index.retrieve` 内部是**同步** redis 客户端 + BM25 打分；在 async 执行体里直接调，
+    真实 Redis 下每次召回都是两次阻塞往返（网络抖动时会把事件循环一起卡住）。
+    与参考图读取/像素门禁同一套做法：`asyncio.to_thread`。
+    """
+    return await asyncio.to_thread(_recall_for_slots, state, settings)
+
+
 def _recall_for_slots(state: ImageTaskState, settings) -> dict[int, list[str]]:
     """按图位召回「写法片段」（RAG）：检索失败只记 warning，不影响出图。
 
@@ -325,7 +335,7 @@ async def execute_task(task_id: str) -> ImageTaskState:
     rules = await _platform_rules(state)
     policy = await _plan_policy(state)
     state.touch("compose_prompt")
-    fragments = _recall_for_slots(state, settings)
+    fragments = await _recall_for_slots_async(state, settings)
     all_drafts = plan_slots.compose(state, registry, rules=rules, policy=policy,
                                     fragments=fragments)
     state.touch("validate")
@@ -412,7 +422,8 @@ async def execute_task(task_id: str) -> ImageTaskState:
                              f"{'；'.join(critic.issues[:3])}")
         # P0-4/P1-3：**只在 Critic 不通过、还要再试一轮时**检索修复经验
         # （同签名+同部门的历史修法 → KB fixes 语料 → 内置规则，见 reflexion.reflect）
-        repair = _repair_experience(state, last_signature)
+        # P1-5（第九轮）：检索同样走线程池（同步 redis + BM25 不能占事件循环）
+        repair = await asyncio.to_thread(_repair_experience, state, last_signature)
         state.touch("reflexion", attempt=attempt, issues=len(critic.issues),
                     repair_source=repair.get("source", ""))
         reflection = reflexion.reflect(state, critic, current, rules=rules,
