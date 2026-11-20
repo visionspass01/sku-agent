@@ -113,22 +113,28 @@ def test_provider_failure_marks_task_failed(image_db, monkeypatch):
 
 
 def test_recovery_requeues_stale_task(image_db):
+    """看门狗重投 stale queued 任务，并且任务能真正跑完。
+
+    注意：`resume_pending()` 只是把任务排进当前事件循环；一旦 `asyncio.run` 返回、循环关闭，
+    后台任务会被取消。所以必须**在同一个循环里**等它落终态（P2-4 把参考图读取改成线程池后，
+    执行体会真正让出事件循环，旧的"靠循环关闭前同步跑完"的巧合不再成立）。
+    """
     stale_created = dt.datetime.now() - dt.timedelta(hours=1)
     task_id, _refs = _seed_task(status="queued", created_at=stale_created)
 
     generator = LocalGenerator()
-    requeued = asyncio.run(generator.resume_pending())
-    assert task_id in requeued
 
-    deadline = __import__("time").time() + 10
-    status = None
-    while __import__("time").time() < deadline:
-        from app.db.engine import session_scope
+    async def run_until_settled():
+        requeued = await generator.resume_pending()
+        assert task_id in requeued
+        for _ in range(400):
+            from app.db.engine import session_scope
 
-        with session_scope() as session:
-            task = task_store.get_task(session, task_id)
-            status = task.status
+            with session_scope() as session:
+                status = task_store.get_task(session, task_id).status
             if status in {"done", "failed"}:
-                break
-        __import__("time").sleep(0.05)
-    assert status == "done"
+                return status
+            await asyncio.sleep(0.05)
+        return None
+
+    assert asyncio.run(run_until_settled()) == "done"
