@@ -347,6 +347,20 @@ async def execute_task(task_id: str) -> ImageTaskState:
     for attempt in range(1, max_attempts + 1):
         state.attempt = attempt
         _renew_lease(task_id, settings)
+        # P1-1（第九轮）：**发给模型之前**校验本轮 Prompt（首轮 + 每轮 Reflexion 之后各一次）。
+        # 上一版在生成循环**之后**才 validate：校验失败时图已经生成、钱已经花掉，
+        # 而异常不带失败统计 → 结算记 attempted=0 / 成本 0，图和账一起丢。
+        # 这里提前拦；万一校验失败（例如上一轮已出过图），把已发生的成本挂到异常上再抛。
+        state.prompt_pack = current + static_drafts
+        try:
+            validate.validate(state, settings=settings)
+        except BaseException as exc:
+            if attempted or provider_calls:
+                generator_handler.attach_failure_stats(
+                    exc, provider_calls=provider_calls, generated=attempted,
+                    cost_cny=sum(float(item or 0.0) for item in image_costs),
+                    llm_cost_cny=float(getattr(state, "llm_cost_cny", 0.0) or 0.0))
+            raise
         state.touch("generate", attempt=attempt, slots=len(current))
         # provider 调用标记：取消 API 据此判断"能不能撤回"（P1-6）
         with session_scope() as session:
@@ -399,12 +413,6 @@ async def execute_task(task_id: str) -> ImageTaskState:
     state.prompt_pack = current + static_drafts
     state.critic = critic
     state.prompt_final = current[0].prompt or state.prompt
-    # P1-1（第八轮）：组装完 Prompt 后再做一次**真实**校验。
-    # 此前 validate 在 `prompt_pack` 还为空时被调用，`_validate_prompt_pack` 直接短路，
-    # 于是「身份锁定词是否真的写进 Prompt / Prompt 是否为空 / 比例是否一致」从没被检查过。
-    # 现在拿真正要下发给模型的那份文本再验一遍（模板/Reflexion 改坏了会在这里失败）。
-    state.touch("validate_final")
-    validate.validate(state, settings=settings)
     if state.warnings:
         state.touch("validate_warnings", count=len(state.warnings))
 
