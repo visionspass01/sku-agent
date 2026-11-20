@@ -125,22 +125,26 @@ class ImageTaskState(BaseModel):
     error: str = ""
 
     _last_touch: float | None = PrivateAttr(default=None)
+    _last_stage: str | None = PrivateAttr(default=None)
 
     def touch(self, stage: str, **extra: Any) -> None:
         """记录阶段耗时（timeline 是排障与评测的唯一时间源）。
 
-        第五轮 P1-7：顺便把「上一阶段到本阶段」的耗时打进 Prometheus 直方图
-        （`/api/image/metrics` 的 image_stage_seconds），否则指标只有计数没有耗时分布。
+        第六轮 P1-7：直方图必须记**上一阶段**的耗时。
+        上一版在 `touch(stage)` 时把「上次 touch 到现在的耗时」直接打进**本阶段**标签，
+        导致所有阶段整体错位一格（generate 的耗时被算到 critic 头上），用它排查"谁慢"会得出
+        相反结论。现在把耗时记到 `prev_stage`，本阶段只负责"开始"。
         """
         now = time.perf_counter()
-        last = self._last_touch
-        self._last_touch = now
-        if last is not None:
+        last_ts, last_stage = self._last_touch, self._last_stage
+        elapsed_ms = (now - last_ts) * 1000.0 if last_ts is not None else 0.0
+        self._last_touch, self._last_stage = now, stage
+        if last_ts is not None and last_stage:
             try:
                 from app.agents_image import metrics as image_metrics
 
-                image_metrics.record_stage(stage, (now - last) * 1000.0)
+                image_metrics.record_stage(last_stage, elapsed_ms)
             except Exception:  # noqa: BLE001 —— 度量失败不影响主流程
                 pass
-        self.timeline.append({"stage": stage, "ms": int((now - last) * 1000) if last else 0,
-                              **extra})
+        self.timeline.append({"stage": stage, "ms": int(elapsed_ms),
+                              "prev_stage": last_stage or "", **extra})

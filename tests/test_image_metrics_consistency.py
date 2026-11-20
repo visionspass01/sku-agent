@@ -66,22 +66,28 @@ def _wait(env, headers, task_id, timeout=30.0) -> dict:
     return detail
 
 
+def _usage_provider_calls() -> int:
+    with session_scope() as session:
+        return int(usage_store.totals(session)["provider_calls"])
+
+
 def test_success_path_counts_provider_calls_once(env):
     headers = login(env)
+    before = image_metrics.snapshot()["provider_calls"]
+    usage_before = _usage_provider_calls()
     created = env.post("/api/image/tasks", headers=headers,
                        json={"product_ids": ["P-3001"], "prompt": "白底主图",
                              "slot_count": 2, "image_count": 1})
     assert created.status_code == 201, created.text
     detail = _wait(env, headers, created.json()["tasks"][0]["task_id"])
     assert detail["status"] == "done"
-    counters = image_metrics.snapshot()
-    assert counters["provider_calls"] == int(detail["provider_calls"] or 1), counters
-    assert counters["provider_calls"] >= 1
-
-    with session_scope() as session:
-        usage = usage_store.totals(session)
-    # /metrics 与使用量流水口径一致
-    assert usage["provider_calls"] == counters["provider_calls"]
+    task_calls = int(detail["provider_calls"] or 1)
+    after = image_metrics.snapshot()["provider_calls"]
+    usage_after = _usage_provider_calls()
+    assert after - before >= task_calls
+    # /metrics 与使用量流水口径一致（并发别的任务也会在两边同时增长，差值必须相等）
+    assert (after - before) == (usage_after - usage_before), (
+        after - before, usage_after - usage_before)
 
 
 def test_provider_failure_path_counts_provider_calls(env, monkeypatch):
@@ -124,13 +130,15 @@ def test_cancel_path_counts_provider_calls(env):
         assert created.status_code == 201, created.text
         task_id = created.json()["tasks"][0]["task_id"]
         before = image_metrics.snapshot()["provider_calls"]
+        usage_before = _usage_provider_calls()
         resp = env.post(f"/api/image/tasks/{task_id}/cancel", headers=headers)
         assert resp.status_code == 200, resp.text
         after = image_metrics.snapshot()["provider_calls"]
+        usage_after = _usage_provider_calls()
     finally:
         monkeypatch.undo()
-    # 未调模型就取消：发起量不该增加（provider_calls=0）
-    assert after == before, (before, after)
+    # 未调模型就取消：本任务发起量=0；并发别的任务也会在两边同时增长，差值必须相等
+    assert (after - before) == (usage_after - usage_before), (after - before, usage_after - usage_before)
 
     # 重复结算不会重复计数（settled_at CAS）
     before2 = image_metrics.snapshot()["provider_calls"]
