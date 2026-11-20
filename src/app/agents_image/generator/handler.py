@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any
 
 from app.agents_image.providers.image_provider import ImageInput, ImageRequest, get_provider
@@ -139,7 +140,17 @@ def _provider_calls_of(exc: BaseException) -> int:
     return 0
 
 
-async def _generate_with_retry(provider, request) -> tuple[Any, int]:
+def _check_deadline(deadline_at: float) -> None:
+    """P1（第十轮）：任务级截止时间（生图 API 最大等待 360s，超时记失败）。
+
+    在"每次真正要花钱之前"检查：到了截止时间就不再发起新的 provider 调用，
+    直接抛 IMG_TIMEOUT——已经生成/已计费的部分由调用方按真实值记账（不能因超时丢账）。
+    """
+    if deadline_at and time.time() > deadline_at:
+        raise ImageError("IMG_TIMEOUT", "任务超过最大等待时长（IMAGE_TASK_MAX_SECONDS），已终止本轮生成")
+
+
+async def _generate_with_retry(provider, request, *, deadline_at: float = 0.0) -> tuple[Any, int]:
     """调一次 provider；限流/超时/5xx 按 `IMAGE_PROVIDER_RETRIES` 退避重试。
 
     返回 `(result, provider_calls)`：`provider_calls` 是**真实发起次数**（含重试），
@@ -147,6 +158,7 @@ async def _generate_with_retry(provider, request) -> tuple[Any, int]:
 
     失败时把本次已发起的次数挂到异常的 `extra["provider_calls"]` 上（P1-6），
     由 `run()` 聚合成整轮的真实发起量再往外抛。
+    `deadline_at`（P1，第十轮）：重试前也要检查截止时间，避免"退避重试把 360s 预算耗光"。
     """
     from app.agents_image.config import get_image_settings
 
@@ -157,6 +169,7 @@ async def _generate_with_retry(provider, request) -> tuple[Any, int]:
     attempt = 0
     try:
         for attempt in range(1, attempts + 1):
+            _check_deadline(deadline_at)
             try:
                 # P2-5（第九轮）：信号量只包住**单次** provider 调用。
                 # 旧实现把 `async with _provider_semaphore()` 套在整段重试外，
@@ -196,8 +209,11 @@ async def run(payload: dict[str, Any]) -> dict[str, Any]:
     slots = payload.get("slots") or [{"slot": 1, "prompt": payload.get("prompt", "")}]
     results: list[dict[str, Any]] = []
     provider_calls = 0
+    # P1（第十轮）：任务级截止时间（生图 API 最大等待 360s，超时即失败）
+    deadline_at = float(payload.get("deadline_at") or 0.0)
     try:
         for slot in slots:
+            _check_deadline(deadline_at)          # 每个图位开始前检查，不发起新的付费调用
             request = ImageRequest(
                 prompt=slot.get("prompt") or payload.get("prompt", ""),
                 negative=slot.get("negative_prompt", ""),
@@ -208,7 +224,8 @@ async def run(payload: dict[str, Any]) -> dict[str, Any]:
                 seed=payload.get("seed"),
                 preserve=list(payload.get("preserve") or []),
             )
-            result, calls = await _generate_with_retry(provider, request)
+            result, calls = await _generate_with_retry(provider, request,
+                                                       deadline_at=deadline_at)
             provider_calls += int(calls)
             results.append({
                 "slot": int(slot.get("slot") or 1),

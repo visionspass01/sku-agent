@@ -44,6 +44,10 @@ class ImageSettings(BaseSettings):
     concurrency: int = Field(default=8, ge=1, le=32)          # 本机任务并发
     provider_concurrency: int = Field(default=10, ge=1, le=64)  # 调第三方生图 API 的并发上限
     timeout_seconds: int = Field(default=60, ge=5, le=600)
+    # P1（第十轮）：生图 API 的最大等待时长（对齐前端/调用方契约：超时即失败）。
+    # 执行体在每一轮生成前、每个图位调用前都会检查这个截止时间；
+    # 超时抛 IMG_TIMEOUT，并把已经生成张数/成本按真实值记账（不能因为超时就丢掉账）。
+    task_max_seconds: int = Field(default=360, ge=1, le=3600)
     # 第三方生图 API 的重试（W4）：只对限流/超时/5xx 重试；每次重试都计一次「发起量」
     provider_retries: int = Field(default=2, ge=0, le=5)
     provider_retry_backoff_seconds: float = Field(default=0.2, ge=0.0, le=10.0)
@@ -53,10 +57,14 @@ class ImageSettings(BaseSettings):
     context_batch_max_ids: int = Field(default=50, ge=1, le=200)
     context_cache_ttl_seconds: float = Field(default=60.0, ge=0.0, le=600.0)
     recovery_interval_seconds: int = Field(default=30, ge=0, le=3600)  # 看门狗扫描间隔（0=关）
-    # 任务租约（W1）：执行期每阶段续约；只有租约过期才允许看门狗重投
-    task_lease_seconds: int = Field(default=300, ge=30, le=3600)
+    # 任务租约（W1）：执行期每阶段续约；只有租约过期才允许看门狗重投。
+    # P1（第十轮）：租约必须**大于任务最长执行时间**（默认 task_max_seconds=360），
+    # 否则一个正常但较慢的任务会在截止时间之前被看门狗判"租约过期"重投 → 同一任务跑两遍、
+    # 成本翻倍。默认 420s = 360 + 60s 余量。
+    task_lease_seconds: int = Field(default=420, ge=30, le=3600)
     # P1-8：SSE 连接上限（provider 超时 60s × 重试 3 + 反射轮次可能超过 120s）
-    sse_max_seconds: int = Field(default=300, ge=30, le=3600)
+    # P1（第十轮）：SSE 必须覆盖调用方的最大等待时长（360s），否则任务还没结束 SSE 就先断了。
+    sse_max_seconds: int = Field(default=360, ge=30, le=3600)
     # P1-6（第九轮）：SSE 并发连接数上限（每个连接 3s 轮询一次 DB，不设上限会被放大）
     sse_max_connections: int = Field(default=32, ge=1, le=1000)
     max_recoveries: int = Field(default=3, ge=1, le=10)  # 同一任务最多被重投几次

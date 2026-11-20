@@ -108,7 +108,7 @@ def test_admin_tasks_invalid_limit_returns_422(env):
 def test_sse_max_seconds_is_configurable(env, monkeypatch):
     from app.agents_image.api import stream_routes
 
-    assert stream_routes._max_stream_seconds() == 300        # 默认
+    assert stream_routes._max_stream_seconds() == 360        # 默认：覆盖调用方 360s 最大等待
     monkeypatch.setenv("IMAGE_SSE_MAX_SECONDS", "240")
     reset_image_settings()
     assert stream_routes._max_stream_seconds() == 240

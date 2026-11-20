@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import time
 
 from app.agents_image import metrics
 from app.agents_image import registry as reg_mod
@@ -174,15 +175,33 @@ def _recall_for_slots(state: ImageTaskState, settings) -> dict[int, list[str]]:
         return {}
 
 
+def _raise_deadline(state: ImageTaskState, attempted: int, provider_calls: int,
+                    image_costs: list[float]) -> None:
+    """P1（第十轮）：到截止时间还没跑完 → 抛 IMG_TIMEOUT，并把已发生的事实挂到异常上。
+
+    `settle_cancel` 会按 attempted/成本记账（钱已经花掉），任务终态为 failed（超时即失败）。
+    """
+    exc = ImageError("IMG_TIMEOUT",
+                     "任务超过最大等待时长（IMAGE_TASK_MAX_SECONDS=360s 量级），已终止")
+    generator_handler.attach_failure_stats(
+        exc, provider_calls=provider_calls, generated=attempted,
+        cost_cny=sum(float(item or 0.0) for item in image_costs),
+        llm_cost_cny=float(getattr(state, "llm_cost_cny", 0.0) or 0.0))
+    raise exc
+
+
 async def _generate_or_attach_partial(settings, refs: list[dict], drafts,
                                       *, attempted: int, spent: float,
                                       provider_calls: int,
-                                      llm_cost: float = 0.0) -> dict:
+                                      llm_cost: float = 0.0,
+                                      deadline_at: float = 0.0) -> dict:
     """调生图 provider；失败时把**前几轮已发生**的张数/成本/发起量挂到异常上（第七轮 P1-2）。
 
     `handler.run` 只知道自己这一次调用里已经生成了多少；重试轮次（第 2 轮失败）与前几轮
     已经花掉的钱在 graph 手里，必须在这里合并，否则 dispatcher 结算只会记失败那一格的
     发起量，使用量/成本口径被系统性低估（过去实测 attempted=0、¥0）。
+
+    `deadline_at`（P1，第十轮）：任务级截止时间透传给 generator（API 最大等待 360s）。
     """
     try:
         return await generator_handler.run({
@@ -193,6 +212,7 @@ async def _generate_or_attach_partial(settings, refs: list[dict], drafts,
             "width": drafts[0].width,
             "height": drafts[0].height,
             "preserve": drafts[0].preserve,
+            "deadline_at": float(deadline_at or 0.0),
         })
     except BaseException as exc:  # noqa: BLE001 —— 失败也要把已发生的事实带出去
         stats = generator_handler.failure_stats_of(exc)
@@ -315,6 +335,8 @@ async def execute_task(task_id: str) -> ImageTaskState:
                            mime=item["mime"],
                            product_id=str(state.product_id or ""),
                            source=state.ref_source or "mcp") for item in refs]
+    # P1（第十轮）：任务级截止时间（生图 API 最大等待 360s，超时即失败）
+    deadline_at = time.time() + float(getattr(settings, "task_max_seconds", 360) or 360)
 
     _renew_lease(task_id, settings)
     state.touch("understand")
@@ -377,6 +399,10 @@ async def execute_task(task_id: str) -> ImageTaskState:
     for attempt in range(1, max_attempts + 1):
         state.attempt = attempt
         _renew_lease(task_id, settings)
+        # P1（第十轮）：生图 API 最大等待 360s（IMAGE_TASK_MAX_SECONDS），超时即失败。
+        # 每轮生成前检查一次：到点就不再花钱，异常上带已发生的张数/成本，结算按真实值记账。
+        if deadline_at and time.time() > deadline_at:
+            _raise_deadline(state, attempted, provider_calls, image_costs)
         # P1-1（第九轮）：**发给模型之前**校验本轮 Prompt（首轮 + 每轮 Reflexion 之后各一次）。
         # 上一版在生成循环**之后**才 validate：校验失败时图已经生成、钱已经花掉，
         # 而异常不带失败统计 → 结算记 attempted=0 / 成本 0，图和账一起丢。
@@ -402,7 +428,8 @@ async def execute_task(task_id: str) -> ImageTaskState:
                                                              for item in image_costs),
                                                    provider_calls=provider_calls,
                                                    llm_cost=float(getattr(state, "llm_cost_cny",
-                                                                          0.0) or 0.0))
+                                                                          0.0) or 0.0),
+                                                   deadline_at=deadline_at)
         image_costs = [float(slot.get("cost_cny") or 0.0)
                        for slot in (result.get("slots") or [])]
         images = _collect_images(result)
@@ -465,6 +492,10 @@ async def execute_task(task_id: str) -> ImageTaskState:
             image, role=role, rules=rules, gate_mode=gate_mode, autofix=autofix_images,
             aspect=state.aspect, nonpng_policy=nonpng_policy)
         gated.append((image.slot, role, verdict, image.mime or "image/png"))
+    # P1（第十轮）：生成+门禁都做完了，但如果已经超过任务截止时间，按"超时即失败"处理：
+    # 图不交付，已发生的发起量/张数/成本按真实值记账（`_raise_deadline` 已挂到异常上）。
+    if deadline_at and time.time() > deadline_at:
+        _raise_deadline(state, attempted, provider_calls, image_costs)
     with session_scope() as session:
         task = task_store.get_task(session, task_id)
         if task is None:
