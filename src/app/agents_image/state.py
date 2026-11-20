@@ -5,9 +5,10 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 
 class RefImage(BaseModel):
@@ -123,6 +124,23 @@ class ImageTaskState(BaseModel):
     timeline: list[dict[str, Any]] = Field(default_factory=list)
     error: str = ""
 
+    _last_touch: float | None = PrivateAttr(default=None)
+
     def touch(self, stage: str, **extra: Any) -> None:
-        """记录阶段耗时（timeline 是排障与评测的唯一时间源）。"""
-        self.timeline.append({"stage": stage, **extra})
+        """记录阶段耗时（timeline 是排障与评测的唯一时间源）。
+
+        第五轮 P1-7：顺便把「上一阶段到本阶段」的耗时打进 Prometheus 直方图
+        （`/api/image/metrics` 的 image_stage_seconds），否则指标只有计数没有耗时分布。
+        """
+        now = time.perf_counter()
+        last = self._last_touch
+        self._last_touch = now
+        if last is not None:
+            try:
+                from app.agents_image import metrics as image_metrics
+
+                image_metrics.record_stage(stage, (now - last) * 1000.0)
+            except Exception:  # noqa: BLE001 —— 度量失败不影响主流程
+                pass
+        self.timeline.append({"stage": stage, "ms": int((now - last) * 1000) if last else 0,
+                              **extra})

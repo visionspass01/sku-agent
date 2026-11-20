@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import secrets
 import time
 from types import SimpleNamespace
 
@@ -110,6 +111,27 @@ def _department_health() -> dict:
                if str(row.get("role") or "") != "admin" and not row.get("department")]
     return {"users_without_department": len(missing),
             "users_without_department_list": missing[:10]}
+
+
+@router.get("/metrics", include_in_schema=False)
+def image_metrics_endpoint(request: Request):
+    """Prometheus text format（P1-7 / 简历 4.5）。
+
+    鉴权策略（决策 D5）：默认公开只读数值；配置了 `IMAGE_METRICS_TOKEN` 就要求 Bearer，
+    方便部署时用 nginx / Prometheus 的 basic auth 之外再加一层。
+    """
+    settings = get_image_settings()
+    token = str(getattr(settings, "metrics_token", "") or "").strip()
+    if token:
+        auth = request.headers.get("authorization", "")
+        provided = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+        if not secrets.compare_digest(provided, token):
+            return Response(status_code=401, content=b"unauthorized\n",
+                            media_type="text/plain; charset=utf-8")
+    from app.agents_image import observability
+
+    return Response(content=observability.render_metrics(),
+                    media_type=observability._CONTENT_TYPE)
 
 
 def _degraded_state() -> dict:

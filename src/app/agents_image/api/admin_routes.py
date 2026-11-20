@@ -121,8 +121,10 @@ def _cards(session, *, runtime: dict, username: str | None = None,
         "in_flight_instance": int(runtime.get("in_flight") or 0),
         "cost_per_image": (round(cost_sum / usage_images, 4) if usage_images else 0.0),
         "cache_hit_rate": cache.get("hit_rate", 0.0),
-        "llm_calls": 0,                      # 生图链路目前不调 LLM（rubric 后置）
-        "llm_tokens": int(totals.get("tokens") or 0),
+        # 4.4/P1-7：LLM 用量改真实值（过去常量 0），来自进程内 counters（/api/image/metrics 同源）
+        "llm_calls": int((runtime.get("counters") or {}).get("llm_calls") or 0),
+        "llm_tokens": int((runtime.get("counters") or {}).get("llm_tokens")
+                          or totals.get("tokens") or 0),
         "in_flight_images": int(runtime.get("in_flight") or 0),
         "in_flight_scope": "db",
         "tasks_running_db": running_db,      # DB 侧真实在跑（跨副本）

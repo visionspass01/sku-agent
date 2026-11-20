@@ -203,9 +203,18 @@ async def execute_task(task_id: str) -> ImageTaskState:
     _renew_lease(task_id, settings)
     state.touch("understand")
     if not state.attrs:
-        # 中台数据缺失只在"历史任务/异常任务"出现：退回启发式，但记一条 warning（可观测）
-        state.attrs = understand.understand(state)
-        state.warnings.append("IMG_SCHEMA_INVALID: 任务缺少中台商品属性，已退回启发式抽取")
+        # 第五轮 4.4：先尝试「视觉/LLM 解析 → parse_attrs 收口」；不可用再退回启发式
+        from app.agents_image.nodes import llm_parse
+
+        parsed, parse_warnings = await llm_parse.parse_clothing_attrs(state, settings)
+        state.warnings.extend(parse_warnings)
+        if parsed is not None:
+            state.attrs = understand.understand(state, raw=parsed)
+            state.touch("understand_llm", source=str(parsed.get("source") or ""))
+        else:
+            # 中台数据缺失只在"历史任务/异常任务"出现：退回启发式，但记一条 warning（可观测）
+            state.attrs = understand.understand(state)
+            state.warnings.append("IMG_SCHEMA_INVALID: 任务缺少中台商品属性，已退回启发式抽取")
 
     rules = await _platform_rules(state)
     policy = await _plan_policy(state)
@@ -472,6 +481,8 @@ async def execute_task(task_id: str) -> ImageTaskState:
         _settle(session, state, delivered=delivered, attempted=attempted, cost=cost,
                 provider_calls=provider_calls)
     metrics.record_task_done(delivered=delivered, attempted=attempted)
+    # P1-7：发起量与真实成本进 Prometheus 计数器
+    metrics.record_provider_calls(provider_calls, cost_cny=external_cost)
     state.attempted_images = attempted
     state.delivered_images = delivered
     state.cost_cny = cost
@@ -548,6 +559,8 @@ def _cancel_settle(session, state: ImageTaskState, *, attempted: int,
     settlement.settle_cancel(session, state.task_id, attempted=attempted,
                              provider_calls=provider_calls, cost=cost,
                              warnings=state.warnings)
+    # P1-7：取消/失败也计入发起量与成本（Prometheus 计数器与健康面板同源）
+    metrics.record_provider_calls(provider_calls, cost_cny=cost)
 
 
 async def _plan_policy(state: ImageTaskState):

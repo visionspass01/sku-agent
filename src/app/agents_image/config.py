@@ -120,6 +120,11 @@ class ImageSettings(BaseSettings):
     ark_base_url: str = "https://ark.cn-beijing.volces.com/api/v3"
     ark_image_model: str = ""
     ark_vision_model: str = ""
+    # 第五轮 4.4：LLM / 视觉解析服装属性（默认关闭；无 Key 自动退回启发式）
+    llm_parse_enabled: bool = False
+    vision_enabled: bool = False
+    # 第五轮 P1-7：/api/image/metrics（Prometheus text format）的可选 Bearer 令牌
+    metrics_token: str = ""
 
     # ---- 中台 / MCP（D6 起使用）----
     platform_url: str = "http://127.0.0.1:8001"   # 数据中台（本仓库 data_platform，端口 8001）
