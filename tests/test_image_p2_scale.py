@@ -163,6 +163,41 @@ def test_output_assets_are_not_deduped(_db):
     assert keys == (None, None)
 
 
+def test_admin_metrics_aggregates_off_the_event_loop(env, monkeypatch):
+    """P2-2（第九轮）：多表聚合是同步 DB 操作，必须在线程池里跑（别卡事件循环）。"""
+    import asyncio
+    import threading
+
+    from app.agents_image.api import admin_routes
+
+    seen: dict = {}
+    real_buckets = admin_routes.usage_store.buckets
+
+    def slow_buckets(*args, **kwargs):
+        seen["thread"] = threading.get_ident()
+        return real_buckets(*args, **kwargs)
+
+    monkeypatch.setattr(admin_routes.usage_store, "buckets", slow_buckets)
+    headers = login(env)
+    main = threading.get_ident()
+
+    async def scenario():
+        admin_routes.reset_metrics_cache()
+        # 直接跑端点协程：循环线程就是 main
+        from starlette.requests import Request
+
+        scope = {"type": "http", "method": "GET", "path": "/api/image/admin/metrics",
+                 "headers": [(b"authorization", headers["Authorization"].encode())],
+                 "query_string": b"granularity=day&count=7&refresh=1"}
+        request = Request(scope)
+        response = await admin_routes.admin_metrics(request)
+        return response.status_code
+
+    assert asyncio.run(scenario()) == 200
+    assert seen.get("thread") and seen["thread"] != main, \
+        "聚合必须在线程池里执行（旧实现直接占用事件循环线程）"
+
+
 def test_concurrent_ref_writes_keep_a_single_row(_db):
     """两个线程同时写同一张参考图：唯一索引兜底，最终只有一行（且不抛异常）。"""
     ensure_image_schema()

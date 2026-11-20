@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 
@@ -218,11 +219,12 @@ async def admin_metrics(request: Request) -> JSONResponse:
         if cached is not None:
             rows, cards = cached["buckets"], cached["cards"]
         else:
-            with session_scope() as session:
-                rows = usage_store.buckets(session, granularity=granularity, count=count,
-                                           username=username, department=department)
-                cards = _cards(session, runtime=runtime, username=username,
-                               department=department)
+            # P2-2（第九轮）：多表 count + 使用量窗口扫描是**同步** DB 聚合，
+            # 放在 async 端点里会阻塞事件循环（面板轮询越频繁越明显）。
+            # 丢线程池跑，loop 继续处理其它请求。
+            rows, cards = await asyncio.to_thread(
+                _compute_metrics, granularity=granularity, count=count,
+                username=username, department=department, runtime=runtime)
             _metrics_cache_put(cache_key, {"buckets": rows, "cards": cards})
         outbox = outbox_store.stats()
     except ImageError as exc:
@@ -239,6 +241,17 @@ async def admin_metrics(request: Request) -> JSONResponse:
 
 # 指标缓存：进程内、30s（可配）；只缓存"贵的部分"（buckets/cards），在途与 outbox 每次实算
 _METRICS_CACHE: dict[tuple, tuple[float, dict]] = {}
+
+
+def _compute_metrics(*, granularity: str, count: int, username: str | None,
+                     department: str | None, runtime: dict) -> tuple[list, dict]:
+    """buckets + cards 的同步聚合（P2-2：调用方在线程池里跑，别直接放事件循环）。"""
+    with session_scope() as session:
+        rows = usage_store.buckets(session, granularity=granularity, count=count,
+                                   username=username, department=department)
+        cards = _cards(session, runtime=runtime, username=username,
+                       department=department)
+    return rows, cards
 
 
 def _metrics_cache_ttl() -> float:
