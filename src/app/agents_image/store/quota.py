@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import datetime as dt
 
-from sqlalchemy import func, select, update
+from sqlalchemy import case, select, update
 
 from app.agents_image.store.models import ImageQuota
 
@@ -134,18 +134,26 @@ def commit_reserve(session, username: str, images: int) -> bool:
 
 
 def release(session, username: str, images: int) -> bool:
-    """释放预留（失败/取消）：预留不足时清零，不会把 used 变成负数。"""
+    """释放预留（失败/取消）：预留不足时清零，不会把 used 变成负数。
+
+    P0-1（第八轮）：必须用 `CASE WHEN` 而不是 `func.max(a, b)`。
+    MySQL 的 `MAX()` 只有聚合形态（标量函数叫 `GREATEST`），双参数 `max(x, 0)` 在
+    MySQL 8 上直接报 ERROR 1582；而 compose 部署默认就是 MySQL（`docs/DEPLOY.md`），
+    结果是**交付/失败/取消三条结算路径全部抛错**（额度不释放、使用量与成本漏记）。
+    `case()` 两种方言都编译成标准 SQL。
+    """
     row = _rollover(session, get_or_create(session, username))
     if row.period_type == "unlimited":
         return True
     count = max(0, int(images or 0))
     if count == 0:
         return True
+    remaining_after = ImageQuota.reserved - count
     result = session.execute(
         update(ImageQuota)
         .where(ImageQuota.username == username,
                ImageQuota.period_key == row.period_key)
-        .values(reserved=func.max(ImageQuota.reserved - count, 0),
+        .values(reserved=case((remaining_after < 0, 0), else_=remaining_after),
                 updated_at=dt.datetime.now())
     )
     return bool(result.rowcount)
