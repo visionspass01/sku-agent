@@ -19,7 +19,7 @@ from app.agents_image import metrics
 from app.agents_image import registry as reg_mod
 from app.agents_image.config import get_image_settings
 from app.agents_image.generator import handler as generator_handler
-from app.agents_image.nodes import compliance, plan_slots, reflexion, understand, validate
+from app.agents_image.nodes import compliance, llm_parse, plan_slots, reflexion, understand, validate
 from app.agents_image.nodes import critic as critic_mod
 from app.agents_image.state import CriticResult, ImageTaskState, RefImage, SlotPlan
 from app.agents_image.storage.image_storage import get_storage
@@ -202,19 +202,29 @@ async def execute_task(task_id: str) -> ImageTaskState:
 
     _renew_lease(task_id, settings)
     state.touch("understand")
-    if not state.attrs:
-        # 第五轮 4.4：先尝试「视觉/LLM 解析 → parse_attrs 收口」；不可用再退回启发式
-        from app.agents_image.nodes import llm_parse
-
-        parsed, parse_warnings = await llm_parse.parse_clothing_attrs(state, settings)
+    # 第六轮 P1-3：解析触发改成「模式驱动」——
+    # 过去只有 attrs 为空才解析，而建任务时总会写入中台 attrs，于是 LLM/视觉解析永远不执行；
+    # 现在 fallback 模式下"中台字段不全"就解析（中台为准、模型补缺），always 模式总是补一遍。
+    mode = str(getattr(settings, "llm_parse_mode", "fallback") or "fallback").strip().lower()
+    if mode not in {"off", "fallback", "always"}:
+        mode = "fallback"
+    wants_parse = mode == "always" or (mode == "fallback"
+                                       and llm_parse.attrs_incomplete(state.attrs))
+    parsed = None
+    if wants_parse:
+        parsed, parse_warnings = await llm_parse.parse_clothing_attrs(
+            state, settings, base_attrs=state.attrs)
         state.warnings.extend(parse_warnings)
         if parsed is not None:
-            state.attrs = understand.understand(state, raw=parsed)
-            state.touch("understand_llm", source=str(parsed.get("source") or ""))
-        else:
-            # 中台数据缺失只在"历史任务/异常任务"出现：退回启发式，但记一条 warning（可观测）
-            state.attrs = understand.understand(state)
-            state.warnings.append("IMG_SCHEMA_INVALID: 任务缺少中台商品属性，已退回启发式抽取")
+            state.attrs = llm_parse.merge_missing_attrs(state.attrs, parsed)
+            # 补全后的身份锁定字段要落库：任务详情/回写/排障都以 attrs_json 为准
+            with session_scope() as session:
+                task_store.update_task(session, task_id, attrs_json=dict(state.attrs))
+            state.touch("understand_llm", source=str(parsed.get("source") or ""), mode=mode)
+    if not state.attrs:
+        # 中台数据缺失且没有可用的模型解析：退回启发式，但记一条 warning（可观测）
+        state.attrs = understand.understand(state)
+        state.warnings.append("IMG_SCHEMA_INVALID: 任务缺少中台商品属性，已退回启发式抽取")
 
     rules = await _platform_rules(state)
     policy = await _plan_policy(state)

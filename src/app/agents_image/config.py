@@ -123,6 +123,10 @@ class ImageSettings(BaseSettings):
     # 第五轮 4.4：LLM / 视觉解析服装属性（默认关闭；无 Key 自动退回启发式）
     llm_parse_enabled: bool = False
     vision_enabled: bool = False
+    # 第六轮 P1-3：解析触发模式 —— off（从不）/ fallback（中台字段不全时才解析）/ always（总是补全）
+    llm_parse_mode: str = "fallback"
+    # 第六轮 P1-2：视觉请求超时（带图 payload 比纯文本慢，5s 默认太紧）
+    vision_timeout_seconds: float = Field(default=15.0, ge=1.0, le=120.0)
     # 第五轮 P1-7：/api/image/metrics（Prometheus text format）的可选 Bearer 令牌
     metrics_token: str = ""
     # 第五轮 P2：/admin/metrics 的进程内缓存秒数（0 = 关缓存）

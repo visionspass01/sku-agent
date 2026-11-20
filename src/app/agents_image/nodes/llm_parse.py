@@ -1,12 +1,15 @@
-"""LLM / 视觉解析服装属性（第五轮 4.4）：模型输出 → `parse_attrs` 收口。
+"""LLM / 视觉解析服装属性（第五轮 4.4，第六轮 P1-2/P1-3 修复）。
 
-设计（与简历职责 3 对齐）：
+设计：
 - 开关默认全关：`IMAGE_LLM_PARSE_ENABLED`（文本解析）/ `IMAGE_VISION_ENABLED`（视觉解析），
-  没有 Key 或没装依赖时**自动降级**为启发式，并在 `warnings` 留 `IMG_LLM_PARSE_DEGRADED` /
-  `IMG_VISION_DISABLED`，不阻塞出图；
-- 模型输出**不直接进 Prompt**：一律交给 `schemas.parse_attrs(raw, fallback=heuristic)`
-  （容忍 ```json 围栏/前后解释文字，schema 不合规就退回启发式 + `IMG_SCHEMA_INVALID`），
-  这就是「结构化输出 + Schema 收口」的落点；
+  触发策略由 `IMAGE_LLM_PARSE_MODE` 决定：
+  - `off`：从不解析；
+  - `fallback`（默认）：**只有中台字段不全时**才解析（中台为准，模型补缺）；
+  - `always`：总是解析一遍，但仍然只补空字段（不覆盖中台权威字段）；
+- 模型输出**不直接进 Prompt**：一律交给 `schemas.parse_attrs(raw, fallback=...)`
+  （容忍 ```json 围栏/前后解释文字，schema 不合规就退回 fallback + `IMG_SCHEMA_INVALID`）；
+- **参考图字节按 `asset_id → ImageAsset.key` 读取**（第六轮 P1-2：过去取 `ref.key`，
+  `RefImage` 根本没有这个字段 → 视觉路径 100% 降级）；
 - 用量记进 `metrics.record_llm()`，供 `/api/image/metrics` 与五张卡展示 token/成本。
 """
 
@@ -14,10 +17,11 @@ from __future__ import annotations
 
 import base64
 import logging
+import re
 
 from app.agents_image import metrics as image_metrics
 from app.agents_image.nodes.understand import heuristic_attrs
-from app.agents_image.schemas import parse_attrs
+from app.agents_image.schemas import _extract_json, parse_attrs
 
 logger = logging.getLogger("sku-agent.image.llm_parse")
 
@@ -29,6 +33,48 @@ PARSE_SYSTEM = (
     "must_not_change(绝不能变的要素数组)、confidence(0-1)。"
     "信息不足的字段用保守默认值，不要编造细节。"
 )
+
+PARSE_MODES = ("off", "fallback", "always")
+_HEX_PATTERN = re.compile(r"^#[0-9A-Fa-f]{6}$")
+_PLACEHOLDERS = {"", "服装商品", "以参考图为准", "无", "通用"}
+
+
+def attrs_incomplete(attrs: dict | None) -> bool:
+    """判断中台给的属性是否"缺得值得让模型补"（第六轮 P1-3 的触发条件）。"""
+    data = dict(attrs or {})
+    if not data:
+        return True
+    color_hex = str(data.get("color_hex") or "").strip()
+    if not _HEX_PATTERN.match(color_hex):
+        return True
+    for key in ("product_type", "shape", "materials"):
+        if str(data.get(key) or "").strip() in _PLACEHOLDERS:
+            return True
+    return False
+
+
+def merge_missing_attrs(base: dict | None, parsed: dict | None) -> dict:
+    """中台字段优先、模型只补空位（第六轮 P1-3）。
+
+    为什么不能直接 `{**base, **parsed}`：中台的 `attrs` 是权威数据（颜色 hex、版型、
+    must_not_change 都来自中台），让模型覆盖它等于把"身份锁定"交给模型猜。
+    """
+    merged = dict(base or {})
+    for key, value in (parsed or {}).items():
+        if key in {"source", "must_not_change"}:
+            continue
+        current = merged.get(key)
+        if current in (None, "", [], {}) or str(current).strip() in _PLACEHOLDERS:
+            merged[key] = value
+    union: list[str] = []
+    for item in list((base or {}).get("must_not_change") or []) + \
+            list((parsed or {}).get("must_not_change") or []):
+        text = str(item or "").strip()
+        if text and text not in union:
+            union.append(text)
+    merged["must_not_change"] = union or ["颜色", "版型", "图案", "logo 文字", "关键部件位置"]
+    merged["source"] = str((parsed or {}).get("source") or merged.get("source") or "heuristic")
+    return merged
 
 
 def _user_prompt(state) -> str:
@@ -64,13 +110,18 @@ def _record_usage(before: dict) -> None:
         image_metrics.record_llm(calls=calls, tokens=tokens)
 
 
-def _raw_to_attrs(state, raw: str, *, source: str = "llm") -> tuple[dict | None, list[str]]:
-    """模型输出 → `parse_attrs`（Schema 收口）；解析失败退回启发式并留 warning。"""
-    fallback = heuristic_attrs(f"{state.prompt} {' '.join(state.scene_styles or [])}")
-    parsed = raw
-    try:  # 标记来源：payload 里显式带 source，ClothingAttrs 的枚举里有 llm/vision
-        from app.agents_image.schemas import _extract_json
+def _fallback_of(state, base_attrs: dict | None) -> dict:
+    if base_attrs:
+        return dict(base_attrs)
+    return heuristic_attrs(f"{state.prompt} {' '.join(state.scene_styles or [])}")
 
+
+def _raw_to_attrs(state, raw: str, *, source: str = "llm",
+                  base_attrs: dict | None = None) -> tuple[dict | None, list[str]]:
+    """模型输出 → `parse_attrs`（Schema 收口）；解析失败退回 fallback 并留 warning。"""
+    fallback = _fallback_of(state, base_attrs)
+    parsed = raw
+    try:  # 标记来源：payload 里显式带 source（ClothingAttrs 枚举含 llm/vision）
         payload = _extract_json(raw)
         parsed = {**payload, "source": source}
     except Exception:  # noqa: BLE001 —— 捞不出 JSON 就原样交给 parse_attrs（它会降级）
@@ -79,7 +130,8 @@ def _raw_to_attrs(state, raw: str, *, source: str = "llm") -> tuple[dict | None,
     return attrs.model_dump(), warnings
 
 
-async def parse_text(state, settings) -> tuple[dict | None, list[str]]:
+async def parse_text(state, settings, *, base_attrs: dict | None = None
+                     ) -> tuple[dict | None, list[str]]:
     """文本解析（JSON mode）：需求描述 + 图位信息 → 身份锁定字段。"""
     if not bool(getattr(settings, "llm_parse_enabled", False)):
         return None, []
@@ -95,11 +147,40 @@ async def parse_text(state, settings) -> tuple[dict | None, list[str]]:
         return None, [f"IMG_LLM_PARSE_DEGRADED: 模型解析失败（{type(exc).__name__}），已退回启发式"]
     finally:
         _record_usage(before)
-    attrs, warnings = _raw_to_attrs(state, raw)
+    attrs, warnings = _raw_to_attrs(state, raw, base_attrs=base_attrs)
     return attrs, warnings
 
 
-async def parse_with_vision(state, settings) -> tuple[dict | None, list[str]]:
+def _ref_bytes(ref) -> tuple[bytes, str] | None:
+    """按 `asset_id → ImageAsset.key` 读参考图字节（第六轮 P1-2 的核心修复）。
+
+    过去这里取 `ref.key`，而 `state.refs` 里是 `RefImage`（只有 asset_id/sha256/mime…），
+    于是永远读不到字节、视觉解析 100% 走降级。现在走资产表拿 key 再读存储。
+    """
+    asset_id = str(getattr(ref, "asset_id", "") or "")
+    if not asset_id:
+        return None
+    try:
+        from app.agents_image.storage.image_storage import get_storage
+        from app.agents_image.store import assets as asset_store
+        from app.db.engine import session_scope
+
+        with session_scope() as session:
+            asset = asset_store.get_asset(session, asset_id)
+            if asset is None:
+                return None
+            key = str(getattr(asset, "key", "") or "")
+            mime = str(getattr(asset, "mime", "") or "image/png")
+        if not key:
+            return None
+        return get_storage().get(key), mime
+    except Exception as exc:  # noqa: BLE001 —— 文件缺失/清理过：跳过这张图
+        logger.info("参考图字节读取失败（跳过该图）：%s", exc)
+        return None
+
+
+async def parse_with_vision(state, settings, *, base_attrs: dict | None = None
+                            ) -> tuple[dict | None, list[str]]:
     """视觉解析（Ark / OpenAI 兼容）：把参考图交给视觉模型，再走同一个 Schema 收口。"""
     if not bool(getattr(settings, "vision_enabled", False)):
         return None, []
@@ -113,21 +194,18 @@ async def parse_with_vision(state, settings) -> tuple[dict | None, list[str]]:
         return None, ["IMG_VISION_DEGRADED: 没有可用的参考图字节，图片理解已跳过"]
     try:
         import httpx
-
-        from app.agents_image.storage.image_storage import get_storage
     except Exception as exc:  # noqa: BLE001
         return None, [f"IMG_VISION_DEGRADED: 依赖不可用（{type(exc).__name__}）"]
 
-    storage = get_storage()
     content: list[dict] = [{"type": "text", "text": _user_prompt(state)}]
     for ref in refs[:2]:
-        try:
-            data = storage.get(str(getattr(ref, "key", "") or ""))
-        except Exception:  # noqa: BLE001 —— 文件缺失就跳过这张图
+        got = _ref_bytes(ref)
+        if got is None:
             continue
+        data, mime = got
         encoded = base64.b64encode(data).decode("ascii")
         content.append({"type": "image_url",
-                        "image_url": {"url": f"data:image/png;base64,{encoded}"}})
+                        "image_url": {"url": f"data:{mime or 'image/png'};base64,{encoded}"}})
     if len(content) == 1:
         return None, ["IMG_VISION_DEGRADED: 参考图字节读不出来，图片理解已跳过"]
 
@@ -136,9 +214,10 @@ async def parse_with_vision(state, settings) -> tuple[dict | None, list[str]]:
         {"role": "user", "content": content},
     ], "temperature": 0.1}
     base = str(getattr(settings, "ark_base_url", "") or "").rstrip("/")
+    timeout = float(getattr(settings, "vision_timeout_seconds", 15.0) or 15.0)
     before = _llm_usage_snapshot()
     try:
-        async with httpx.AsyncClient(timeout=float(getattr(settings, "mcp_timeout_seconds", 5.0))) as client:
+        async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(f"{base}/chat/completions", json=payload,
                                      headers={"Authorization": f"Bearer {api_key}"})
             resp.raise_for_status()
@@ -148,17 +227,19 @@ async def parse_with_vision(state, settings) -> tuple[dict | None, list[str]]:
         return None, [f"IMG_VISION_DEGRADED: 视觉解析失败（{type(exc).__name__}），已退回启发式"]
     finally:
         _record_usage(before)
-    attrs, warnings = _raw_to_attrs(state, raw, source="vision")
+    attrs, warnings = _raw_to_attrs(state, raw, source="vision", base_attrs=base_attrs)
     return attrs, warnings
 
 
-async def parse_clothing_attrs(state, settings) -> tuple[dict | None, list[str]]:
+async def parse_clothing_attrs(state, settings, *, base_attrs: dict | None = None
+                               ) -> tuple[dict | None, list[str]]:
     """视觉优先、其次文本解析；都不可用返回 (None, []) 由调用方退回启发式。"""
-    attrs, warnings = await parse_with_vision(state, settings)
+    attrs, warnings = await parse_with_vision(state, settings, base_attrs=base_attrs)
     if attrs is not None:
         return attrs, warnings
-    text_attrs, text_warnings = await parse_text(state, settings)
+    text_attrs, text_warnings = await parse_text(state, settings, base_attrs=base_attrs)
     return text_attrs, warnings + text_warnings
 
 
-__all__ = ["parse_clothing_attrs", "parse_text", "parse_with_vision", "PARSE_SYSTEM"]
+__all__ = ["parse_clothing_attrs", "parse_text", "parse_with_vision", "PARSE_SYSTEM",
+           "PARSE_MODES", "attrs_incomplete", "merge_missing_attrs", "_ref_bytes"]
