@@ -252,6 +252,17 @@ async def image_catalog(request: Request) -> JSONResponse:
     return JSONResponse(status_code=200, content=payload)
 
 
+def _request_fingerprint(body: dict) -> str:
+    """请求体指纹（P1-3）：幂等键只重放"同样的请求"，参数变了必须 409。"""
+    import hashlib
+    import json
+
+    payload = {key: value for key, value in (body or {}).items() if key not in {"trace_id"}}
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str,
+                     separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
 def _dedupe(values: list[str]) -> list[str]:
     out: list[str] = []
     for value in values:
@@ -355,12 +366,22 @@ async def create_tasks(request: Request) -> JSONResponse:
             raise ImageError("IMG_INPUT_INVALID", "请求体必须是 JSON 对象")
         idempotency_key = (request.headers.get("Idempotency-Key")
                            or body.get("request_id") or "").strip()
+        # P1-3（第九轮）：幂等键必须绑定请求体。上一版只看 key：同一个 request_id
+        # 换参数重发会静默重放**旧响应**（用户以为新参数生效，实际什么都没发生）。
+        payload_hash = _request_fingerprint(body)
         if idempotency_key:
             with session_scope() as session:
                 from app.agents_image.store.models import ImageRequest
 
                 row = session.get(ImageRequest, idempotency_key)
                 replay = dict(row.response_json or {}) if row is not None else None
+                stored_hash = str(getattr(row, "payload_hash", "") or "") if row is not None else ""
+            if row is not None and stored_hash and stored_hash != payload_hash:
+                raise ImageError(
+                    "IMG_TASK_CONFLICT",
+                    "同一个 request_id / Idempotency-Key 携带了不同参数；"
+                    "请换一个新的 request_id（幂等键只用于重放同样的请求）",
+                    retryable=False)
             if replay:
                 replay.update({"idempotent": True, "trace_id": trace})
                 return JSONResponse(status_code=200, content=replay)
@@ -564,6 +585,7 @@ async def create_tasks(request: Request) -> JSONResponse:
 
                 session.add(ImageRequest(request_id=idempotency_key, status="pending",
                                          batch_id="", username=user.username,
+                                         payload_hash=payload_hash,
                                          response_json={}))
                 try:
                     session.flush()
@@ -662,10 +684,12 @@ async def create_tasks(request: Request) -> JSONResponse:
                 if row is None:
                     session.add(ImageRequest(request_id=idempotency_key, status="done",
                                              batch_id=batch_id, username=user.username,
+                                             payload_hash=payload_hash,
                                              response_json=payload))
                 else:
                     row.batch_id = batch_id
                     row.response_json = payload
+                    row.payload_hash = payload_hash
                     row.status = "done"
                 session.flush()
         # 事务已提交：任务与预留都落库。派发失败不算建任务失败（任务保持 queued，看门狗会补投）

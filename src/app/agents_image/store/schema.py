@@ -35,6 +35,8 @@ _COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("image_task", "lease_until", "DATETIME"),
     ("image_task", "recoveries", "INTEGER DEFAULT 0"),
     ("image_request", "status", "VARCHAR(16) DEFAULT 'pending'"),
+    # P1-3（第九轮）：幂等键绑定请求体（旧库补列）
+    ("image_request", "payload_hash", "VARCHAR(64) DEFAULT ''"),
     ("image_usage", "provider_calls", "INTEGER DEFAULT 0"),
     ("image_usage", "agent_passed", "INTEGER DEFAULT 0"),
     # 第七轮 P1-1：使用量流水里的 LLM 成本（与生图成本 cost_cny 分开记）

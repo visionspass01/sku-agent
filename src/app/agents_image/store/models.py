@@ -215,6 +215,8 @@ class ImageRequest(Base):
     status: Mapped[str] = mapped_column(String(16), default="pending")  # pending|done
     batch_id: Mapped[str] = mapped_column(String(32), default="", index=True)
     username: Mapped[str] = mapped_column(String(32), default="", index=True)
+    # P1-3（第九轮）：请求体指纹。同 key 不同参数必须 409，而不是静默重放旧响应
+    payload_hash: Mapped[str] = mapped_column(String(64), default="")
     response_json: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=dt.datetime.now)
 
