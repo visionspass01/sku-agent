@@ -112,6 +112,27 @@ def test_provider_failure_marks_task_failed(image_db, monkeypatch):
     assert asyncio.run(run_until_settled()) == "failed"
 
 
+def test_planned_image_count_is_single_source_of_truth(image_db):
+    """P2-7（第九轮）：执行期的"计划张数"以任务台账 `image_count` 为准，不是 `n`。
+
+    场景：图位 6 个（n=6）但计划只出 2 张（iterate 差额/用户减量）——执行体必须只出 2 张，
+    并且部分成功判定以 2 为"预期"，不能按 6 判成部分成功（旧实现用 task.n 各算一遍）。
+    """
+    task_id, refs = _seed_task(n=6)
+    # image_count 单独改成 2（模拟建任务期算出的差额）
+    from app.db.engine import session_scope
+
+    with session_scope() as session:
+        task_store.update_task(session, task_id, image_count=2)
+
+    state = asyncio.run(execute_task(task_id))
+    assert state.count == 2, "执行体的计划张数必须是 image_count"
+    assert state.attempted_images == 2, "只按计划张数出图"
+    assert state.delivered_images == 2
+    assert state.partial is False, "按 2 张的预期不算部分成功"
+    assert "IMG_SLOT_MISSING" not in " ".join(state.warnings)
+
+
 def test_recovery_requeues_stale_task(image_db):
     """看门狗重投 stale queued 任务，并且任务能真正跑完。
 

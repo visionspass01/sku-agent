@@ -284,11 +284,15 @@ async def execute_task(task_id: str) -> ImageTaskState:
         if task.status in {"canceled", "done", "failed"}:
             return ImageTaskState(task_id=task_id)
         ref_ids = list(task.ref_asset_ids or [])
+        # P2-7（第九轮）：计划出图张数**以任务台账为准**（`image_count` = 建任务时算好的差额）。
+        # 过去这里用 `task.n`（图位数上限），与建任务期 `_plan_of/_gap_of` 的算法各算一遍，
+        # iterate 复用场景下两侧口径容易漂移；现在只信一处。
+        planned_images = int(getattr(task, "image_count", 0) or 0) or int(task.n or 0)
         state = ImageTaskState(
             task_id=task.task_id, request_id=task.request_id, trace_id=task.trace_id,
             batch_id=task.batch_id or "", product_id=task.product_id,
             username=task.username, department=task.department, prompt=task.prompt,
-            platform=task.platform, aspect=task.aspect, count=task.n,
+            platform=task.platform, aspect=task.aspect, count=planned_images,
             compositions=list(task.compositions or []),
             scene_styles=list(task.scene_styles or []),
             refs=[],
