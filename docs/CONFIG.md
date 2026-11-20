@@ -279,3 +279,30 @@
 `thumbs` 目录：**当前为预留**（缩略图能力未启用），清理任务不扫描它；保留目录只为
 后续接入缩略图时不改存储布局。
 
+---
+
+## v11 新增配置（生图 Agent，第五轮修复）
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `IMAGE_SSE_MAX_SECONDS` | `300` | SSE 连接上限（30..3600）。要能覆盖 provider 60s 超时 × 3 次重试 + 反射轮次 |
+| `IMAGE_METRICS_CACHE_SECONDS` | `30` | `/api/image/admin/metrics` 的进程内缓存秒数（0 = 关闭）；`?refresh=1` 可绕过 |
+| `IMAGE_METRICS_TOKEN` | 空 | `/api/image/metrics`（Prometheus text format）的可选 Bearer 令牌；空 = 公开只读数值 |
+| `IMAGE_MEMORY_KEEP_DAYS` | `90` | 修复经验（失败转成功才归档）保留天数；**人工采纳/驳回样本不受影响** |
+| `IMAGE_RAG_TOP_K` | `3` | 每个图位召回的片段数（1..8，第四轮之前是 2） |
+| `IMAGE_RAG_MIN_SCORE` | `0.0` | 弱向量命中的相似度阈值（0 = 不过滤，标定后再开，避免误杀召回） |
+| `IMAGE_RAG_RERANK` | `heuristic` | 启发式重排（标题命中 > 词覆盖 > RRF 分）；`none` 关闭 |
+| `IMAGE_RAG_CACHE_TTL_SECONDS` | `60` | 召回结果缓存 TTL；缓存后端是 Redis，未配置 `REDIS_URL` 时自动用 fakeredis |
+| `IMAGE_LLM_PARSE_ENABLED` | `false` | 文本 LLM 解析服装属性（JSON mode → `parse_attrs` 收口）；无 Key 自动降级 |
+| `IMAGE_VISION_ENABLED` | `false` | Ark 视觉解析（需 `IMAGE_ARK_API_KEY` + `IMAGE_ARK_VISION_MODEL`）；无 Key 记 `IMG_VISION_DISABLED` |
+
+### 行为变化（不是变量，但部署要知道）
+
+| 变化 | 说明 |
+|---|---|
+| 普通账号必须有部门 | 无部门的普通账号 `/api/image/products` 与建任务一律 403；`/health.users_without_department` 可查历史脏账号 |
+| 真实 provider 必须配单价 | `IMAGE_PROVIDER != fake` 且 `IMAGE_COST_PER_IMAGE_CNY` 未配（≤0）→ 建任务 422 `IMG_COST_CONFIG_MISSING` |
+| 记忆口径 | 失败只写任务台账；只有「失败→修复成功」才归档修法，且只在 Critic 不通过时检索 |
+| 召回缓存后端 | `REDIS_URL` 为空时是 fakeredis（进程内），多副本各自缓存；`/health.cache_backend` 可见 |
+| 登录限流 | 仍是进程内滑动窗口（`/health.throttle_scope=instance`），多副本各自计数 |
+

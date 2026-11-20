@@ -420,3 +420,77 @@ MCP server 现在**不碰任何数据库**：它们是「工具名 → `/api/v1/
 新增/变更的 `IMAGE_*` 变量（默认值与生效规则见 [CONFIG.md](CONFIG.md) v10 段）：
 `IMAGE_MAX_PROMPT_CHARS`、`IMAGE_OUTBOX_CLAIM_SECONDS`、`IMAGE_OUTBOX_KEEP_HOURS`；
 `IMAGE_MAX_REFS` 的语义改为「配置上限」，真正生效值取 `min(配置, provider.caps.max_refs)`。
+
+---
+
+## v11 接口变化（生图 Agent，第五轮：P0-2~P0-5 + 全部 P1 + 三项 P2）
+
+### 1. 交付口径（P0-3）
+
+| 变化 | 说明 |
+|---|---|
+| 终态三分支 | `done` 且少图 → `partial=true` + 「部分成功，预期 X 张（另有 N 张复用），输出 Y 张」；**`failed` / `canceled` → `partial=false、message=""`**（由 `error_code` / `error_detail` 解释）；非终态 → `in_progress=true` |
+| 新增字段 | 任务详情 / SSE 快照 / 后台详情统一给 `delivered_images`、`reused_images`、`total_images`、`failure_code`；前台失败时显示「输出 X / 预期 Y 张」而不是「部分成功」 |
+
+### 2. 部门权限（P0-5）
+
+| 变化 | 说明 |
+|---|---|
+| 普通账号必须有部门 | 无部门（或不在白名单）→ `GET /api/image/products` 与 `POST /api/image/tasks` 一律 403 `IMG_FORBIDDEN`（过去"少填部门"反而能看到全部商品） |
+| 建号 / 改部门 | `POST /admin/users` 的普通账号必须给 `department ∈ {男装, 女装}`；`PUT /admin/users/{username}` 支持改 `department`（不允许清空） |
+| 运维可见 | `/api/image/health` 增 `users_without_department` 与名单（前 10 个账号） |
+
+### 3. 成本护栏（P0-2）
+
+| 变化 | 说明 |
+|---|---|
+| 创建期拦截 | `IMAGE_PROVIDER != fake` 且 `IMAGE_COST_PER_IMAGE_CNY <= 0` → 422 `IMG_COST_CONFIG_MISSING`（过去单价 0 时预算闸永远不触发） |
+| 事后对账 | provider 真实计费超过 `IMAGE_COST_BUDGET_CNY` → 任务落 `IMG_COST_OVERRUN` 告警 |
+| 可见性 | `/health` 与五张卡增 `cost_budget_enabled` / `cost_price_cny` / `cost_budget_cny` |
+
+### 4. 修复经验与自迭代（P0-4 / P1-3 / P1-4）
+
+| 变化 | 说明 |
+|---|---|
+| 失败不归档 | Critic 多轮仍失败 → 只写任务台账（attempts/error），**不写 `image_memory`**（避免失败样本污染默认生成） |
+| 失败→成功才归档 | 修复后通过（第 2 轮及以后）→ 归档「本轮实际生效的修法」（`sample_kind=repair`，按 `签名\|部门` upsert） |
+| 只在失败时检索 | Critic 不通过、准备再来一轮时才检索：同签名+同部门修法 → KB `fixes/` 语料 → 内置规则；告警 `IMG_REPAIR_REUSED` / `IMG_REPAIR_KB` / `IMG_REPAIR_ARCHIVED` |
+| 清理 | 修复经验按 `IMAGE_MEMORY_KEEP_DAYS`（默认 90 天）TTL 清理；人工采纳/驳回样本永不自动删除；`GET /admin/samples?kind=repair` 可查看 |
+
+### 5. 检索质量与缓存（P1-1 / P1-2 / P1-9）
+
+| 变化 | 说明 |
+|---|---|
+| 查询改写 | 业务同义词扩展（主图↔首图、白底↔纯白、留白↔边距…），确定性、零模型 |
+| kind 过滤 | 写 Prompt 的召回只取 `slot` / `fragment` / `platform`；`fix` 语料只在 Critic 失败时用 |
+| 阈值 + 重排 | `IMAGE_RAG_MIN_SCORE`（默认 0 = 不过滤）+ 启发式重排（标题命中 > 词覆盖 > RRF 分，可关） |
+| 稳定哈希 | 向量桶改 blake2b：跨进程/重启召回结果一致（过去受 `PYTHONHASHSEED` 影响） |
+| 共享缓存 | 召回缓存走 Redis（未配置时 fakeredis 自动降级），`/health.cache_backend` 暴露后端；登录限流仍是进程内（`throttle_scope=instance`，多副本各自计数） |
+
+### 6. 观测（P1-7 / 简历 4.5）
+
+| 变化 | 说明 |
+|---|---|
+| 新端点 | `GET /api/image/metrics` → Prometheus text format（`version=0.0.4`）；可用 `IMAGE_METRICS_TOKEN` 要求 Bearer（默认公开只读数值） |
+| 指标面 | `image_tasks_total{status}`、`image_images_total{kind}`、`image_provider_calls_total`、`image_gate_skipped_total`、`image_partial_deliveries_total`、`image_swallowed_total{kind}`、`image_llm_calls_total`、`image_llm_tokens_total`、`image_cost_cny_total`、`image_in_flight`、`image_stage_seconds`（histogram） |
+| 管理员指标缓存 | `/admin/metrics` 加 30s 进程内缓存（`IMAGE_METRICS_CACHE_SECONDS`，0=关闭），响应增 `cached`；`?refresh=1` 强制刷新 |
+
+### 7. 其它一致性与规模（P1-5/P1-6/P1-8/P1-11/P1-12 + P2）
+
+| 变化 | 说明 |
+|---|---|
+| 复用未命中必告警 | iterate 给了 `base_task_id` 却没复用上 → 一定落 `IMG_REUSE_SKIPPED`，并指出与基座不同的维度（颜色/平台/变体） |
+| 输入校验 | `/admin/tasks?limit=abc` → 422 `IMG_INPUT_INVALID`（过去 500） |
+| SSE 上限 | `IMAGE_SSE_MAX_SECONDS`（默认 300s），覆盖 provider 60s×3 重试 + 反射轮次 |
+| 单点口径 | 终态集合统一 `common.TERMINAL_STATUSES`；身份锁定检查统一 `schemas.identity_missing`（validate 与 Critic 共用） |
+| 折线桶 | 只读窗口内的小时行（`period_key >= 窗口起点`）+ 只取需要的列；`image_usage` 增 `(granularity, period_key)` 与 `(department, period_key)` 索引 |
+| 资产去重 | 参考图/素材图按 `dedupe_key`（`kind\|sha256\|账号\|商品\|颜色`）唯一索引去重，并发写不会产生重复行；`output` / `blocked` 仍是各自成行 |
+
+### 8. LLM / 视觉解析（简历 4.4，默认关闭）
+
+| 变化 | 说明 |
+|---|---|
+| 开关 | `IMAGE_LLM_PARSE_ENABLED`（文本解析，JSON mode）/ `IMAGE_VISION_ENABLED`（Ark 视觉，需 `IMAGE_ARK_API_KEY` + `IMAGE_ARK_VISION_MODEL`） |
+| 收口 | 模型输出一律交给 `schemas.parse_attrs`（容忍 JSON 围栏、schema 不合规退回启发式），`source` 标为 `llm` / `vision` |
+| 降级 | 无 Key / 网络错 / 坏 JSON → 启发式 + `IMG_LLM_PARSE_DEGRADED` / `IMG_VISION_DISABLED` / `IMG_SCHEMA_INVALID`，不阻塞出图 |
+| 用量 | 调用量与 token 进 `image_llm_calls_total` / `image_llm_tokens_total`，五张卡的 `llm_calls` / `llm_tokens` 不再是常量 0 |

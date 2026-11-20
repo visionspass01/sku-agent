@@ -366,10 +366,11 @@ docker compose --env-file .env -f docker/docker-compose.deploy.yml up -d --build
 
 ## 9. 安全建议（上线前）
 
-1. **修改默认密钥**：`AUTH_SECRET`、`PLATFORM_INTERNAL_TOKEN` 必须换随机值
-   （`AUTH_SECRET` 是 HMAC 签名密钥：不换 = 任何人可伪造任意账号的 token）。
-   应用启动时会做默认值校验：仍为公开默认值时会打 `WARNING` 并在 `/api/health.security` 中标记
-   `secret_is_default: true` / `platform_token_is_default: true`，便于上线检查；**这一项仍以部署清单为准**；
+1. **修改默认密钥**：`AUTH_SECRET`、`PLATFORM_INTERNAL_TOKEN`、**`IMAGE_AUTH_SECRET`** 必须换随机值
+   （`AUTH_SECRET` / `IMAGE_AUTH_SECRET` 是 HMAC 签名密钥：不换 = 任何人可伪造任意账号的 token；
+   `IMAGE_AUTH_SECRET` 同时给生图图片的短签名 URL 用——不换等于图片直链也能伪造）。
+   应用启动时会做默认值校验：仍为公开默认值时会打 `WARNING` 并在 `/api/health.security` /
+   `/api/image/health.secret_is_default` 中标记，便于上线检查；**这一项仍以部署清单为准**；
 2. `.env` 权限 `chmod 600`，不要进代码仓库/镜像；**放置位置见第 3 节**（仓库根 + `--env-file .env`，或 `docker/.env`）：放错位置会静默退回 compose 默认值，等于没改密钥；
 3. 500 端口只暴露给需要联调的网络；正式环境建议不开放（Agent 已通过内网访问中台）；
 4. 账号密码为演示账号，正式使用请改为企业 SSO 或接入统一认证并修改 `src/app/auth.py`；
