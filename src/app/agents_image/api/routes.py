@@ -34,6 +34,7 @@ from app.agents_image.api.common import (
 )
 from app.agents_image.api.deps import require_user, trace_id_of
 from app.agents_image.api.library_routes import router as library_router
+from app.agents_image.api.ratelimit import check_rate_limit
 from app.agents_image.api.stream_routes import router as stream_router
 from app.agents_image.config import get_image_settings
 from app.agents_image.dispatch.task_dispatcher import get_dispatcher
@@ -353,6 +354,8 @@ async def create_tasks(request: Request) -> JSONResponse:
     settings = get_image_settings()
     try:
         user = require_user(request)
+        # P1-6（第九轮）：请求级限流（配额按周期，挡不住短时间狂点建任务打爆中台）
+        check_rate_limit(user.username, "create_tasks")
         # P0-2：真实 provider + 单价 0 → 预算闸（按张数估算）会永远不触发，等于没有护栏。
         # 这里在**创建期**直接拒绝，而不是等出完图才发现超预算。
         if str(settings.provider or "").strip().lower() not in {"", "fake"} \

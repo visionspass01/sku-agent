@@ -216,6 +216,9 @@ def _image_context_window(monkeypatch):
     monkeypatch.setenv("IMAGE_CONTEXT_BATCH_WINDOW_SECONDS", "0")
     monkeypatch.setenv("IMAGE_RECOVERY_INTERVAL_SECONDS", "0")
     monkeypatch.setenv("IMAGE_OUTBOX_REPLAY_SECONDS", "0")
+    # 请求级限流（P1-6）默认在测试里关掉：整套用例大量复用 admin 账号打建任务接口，
+    # 60 次/分钟的上限会把无关用例打成 429。专门验证限流的用例自己再打开。
+    monkeypatch.setenv("IMAGE_RATE_LIMIT_ENABLED", "false")
 
 
 def _reset_process_singletons() -> None:

@@ -57,6 +57,8 @@ class ImageSettings(BaseSettings):
     task_lease_seconds: int = Field(default=300, ge=30, le=3600)
     # P1-8：SSE 连接上限（provider 超时 60s × 重试 3 + 反射轮次可能超过 120s）
     sse_max_seconds: int = Field(default=300, ge=30, le=3600)
+    # P1-6（第九轮）：SSE 并发连接数上限（每个连接 3s 轮询一次 DB，不设上限会被放大）
+    sse_max_connections: int = Field(default=32, ge=1, le=1000)
     max_recoveries: int = Field(default=3, ge=1, le=10)  # 同一任务最多被重投几次
     # 排队宽限（第三轮 P0-2）：queued 任务在这段时间内算「刚建、正在被提交」，看门狗不碰；
     # 超过宽限仍未被认领（没有 lease）才可能是孤儿任务
@@ -90,6 +92,10 @@ class ImageSettings(BaseSettings):
     default_quota_period: str = "day"       # day | week | month
     default_quota_images: int = Field(default=50, ge=0, le=100000)
     quota_period_key_rollover: bool = True
+    # P1-6（第九轮）：请求级限流（每账号每分钟）。建任务/素材上传会触发外部调用（中台 MCP），
+    # 光靠配额（按周期）挡不住请求洪峰，所以单独限速。
+    rate_limit_enabled: bool = True
+    rate_limit_per_minute: int = Field(default=60, ge=1, le=100000)
 
     # ---- 参考图三源（W3）：素材库 / 拍立淘 ----
     library_max_mb: float = Field(default=8.0, ge=0.1, le=50.0)   # 素材库单图上限（MB）

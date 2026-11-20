@@ -51,6 +51,10 @@ async def upload_library_image(request: Request) -> JSONResponse:
     trace = trace_id_of(request)
     try:
         user = require_user(request)
+        # P1-6（第九轮）：上传也会写盘+读库，单独限速（与建任务不同 scope）
+        from app.agents_image.api.ratelimit import check_rate_limit
+
+        check_rate_limit(user.username, "library_upload")
         settings = get_image_settings()
         body = await request.json()
         if not isinstance(body, dict):

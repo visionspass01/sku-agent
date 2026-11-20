@@ -37,10 +37,45 @@ _KEEPALIVE_SECONDS = 10
 
 
 def _max_stream_seconds() -> int:
-    """P1-8：SSE 连接上限可配（默认 300s），覆盖 provider 60s×3 重试 + 反射轮次。"""
+    """单连接最长时长（默认 300s）：覆盖 provider 60s×3 重试 + 反射轮次。"""
     from app.agents_image.config import get_image_settings
 
     return int(getattr(get_image_settings(), "sse_max_seconds", 300) or 300)
+
+
+def _sse_limit() -> int:
+    from app.agents_image.config import get_image_settings
+
+    return max(1, int(getattr(get_image_settings(), "sse_max_connections", 32) or 32))
+
+
+_sse_guard: asyncio.Semaphore | None = None
+_sse_guard_limit = 0
+
+
+def _guard() -> asyncio.Semaphore:
+    """SSE 并发连接信号量（P1-6）：每个连接 3s 轮询一次 DB，连接数必须有上限。"""
+    global _sse_guard, _sse_guard_limit
+    limit = _sse_limit()
+    if _sse_guard is None or _sse_guard_limit != limit:
+        _sse_guard = asyncio.Semaphore(limit)
+        _sse_guard_limit = limit
+    return _sse_guard
+
+
+async def _try_acquire(sem: asyncio.Semaphore) -> bool:
+    try:
+        await asyncio.wait_for(sem.acquire(), timeout=0.01)
+        return True
+    except (asyncio.TimeoutError, TimeoutError):
+        return False
+
+
+def reset_sse_guard() -> None:
+    """测试/热重载用：重建信号量（换事件循环时必须重建）。"""
+    global _sse_guard, _sse_guard_limit
+    _sse_guard = None
+    _sse_guard_limit = 0
 
 
 def _snapshot_payload(task) -> dict:
@@ -84,7 +119,11 @@ def _snapshot_payload(task) -> dict:
 
 @router.get("/tasks/{task_id}/stream")
 async def stream_task(task_id: str, request: Request):
-    """SSE：先给快照，再推状态/新图/回写，最后 `done`（终态或超时都会收尾）。"""
+    """SSE：先给快照，再推状态/新图/回写，最后 `done`（终态或超时都会收尾）。
+
+    P1-6（第九轮）：并发连接数有上限（`IMAGE_SSE_MAX_CONNECTIONS`），
+    超限直接 429 `IMG_RATE_LIMITED`，避免连接数把 DB 轮询压力放大。
+    """
     trace = trace_id_of(request)
     try:
         user = require_user(request)
@@ -98,50 +137,65 @@ async def stream_task(task_id: str, request: Request):
     except ImageError as exc:
         return error_response(exc, trace)
 
+    guard = _guard()
+    if not await _try_acquire(guard):
+        return error_response(
+            ImageError("IMG_RATE_LIMITED",
+                       f"SSE 并发连接已达上限（{_sse_limit()}），请稍后重试"), trace)
+
     async def event_stream():
-        seen_assets: set[str] = set()
-        last_status = ""
-        last_keepalive = time.time()
-        started = time.time()
-        max_stream_seconds = _max_stream_seconds()
-        yield sse.sse_event("snapshot", {**snapshot, "trace_id": trace})
-        while True:
-            with session_scope() as session:
-                task = task_store.get_task(session, task_id)
-                if task is None:
-                    yield sse.sse_event("fatal", {"message": f"任务不存在：{task_id}",
-                                                  "error_code": "IMG_TASK_NOT_FOUND",
-                                                  "trace_id": trace, "fatal": True})
-                    return
-                status = task.status
-                state = _snapshot_payload(task)
-                fresh = [asset_payload(asset) for asset in asset_store.list_outputs(session, task_id)
-                         if asset.asset_id not in seen_assets]
-            for item in fresh:
-                seen_assets.add(item["asset_id"])
-                yield sse.sse_event("asset", {**item, "task_id": task_id, "trace_id": trace})
-            if status != last_status:
-                last_status = status
-                yield sse.sse_event("stage", {"status": status, "task_id": task_id,
-                                              "attempts": state["attempts"],
-                                              "trace_id": trace})
-            if status in _TERMINAL:
-                if state["backfill_status"] not in {"", "pending"}:
-                    yield sse.sse_event("backfill", {"status": state["backfill_status"],
-                                                     "task_id": task_id, "trace_id": trace})
-                yield sse.sse_event("done", {**state, "elapsed_ms": int((time.time() - started) * 1000),
-                                             "trace_id": trace})
-                return
-            if time.time() - started > max_stream_seconds:
-                yield sse.sse_event("done", {**state, "timed_out": True,
-                                             "trace_id": trace})
-                return
-            if time.time() - last_keepalive > _KEEPALIVE_SECONDS:
-                last_keepalive = time.time()
-                yield sse.sse_comment("keepalive")
-            await asyncio.sleep(_POLL_SECONDS)
+        """薄包装：保证连接结束（正常/超时/客户端断开）一定释放并发槽位。"""
+        try:
+            async for chunk in _stream_body(task_id, snapshot, trace):
+                yield chunk
+        finally:
+            guard.release()
 
     return sse.sse_response(event_stream())
+
+
+async def _stream_body(task_id: str, snapshot: dict, trace: str):
+    seen_assets: set[str] = set()
+    last_status = ""
+    last_keepalive = time.time()
+    started = time.time()
+    max_stream_seconds = _max_stream_seconds()
+    yield sse.sse_event("snapshot", {**snapshot, "trace_id": trace})
+    while True:
+        with session_scope() as session:
+            task = task_store.get_task(session, task_id)
+            if task is None:
+                yield sse.sse_event("fatal", {"message": f"任务不存在：{task_id}",
+                                              "error_code": "IMG_TASK_NOT_FOUND",
+                                              "trace_id": trace, "fatal": True})
+                return
+            status = task.status
+            state = _snapshot_payload(task)
+            fresh = [asset_payload(asset) for asset in asset_store.list_outputs(session, task_id)
+                     if asset.asset_id not in seen_assets]
+        for item in fresh:
+            seen_assets.add(item["asset_id"])
+            yield sse.sse_event("asset", {**item, "task_id": task_id, "trace_id": trace})
+        if status != last_status:
+            last_status = status
+            yield sse.sse_event("stage", {"status": status, "task_id": task_id,
+                                          "attempts": state["attempts"],
+                                          "trace_id": trace})
+        if status in _TERMINAL:
+            if state["backfill_status"] not in {"", "pending"}:
+                yield sse.sse_event("backfill", {"status": state["backfill_status"],
+                                                 "task_id": task_id, "trace_id": trace})
+            yield sse.sse_event("done", {**state, "elapsed_ms": int((time.time() - started) * 1000),
+                                         "trace_id": trace})
+            return
+        if time.time() - started > max_stream_seconds:
+            yield sse.sse_event("done", {**state, "timed_out": True,
+                                         "trace_id": trace})
+            return
+        if time.time() - last_keepalive > _KEEPALIVE_SECONDS:
+            last_keepalive = time.time()
+            yield sse.sse_comment("keepalive")
+        await asyncio.sleep(_POLL_SECONDS)
 
 
 @router.post("/tasks/{task_id}/cancel")
