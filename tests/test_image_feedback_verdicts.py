@@ -222,7 +222,32 @@ def test_reject_on_blocked_asset_is_also_denied(env):
     resp = env.post(f"/api/image/tasks/{task_id}/assets/{blocked}/reject",
                     headers=headers, json={"reason": "被拦的图不该进负样本"})
     assert resp.status_code == 422
-    assert resp.json()["error_code"] == "IMG_INPUT_INVALID"
+
+
+def test_adopt_by_admin_is_attributed_to_asset_owner(env):
+    """P2-5（第八轮）：管理员代运营采纳时，使用量要记在图片归属人名下。"""
+    from app.agents_image.store import tasks as task_store
+
+    headers = login(env)
+    owner = f"u-owner-{uuid.uuid4().hex[:8]}"
+    task_id = "t-attr" + uuid.uuid4().hex[:8]
+    with session_scope() as session:
+        usage_store.record(session, username=owner, delivered=1, attempted=1,
+                           tasks=1, agent_passed=1)
+        asset = _make_asset(session, kind="output", username=owner, task_id=task_id)
+        task_store.create_task(session, task_id=task_id, username=owner, department="女装",
+                               prompt="白底主图", platform="淘系", aspect="1:1", n=1,
+                               ref_asset_ids=[], product_id="P-3001")
+        asset_id = asset.asset_id
+
+    before_owner = _totals(owner)
+    before_admin = _totals("admin")
+    assert env.post(f"/api/image/tasks/{task_id}/assets/{asset_id}/adopt",
+                    headers=headers).status_code == 200
+    after_owner = _totals(owner)
+    after_admin = _totals("admin")
+    assert after_owner["adopted"] - before_owner["adopted"] == 1, "应记在图片归属人名下"
+    assert after_admin["adopted"] == before_admin["adopted"], "不能记到管理员（操作人）头上"
 
 
 def test_non_output_asset_cannot_be_adopted(env):

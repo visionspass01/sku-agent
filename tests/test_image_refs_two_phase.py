@@ -212,6 +212,24 @@ def test_library_upload_dedupes_same_image(env):
     assert sum(1 for item in listed if item["asset_id"] == first.json()["asset_id"]) == 1
 
 
+def test_library_upload_sniffs_mime_instead_of_trusting_body(env):
+    """P2-6（第八轮）：扩展名/mime 以字节为准——伪造 mime 的假图必须被拒。"""
+    import base64
+
+    headers = login(env)
+    fake = base64.b64encode(b"this-is-not-an-image").decode("ascii")
+    rejected = env.post("/api/image/library", headers=headers,
+                        json={"data_b64": fake, "mime": "image/png"})
+    assert rejected.status_code == 422, rejected.text
+    assert rejected.json()["error_code"] == "IMG_REFERENCE_INVALID"
+
+    real = env.post("/api/image/library", headers=headers,
+                    json={"data_b64": _b64(placeholder_compliant_png("mime", 640, 640)),
+                          "mime": "text/plain"})
+    assert real.status_code == 201, real.text
+    assert real.json()["mime"] == "image/png", "以字节嗅探结果为准，不信任请求里的 mime"
+
+
 # ---------------------------------------------------------------- P2-12：参考图被清理 → 409
 def test_expired_reference_raises_reference_expired(env, monkeypatch):
     headers = login(env)

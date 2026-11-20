@@ -75,8 +75,10 @@ async def upload_library_image(request: Request) -> JSONResponse:
             if used >= limit and not user.is_admin:
                 raise ImageError("IMG_LIBRARY_FULL",
                                  f"素材库已满（每人最多 {limit} 张），请先删除不用的图")
+            # P2-6（第八轮）：**不信任请求里的 mime**，一律按字节嗅探（LocalStore.put 会
+            # sniff_mime，认不出 png/jpeg/webp 就 422），否则伪造扩展名可绕过白名单。
             asset = asset_store.save_bytes(
-                session, raw, kind="library", mime=str(body.get("mime") or ""),
+                session, raw, kind="library", mime="",
                 username=user.username, department=user.department,
                 source="upload",
             )

@@ -77,7 +77,9 @@ def record(session, *, task_id: str, asset_id: str, verdict: str, reason: str = 
     changed = previous != verdict
     if changed:
         reused = (asset.source or "") == REUSE_SOURCE
-        target_user = username or asset.username
+        # P2-5（第八轮）：使用量要记在**图片归属人**名下——管理员代运营采纳时，
+        # 记成操作人会让原主人的上架率一直是 0，而管理员的 adopted 虚增。
+        target_user = asset.username or username
         try:
             from app.agents_image.store import usage as usage_store
 
