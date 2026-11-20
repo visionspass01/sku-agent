@@ -123,17 +123,47 @@ def _ensure_columns(engine) -> list[str]:
     return added
 
 
+def _existing_index_names(conn, table: str, dialect: str) -> set[str]:
+    """当前表上已有的索引名（第六轮 P0-1）。
+
+    为什么要查而不是用 `CREATE INDEX IF NOT EXISTS`：**MySQL 8 不支持该语法**
+    （MariaDB 支持），于是旧实现在 MySQL 上每条索引都报错 → 索引一个都建不上，
+    而且 `_ISSUES` 让 `/health.degraded` 永久为真，真正的降级信号被淹没。
+    这里按方言取"已有索引名"，再普通 CREATE，两端都能跑。
+    """
+    if dialect == "sqlite":
+        rows = conn.execute(text(f"PRAGMA index_list('{table}')")).fetchall()
+        return {str(row[1]) for row in rows}
+    rows = conn.execute(
+        text("SELECT index_name FROM information_schema.statistics "
+             "WHERE table_schema = DATABASE() AND table_name = :table"),
+        {"table": table},
+    ).fetchall()
+    return {str(row[0]) for row in rows}
+
+
+def _duplicate_index_error(exc: BaseException) -> bool:
+    """MySQL 1061 / SQLite "already exists"：并发升级或索引已存在，视为正常。"""
+    text_of = f"{type(exc).__name__}: {exc}"
+    return ("1061" in text_of or "Duplicate key name" in text_of
+            or "already exists" in text_of)
+
+
 def _ensure_indexes(engine) -> list[str]:
     created: list[str] = []
+    dialect = str(getattr(engine.dialect, "name", "") or "")
     for name, table, columns, unique in _INDEXES:
         keyword = "UNIQUE INDEX" if unique else "INDEX"
         try:
             with engine.begin() as conn:
+                if name in _existing_index_names(conn, table, dialect):
+                    continue
                 conn.execute(text(
-                    f"CREATE {keyword} IF NOT EXISTS {name} ON {table} "
-                    f"({', '.join(columns)})"))
+                    f"CREATE {keyword} {name} ON {table} ({', '.join(columns)})"))
             created.append(name)
         except Exception as exc:  # noqa: BLE001 —— 历史数据有重复时唯一索引会失败
+            if _duplicate_index_error(exc):
+                continue
             logger.warning("建索引失败 %s（可能有历史重复数据）：%s", name, exc)
             _ISSUES.append(f"index {name}: {type(exc).__name__}: {exc}"[:200])
     return created
