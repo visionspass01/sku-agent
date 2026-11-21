@@ -8,6 +8,8 @@ data/checkpoints.sqlite*
 .pytest_cache/
 .ruff_cache/
 .coverage
+.coverage.*
+.ci-coverage/
 htmlcov/
 .idea/
 .vscode/

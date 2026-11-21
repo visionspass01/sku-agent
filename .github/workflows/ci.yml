@@ -13,11 +13,14 @@ concurrency:
 env:
   # 脚本（eval_* / verify_stack）按 PYTHONPATH 找包；pytest 自己配了 pythonpath
   PYTHONPATH: ${{ github.workspace }}/src
+  # 覆盖率分片文件：test-sku / test-image 各写一份，coverage-gate 里 combine 后统一卡门槛
+  COVERAGE_FILE: .coverage.default
 
 jobs:
-  test:
+  # ---------------------------------------------------------------- 静态检查 + 前端冒烟（快）
+  lint:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@v4
 
@@ -40,9 +43,134 @@ jobs:
       - name: Compile all sources（语法检查，早于测试快速失败）
         run: python -m compileall -q src scripts
 
-      - name: "Run tests（离线：FakeLLM / MockTransport / fakeredis / qdrant local）+ 覆盖率门槛"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Frontend DOM smoke（SKU 看板）
+        run: node scripts/ui_smoke.js
+
+      - name: Frontend DOM smoke（生图工作台）
+        run: node scripts/ui_smoke_image.js
+
+  # ---------------------------------------------------------------- SKU 侧用例（不含 image_*）
+  test-sku:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      COVERAGE_FILE: .coverage.sku
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
         run: |
-          python -m pytest --cov=src/app --cov-report=term-missing --cov-fail-under=80
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: "SKU 侧用例（离线：FakeLLM / MockTransport / fakeredis / qdrant local）"
+        run: |
+          python -m pytest -q --ignore-glob="tests/test_image_*.py" --cov=src/app --cov-report=
+
+      - name: 上传覆盖率分片
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-sku
+          path: .coverage.sku
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------- 生图 Agent 用例（image_*）
+  test-image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      COVERAGE_FILE: .coverage.image
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: "生图 Agent 用例（fake provider / memory 存储 / 无外网）"
+        run: |
+          python -m pytest -q tests/test_image_*.py --cov=src/app --cov-report=
+
+      - name: 上传覆盖率分片
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-image
+          path: .coverage.image
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------- 覆盖率门槛（合并两个分片）
+  coverage-gate:
+    needs: [test-sku, test-image]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: 汇总两个分片
+        uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-*
+          merge-multiple: true
+          path: .
+
+      - name: 合并 + 覆盖率门槛（≥ 80%，口径不变）
+        run: |
+          python -m coverage combine
+          python -m coverage report --fail-under=80 --show-missing
+
+  # ---------------------------------------------------------------- 评测/自检门槛（需要初始化演示库）
+  eval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-dev.txt
 
       # 检索评测读的是真实库里的 kb_chunk（知识库索引），全新 checkout 里还没有这张表，
       # 所以先跑一次初始化（建表 + 300 SKU + KB 索引；data/ 是 gitignored，不会污染仓库）。
@@ -73,18 +201,11 @@ jobs:
       - name: 并发写自检（两个 agent 写同一份档案不静默覆盖）
         run: python scripts/verify_concurrent_writes.py
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: Frontend DOM smoke (no browser required)
-        run: node scripts/ui_smoke.js
-
   # 生产数据库分支：CI 只跑 SQLite 的话，MySQL 方言（ensure_columns 的 CREATE INDEX、
   # utf8mb4、事务隔离）从来没被验证过。这里用 service container 跑关键子集。
   mysql:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 20
     services:
       mysql:
         image: mysql:8.0
