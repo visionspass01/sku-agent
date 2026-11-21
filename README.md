@@ -491,7 +491,7 @@ PYTHONPATH=src python scripts/smoke_image_service.py --app http://127.0.0.1:8021
 
 ---
 
-## v7：面试评审后的修复与新增（生图 Agent）
+## v7：评审后的修复与新增（生图 Agent）
 
 评审发现的问题（P0/P1/P2）已全部处理，另按参考仓库 `04_Product_Image_Agent` 补了四项能力。
 

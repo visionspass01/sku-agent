@@ -1,6 +1,6 @@
 """分析线程持久化（checkpointer）+ 线程上限淘汰 + 注销 token 持久化。
 
-对应面试审查发现的两个 P0：
+对应评审发现的两个 P0：
 1. 原来用 MemorySaver：进程重启后追问 404；线程无上限（trim_threads 从未被调用）；
 2. 原来注销 token 只写进程内 dict：重启后旧 token "复活"。
 """

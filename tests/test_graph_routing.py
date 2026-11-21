@@ -1,7 +1,7 @@
 """Supervisor 路由是否真实生效：未派发的 source 不发起 MCP 调用。
 
 背景：重构前三路 `Send` 恒 fan-out（LangGraph join 语义），"按需派发"只在节点内部跳过，
-从 trace 与调用次数上都看不出路由是否真的生效，面试时无法自证。
+从 trace 与调用次数上都看不出路由是否真的生效，评审时无法自证。
 改成 `collector` 单节点内按 `tasks` 并发采集后，`tasks=["erp"]` 时竞品工具调用数必须为 0。
 """
 

@@ -1,6 +1,6 @@
 """LangGraph 主图装配：Supervisor → 并发采集（collector）→ Skill 子图 → 预案生成 → 校验回路。
 
-对应简历：Supervisor 决定采集子集（ERP 必选，竞品/SOP 可选），collector 节点内并发执行；
+设计对应：Supervisor 决定采集子集（ERP 必选，竞品/SOP 可选），collector 节点内并发执行；
 Skill 子图（补货测算/库存研判）状态隔离可复用；校验 Agent 检查预案合规与 SOP；
 checkpointer 支持同一分析 thread 的多轮追问（复用上一轮采集数据）。
 """

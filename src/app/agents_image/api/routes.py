@@ -172,7 +172,7 @@ def _department_health() -> dict:
 
 @router.get("/metrics", include_in_schema=False)
 def image_metrics_endpoint(request: Request):
-    """Prometheus text format（P1-7 / 简历 4.5）。
+    """Prometheus text format（P1-7 / 指标 4.5）。
 
     鉴权策略（决策 D5）：默认公开只读数值；配置了 `IMAGE_METRICS_TOKEN` 就要求 Bearer，
     方便部署时用 nginx / Prometheus 的 basic auth 之外再加一层。

@@ -49,7 +49,7 @@ services:
       PLATFORM_RATE_LIMIT_PER_MINUTE: "600"
       # 想复用 Agent 演示库（仅本地便利）：PLATFORM_SOURCE_DB=/app/data/sku_demo.db
       PLATFORM_SOURCE_DB: ""
-      # 中台库同样默认走 MySQL（compose 内网地址），保证「部署态 = 面试官看到的样子」
+      # 中台库同样默认走 MySQL（compose 内网地址），保证「部署态 = 验收时看到的样子」
       PLATFORM_DB_URL: ${PLATFORM_DB_URL:-mysql+pymysql://sku:sku@mysql:3306/platform?charset=utf8mb4}
       PYTHONPATH: /app/src
     ports:

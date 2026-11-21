@@ -1,4 +1,4 @@
-"""巡检任务队列：Redis Stream + 消费组 + 幂等去重（对应简历「Redis Stream 幂等/批量消费」）。"""
+"""巡检任务队列：Redis Stream + 消费组 + 幂等去重（Redis Stream 幂等 + 批量消费）。"""
 
 from __future__ import annotations
 

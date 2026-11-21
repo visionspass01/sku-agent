@@ -1,4 +1,4 @@
-"""第五轮 W7：观测导出 + LLM 解析接线（P1-7 / 简历 4.5、4.4）。
+"""第五轮 W7：观测导出 + LLM 解析接线（P1-7 / 指标 4.5、4.4）。
 
 - `/api/image/metrics` 输出 Prometheus text format（零依赖渲染器，装了官方库可自动切换）；
 - 可选 `IMAGE_METRICS_TOKEN` 做 Bearer 鉴权（默认公开只读数值）；

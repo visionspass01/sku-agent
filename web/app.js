@@ -1993,7 +1993,7 @@ function refsSection(detail) {
 }
 
 // 出口溯源自检（grounding）：状态 + 问题 + 引用/数字统计。
-// 面试视角：这里把「数字为什么可信」变成可检查的字段，而不是一句「prompt 里要求了」。
+// 审阅视角：这里把「数字为什么可信」变成可检查的字段，而不是一句「prompt 里要求了」。
 const GROUNDING_LABELS = {
   passed: "通过（每个带单位的数字都能追溯到 result_id）",
   skipped: "跳过（本轮没有调用工具，无取数结果可对齐）",

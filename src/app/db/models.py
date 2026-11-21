@@ -1,7 +1,7 @@
 """数据模型（SQLAlchemy 2.0）。
 
 设计要点：
-- `stat_hour` 是简历中的「小时快照表」，按 (stat_hour, sku_id) 建联合索引；
+- `stat_hour` 是需求中的「小时快照表」，按 (stat_hour, sku_id) 建联合索引；
 - 本地 SQLite / docker 内 MySQL 共用同一套 metadata（表名、字段、索引一致）；
 - JSON 列直接使用 SQLAlchemy JSON 类型，SQLite/MySQL 均可存储。
 """

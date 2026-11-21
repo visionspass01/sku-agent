@@ -1,7 +1,7 @@
 """Skill 子图 1：库存研判（LangGraph SubGraph，状态隔离、纯计算、可单测）。
 
 输入：ERP/拍立淘 MCP 拉回的数据包；输出：可售天数、健康度、风险标签。
-主图只消费 judgment 结果，不感知内部实现——对应简历「子图封装业务技能」。
+主图只消费 judgment 结果，不感知内部实现——（子图封装业务技能）。
 """
 
 from __future__ import annotations

@@ -467,7 +467,7 @@ MCP server 现在**不碰任何数据库**：它们是「工具名 → `/api/v1/
 | 稳定哈希 | 向量桶改 blake2b：跨进程/重启召回结果一致（过去受 `PYTHONHASHSEED` 影响） |
 | 共享缓存 | 召回缓存走 Redis（未配置时 fakeredis 自动降级），`/health.cache_backend` 暴露后端；登录限流仍是进程内（`throttle_scope=instance`，多副本各自计数） |
 
-### 6. 观测（P1-7 / 简历 4.5）
+### 6. 观测（P1-7 / 指标 4.5）
 
 | 变化 | 说明 |
 |---|---|
@@ -486,7 +486,7 @@ MCP server 现在**不碰任何数据库**：它们是「工具名 → `/api/v1/
 | 折线桶 | 只读窗口内的小时行（`period_key >= 窗口起点`）+ 只取需要的列；`image_usage` 增 `(granularity, period_key)` 与 `(department, period_key)` 索引 |
 | 资产去重 | 参考图/素材图按 `dedupe_key`（`kind\|sha256\|账号\|商品\|颜色`）唯一索引去重，并发写不会产生重复行；`output` / `blocked` 仍是各自成行 |
 
-### 8. LLM / 视觉解析（简历 4.4，默认关闭）
+### 8. LLM / 视觉解析（指标 4.4，默认关闭）
 
 | 变化 | 说明 |
 |---|---|

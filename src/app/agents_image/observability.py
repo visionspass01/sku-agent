@@ -1,6 +1,6 @@
 """`/api/image/metrics`：把生图链路的计数器与阶段耗时导出成 **Prometheus text format**。
 
-第五轮 P1-7 / 简历 4.5：
+第五轮 P1-7 / 指标 4.5：
 - 生图 Agent 过去只有"进程内计数 + health JSON"，没有可被 Prometheus 抓取的端点；
 - 这里实现零依赖的 text format 渲染器（`# HELP` / `# TYPE` + 样本行），格式与
   `prometheus_client.generate_latest()` 兼容；若环境里装了 `prometheus_client`，

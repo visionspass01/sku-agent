@@ -1,4 +1,4 @@
-"""TTL 缓存：带随机偏移的旁路缓存（对应简历「Redis 缓存雪崩优化」）。
+"""TTL 缓存：带随机偏移的旁路缓存（Redis 缓存雪崩优化）。
 
 关键设计：
 - TTL 随机偏移 TTL_eff = TTL * (1 + uniform(0, jitter_ratio))，避免大量 key 同一秒过期；
