@@ -13,8 +13,10 @@ concurrency:
 env:
   # 脚本（eval_* / verify_stack）按 PYTHONPATH 找包；pytest 自己配了 pythonpath
   PYTHONPATH: ${{ github.workspace }}/src
-  # 覆盖率分片文件：test-sku / test-image 各写一份，coverage-gate 里 combine 后统一卡门槛
-  COVERAGE_FILE: .coverage.default
+  # 注意：这里**不要**设 COVERAGE_FILE。覆盖率分片名由两个测试 job 各自指定
+  # （.coverage.sku / .coverage.image），coverage-gate 里 `coverage combine` 按默认的
+  # `.coverage.*` 前缀来找分片；一旦全局设了 COVERAGE_FILE，combine 会去找
+  # `.coverage.default.*`，找不到分片直接 --fail-under 失败。
 
 jobs:
   # ---------------------------------------------------------------- 静态检查 + 前端冒烟（快）
@@ -164,8 +166,13 @@ jobs:
 
       - name: 合并 + 覆盖率门槛（≥ 80%，口径不变）
         run: |
-          python -m coverage combine
-          python -m coverage report --fail-under=80 --show-missing
+          set -o pipefail
+          ls -l .coverage* || true
+          { python -m coverage combine && python -m coverage report --fail-under=80 --show-missing; } \
+            2>&1 | tee coverage-gate.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then python scripts/ci_annotate.py coverage-gate.log; fi
+          exit "$status"
 
   # ---------------------------------------------------------------- 评测/自检门槛（需要初始化演示库）
   eval:
