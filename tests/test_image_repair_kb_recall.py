@@ -82,10 +82,16 @@ def test_rag_disabled_skips_kb_repair_retrieval(monkeypatch):
     上一版只有 `_recall_for_slots` 看这个开关，关掉 RAG 的部署里 Critic 失败仍会打 KB，
     行为与开关承诺不一致；记忆（不是 RAG）不受影响。
     """
+    import threading
+
     calls = {"n": 0}
+    mine = threading.get_ident()
 
     def _spy(*args, **kwargs):  # noqa: ANN002, ANN003
-        calls["n"] += 1
+        # 只数**本测试线程**里的调用：前序用例留下的后台生成任务也会走 RAG 召回，
+        # 但它们跑在 app 的事件循环线程里（第十二轮 CI 稳定化）。
+        if threading.get_ident() == mine:
+            calls["n"] += 1
         return []
 
     from app.agents_image.config import get_image_settings

@@ -500,49 +500,54 @@ def test_p2_4_login_throttle_prunes_stale_keys():
 
 # ---------------------------------------------------------------- P2-5
 def test_p2_5_catalog_reads_run_concurrently(env, monkeypatch):
+    """/catalog 的四个上游调用必须**并发**发出（用峰值并发数判定，不依赖墙钟）。"""
+    import asyncio
+
     from app.agents_image.sources.fake_catalog import FakeCatalog
 
-    class _SlowCatalog(FakeCatalog):
-        name = "slow-catalog"
+    class _ProbeCatalog(FakeCatalog):
+        name = "probe-catalog"
 
-        async def get_platform_rules(self, *, platform="淘系"):
-            await asyncio.sleep(0.08)
-            return await super().get_platform_rules(platform=platform)
+        def __init__(self) -> None:
+            super().__init__()
+            self.in_flight = 0
+            self.peak = 0
 
-        async def get_plan_policy(self, *, platform="淘系", category=""):
-            await asyncio.sleep(0.08)
-            return await super().get_plan_policy(platform=platform, category=category)
+        async def _run(self, call):  # noqa: ANN001, ANN202
+            self.in_flight += 1
+            self.peak = max(self.peak, self.in_flight)
+            try:
+                await asyncio.sleep(0.05)
+                return await call()
+            finally:
+                self.in_flight -= 1
 
-        async def list_compositions(self, *, category="", platform="淘系"):
-            await asyncio.sleep(0.08)
-            return await super().list_compositions(category=category, platform=platform)
+        async def get_platform_rules(self, *, platform="淘系", **kwargs):  # noqa: ANN001
+            return await self._run(lambda: super(_ProbeCatalog, self)
+                                   .get_platform_rules(platform=platform))
 
-        async def list_scene_styles(self, *, category="", platform="淘系"):
-            await asyncio.sleep(0.08)
-            return await super().list_scene_styles(category=category, platform=platform)
+        async def get_plan_policy(self, *, platform="淘系", category="", **kwargs):  # noqa: ANN001
+            return await self._run(lambda: super(_ProbeCatalog, self)
+                                   .get_plan_policy(platform=platform, category=category))
 
-    monkeypatch.setattr("app.agents_image.sources.product_source.get_catalog",
-                        lambda *a, **k: _SlowCatalog())
+        async def list_compositions(self, *, category="", platform="淘系", **kwargs):  # noqa: ANN001
+            return await self._run(lambda: super(_ProbeCatalog, self)
+                                   .list_compositions(category=category, platform=platform))
+
+        async def list_scene_styles(self, *, category="", platform="淘系", **kwargs):  # noqa: ANN001
+            return await self._run(lambda: super(_ProbeCatalog, self)
+                                   .list_scene_styles(category=category, platform=platform))
+
+    catalog = _ProbeCatalog()
     from app.agents_image.api import routes as routes_mod
 
+    monkeypatch.setattr(routes_mod, "get_catalog", lambda *a, **k: catalog)
     headers = login(env)
-    # 基线：用不注入延迟的默认 catalog 走一遍同一接口（把 HTTP/认证的固定开销扣掉）
-    monkeypatch.setattr(routes_mod, "get_catalog", lambda *a, **k: FakeCatalog())
-    baseline_started = time.monotonic()
-    base_resp = env.get("/api/image/catalog", headers=headers)
-    baseline = time.monotonic() - baseline_started
-    assert base_resp.status_code == 200, base_resp.text
-
-    monkeypatch.setattr(routes_mod, "get_catalog", lambda *a, **k: _SlowCatalog())
-    started = time.monotonic()
     resp = env.get("/api/image/catalog", headers=headers)
-    elapsed = time.monotonic() - started
     assert resp.status_code == 200, resp.text
-    # 四个 0.08s 的延迟：串行 ≈ +0.32s，并发 ≈ +0.08s
-    assert elapsed - baseline < 0.2, f"四个上游调用仍串行（增量 {elapsed - baseline:.2f}s）"
+    assert catalog.peak >= 2, f"四个上游调用仍是串行（峰值并发 {catalog.peak}）"
 
 
-# ---------------------------------------------------------------- P2-6
 def test_p2_6_library_limit_is_enforced_atomically(env, monkeypatch):
     from app.agents_image.png import placeholder_png
     from app.agents_image.store import assets as asset_store

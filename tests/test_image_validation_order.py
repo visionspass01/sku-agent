@@ -115,21 +115,34 @@ def test_validation_runs_before_generation(env, monkeypatch):
 
 
 def test_validation_failure_after_generation_keeps_attempted_and_cost(env, monkeypatch):
-    """第二轮（Reflexion 之后）校验失败：上一轮已生成的张数与发起量必须记账。"""
+    """第二轮（Reflexion 之后）校验失败：上一轮已生成的张数与发起量必须记账。
+
+    第十二轮：provider 换成**函数级注入**（`handler.get_provider` 直接返回一个实例），
+    不再改 `FakeProvider` 的类方法——类方法补丁在整套用例里会被别的用例交叉影响，
+    表现为"第一轮成了 done"的偶发失败。
+    """
+    from app.agents_image.generator import handler as generator_handler
     from app.agents_image.providers.fake import FakeProvider
 
-    real_generate = FakeProvider.generate
     state = {"calls": 0}
 
-    async def first_round_wrong_aspect(self, req):
-        state["calls"] += 1
-        if state["calls"] == 1:
-            bad = placeholder_png("bad", 640, 360)      # 16:9，与 1:1 不符 → Critic 失败
-            return ImageResult(images=[bad], mime="image/png", provider="fake",
-                               model="bad-aspect", cost_cny=0.4, latency_ms=1)
-        return await real_generate(self, req)
+    class _AspectProvider:
+        name = "fake"
+        caps = FakeProvider.caps
 
-    monkeypatch.setattr(FakeProvider, "generate", first_round_wrong_aspect)
+        async def generate(self, req):  # noqa: ANN001
+            state["calls"] += 1
+            if state["calls"] == 1:
+                bad = placeholder_png("bad", 640, 360)      # 16:9，与 1:1 不符 → Critic 失败
+                return ImageResult(images=[bad], mime="image/png", provider="fake",
+                                   model="bad-aspect", cost_cny=0.4, latency_ms=1)
+            return await FakeProvider().generate(req)
+
+        async def health(self) -> dict:
+            return {"ok": True, "provider": "fake"}
+
+    monkeypatch.setattr(generator_handler, "get_provider",
+                        lambda name=None: _AspectProvider())
 
     from app.agents_image import graph as graph_mod
 
