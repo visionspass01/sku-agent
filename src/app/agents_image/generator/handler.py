@@ -200,7 +200,10 @@ async def _generate_with_retry(provider, request, *, deadline_at: float = 0.0) -
 
 
 async def run(payload: dict[str, Any], *, on_slot=None) -> dict[str, Any]:
-    """payload 见 `local_generator._payload_for_task()`；返回 {slots: [...], provider, model}。
+    """payload 由编排层 `graph._generate_or_attach_partial()` 组装；返回 {slots: [...], provider, model}。
+
+    独立 worker（可单独跑成 HTTP 服务 / SCF 函数）的入参契约见
+    `app/agents_image/worker/contract.py`（worker 把这一层调用包成可跨进程的服务）。
 
     `on_slot`（P1-1，第十一轮）：每个图位成功后回调一次（累计发起量/已生成张数/已发生成本），
     让编排层把"已经花掉的钱"**增量落库**。handler 本身仍然不碰数据库（可独立打 SCF 包），

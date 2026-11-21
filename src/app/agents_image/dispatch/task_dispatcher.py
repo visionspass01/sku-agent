@@ -32,9 +32,10 @@ def get_dispatcher(name: str | None = None) -> TaskDispatcher:
             _INSTANCES[key] = LocalGenerator()
         return _INSTANCES[key]
     if key == "scf":
+        # 说明：目前只有协议位，没有 SCF 适配器实现（本轮改造会补齐）。
+        # 文案不再指代不存在的文件，避免误导排障。
         raise_image("IMG_PROVIDER_UNAVAILABLE",
-                    "SCF 调度器只保留接口（adapter 在 dispatch/scf.py），当前里程碑未启用；"
-                    "请把 IMAGE_DISPATCHER 设为 local")
+                    "SCF 调度器尚未实现（当前请把 IMAGE_DISPATCHER 设为 local）")
     raise_image("IMG_PROVIDER_UNAVAILABLE", f"未知的调度器：{key}")
 
 
