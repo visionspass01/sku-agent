@@ -151,8 +151,17 @@ def bind_refs_to_task(session, asset_ids: list[str], task_id: str) -> int:
 
 
 def read_asset_bytes(asset: ImageAsset) -> bytes:
-    """读取资产内容（本地存储 / COS 同接口）。"""
-    return get_storage(asset.storage).get(asset.key)
+    """读取资产内容：本地存储 / COS / 中台文件夹都走同一入口。
+
+    第十二轮：remote 模式下图片不在本机，`storage=cos|platform` 时交给 worker 侧的
+    存储后端去取（`/api/image/assets/{id}` 因此可以透明代读，前端不用关心落点）。
+    """
+    backend = str(getattr(asset, "storage", "") or "local").strip().lower()
+    if backend in {"", "local"}:
+        return get_storage("local").get(asset.key)
+    from app.agents_image.worker.storage import get_storage as worker_storage
+
+    return worker_storage(backend).get(asset.key)
 
 
 def require_asset(session, asset_id: str) -> ImageAsset:

@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import datetime as dt
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response
@@ -19,7 +20,14 @@ from sqlalchemy import select
 from data_platform import image_mock
 from data_platform.api import image_schemas as isc
 from data_platform.api.authz import require_scope, resolve_principal
-from data_platform.config import department_of
+from data_platform.config import (
+    IMAGE_RESULT_MAX_MB,
+    IMAGE_RESULT_PREFIX,
+    IMAGE_RESULT_URL_TTL,
+    IMAGE_STORE_DIR,
+    INTERNAL_TOKEN,
+    department_of,
+)
 from data_platform.db import ImageCatalog, ImageRequest, ImageResult, session_scope
 
 router = APIRouter(prefix="/api/v1/image", tags=["image"])
@@ -335,4 +343,164 @@ def list_results(product_id: str = Query(default=""),
     return isc.ResultListOut(product_id=product_id, items=items, count=len(items))
 
 
-__all__ = ["router"]
+__all__ = ["router", "binary_asset_endpoint", "result_asset_endpoint"]
+
+# ---------------------------------------------------------------- 结果图片落库（第十二轮）
+# 生图 Agent 的独立 worker 把图片存进中台的"指定文件夹"，并从这里拿回 `storage_key`；
+# 读取走短签名 URL（HMAC，`PLATFORM_IMAGE_RESULT_URL_TTL` 秒），前端 <img> 直接可用。
+_EXT = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}
+
+
+def _sniff_mime(raw: bytes) -> str:
+    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if raw.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+        return "image/webp"
+    return ""
+
+
+def _image_size(raw: bytes) -> tuple[int, int]:
+    try:
+        if raw.startswith(b"\x89PNG\r\n\x1a\n") and len(raw) >= 24:
+            return int.from_bytes(raw[16:20], "big"), int.from_bytes(raw[20:24], "big")
+        if raw.startswith(b"\xff\xd8\xff"):
+            idx = 2
+            while idx + 9 < len(raw):
+                if raw[idx] != 0xFF:
+                    idx += 1
+                    continue
+                marker = raw[idx + 1]
+                if marker in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB):
+                    return (int.from_bytes(raw[idx + 7:idx + 9], "big"),
+                            int.from_bytes(raw[idx + 5:idx + 7], "big"))
+                idx += 2 + int.from_bytes(raw[idx + 2:idx + 4], "big")
+        if raw[:4] == b"RIFF" and raw[8:12] == b"WEBP" and len(raw) >= 30:
+            if raw[12:16] == b"VP8X":
+                return (int.from_bytes(raw[24:27], "little") + 1,
+                        int.from_bytes(raw[27:30], "little") + 1)
+            if raw[12:16] == b"VP8 ":
+                return (int.from_bytes(raw[26:28], "little") & 0x3FFF,
+                        int.from_bytes(raw[28:30], "little") & 0x3FFF)
+    except Exception:  # noqa: BLE001 —— 头部损坏按未知尺寸处理
+        return 0, 0
+    return 0, 0
+
+
+def _store_path(key: str) -> Path:
+    root = IMAGE_STORE_DIR.resolve()
+    target = (root / key).resolve()
+    if not str(target).startswith(str(root)):
+        raise HTTPException(status_code=400, detail="非法的 storage_key")
+    return target
+
+
+def _sign(key: str, exp: int) -> str:
+    import hashlib
+    import hmac
+
+    body = f"{key}:{int(exp)}"
+    return hmac.new(INTERNAL_TOKEN.encode("utf-8"), body.encode("utf-8"),
+                    hashlib.sha256).hexdigest()[:32]
+
+
+def result_asset_url(key: str, *, ttl: int | None = None) -> tuple[str, str]:
+    """短签名 URL（相对路径）+ 过期时间（ISO），供 Agent 侧拼接/展示。"""
+    expire_at = dt.datetime.now() + dt.timedelta(seconds=int(ttl or IMAGE_RESULT_URL_TTL))
+    exp = int(expire_at.timestamp())
+    return (f"/api/v1/image/results/assets/{key}?exp={exp}&sig={_sign(key, exp)}",
+            expire_at.isoformat(timespec="seconds"))
+
+
+@router.post("/results/{task_id}/{slot}/binary",
+             dependencies=[Depends(require_scope("write"))])
+async def upload_result_binary(task_id: str, slot: int, request: Request) -> dict:
+    """**把结果图片的二进制存进中台**（`data/platform/images/results/<task_id>/`）。
+
+    同 `(task_id, slot)` 重复上传按内容幂等：key 里带 sha 前缀，同内容覆盖同一文件，
+    行上的 `sha256/storage_key/storage_url_expire_at` 一起更新。
+    """
+    raw = await request.body()
+    if not raw:
+        raise HTTPException(status_code=400, detail="空图片内容")
+    limit = int(IMAGE_RESULT_MAX_MB * 1024 * 1024)
+    if len(raw) > limit:
+        raise HTTPException(status_code=413, detail=f"图片超过中台上限 {IMAGE_RESULT_MAX_MB}MB")
+    mime = _sniff_mime(raw)
+    if mime not in _EXT:
+        raise HTTPException(status_code=415, detail="只接受 png/jpeg/webp（按字节嗅探）")
+    import hashlib
+
+    digest = hashlib.sha256(raw).hexdigest()
+    kind = (request.headers.get("X-Image-Kind") or "output").strip().lower()
+    prefix = (request.headers.get("X-Storage-Prefix") or IMAGE_RESULT_PREFIX).strip() or \
+        IMAGE_RESULT_PREFIX
+    folder = f"{prefix}/blocked" if kind == "blocked" else prefix
+    key = f"{folder}/{task_id}/slot{int(slot)}-{digest[:12]}.{_EXT[mime]}"
+    path = _store_path(key)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{digest[:8]}.tmp")
+    tmp.write_bytes(raw)
+    tmp.replace(path)
+    width, height = _image_size(raw)
+    url, expire_at = result_asset_url(key)
+    expire_dt = dt.datetime.fromisoformat(expire_at)
+    with session_scope() as session:
+        existing = session.execute(
+            select(ImageResult).where(ImageResult.task_id == task_id,
+                                      ImageResult.slot == int(slot))
+        ).scalars().first()
+        row = existing or ImageResult()
+        row.task_id = task_id
+        row.slot = int(slot)
+        row.storage = "platform"
+        row.storage_key = key
+        row.sha256 = digest
+        row.mime = mime
+        row.width = width
+        row.height = height
+        row.bytes = len(raw)
+        row.storage_url_expire_at = expire_dt
+        row.status = "blocked" if kind == "blocked" else "done"
+        if existing is None:
+            row.created_at = dt.datetime.now()
+            session.add(row)
+        session.flush()
+    request.state.audit_detail = f"image.binary task={task_id} slot={slot} bytes={len(raw)}"
+    return {"storage": "platform", "storage_key": key, "sha256": digest, "mime": mime,
+            "bytes": len(raw), "width": width, "height": height,
+            "url": url, "expire_at": expire_at}
+
+
+@router.get("/results/assets/{key:path}")
+def result_asset_endpoint(request: Request, key: str, exp: str = "", sig: str = ""):
+    """读结果图片：优先验短签名（前端 <img> 用）；没有签名时要求 Bearer + read scope。"""
+    import hmac
+    import time
+
+    key = str(key or "").lstrip("/")
+    if sig:
+        try:
+            moment = int(exp or 0)
+        except ValueError:
+            return Response(status_code=403, content=b"")
+        if moment < int(time.time()):
+            return Response(status_code=403, content=b"")
+        if not hmac.compare_digest(_sign(key, moment), sig or ""):
+            return Response(status_code=403, content=b"")
+    else:
+        principal = resolve_principal(request)
+        if principal is None:
+            return Response(status_code=401, content=b"")
+        if not principal.has("read"):
+            return Response(status_code=403, content=b"")
+    path = _store_path(key)
+    if not path.is_file():
+        return Response(status_code=404, content=b"")
+    suffix = path.suffix.lstrip(".").lower()
+    media = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+             "webp": "image/webp"}.get(suffix, "application/octet-stream")
+    return Response(content=path.read_bytes(), media_type=media,
+                    headers={"Cache-Control": "private, max-age=60"})
+

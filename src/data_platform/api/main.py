@@ -30,6 +30,13 @@ from data_platform.db import init_schema
 
 # 探活接口不要求令牌：compose healthcheck 与 Agent 启动预热都用它
 PUBLIC_PATHS = frozenset({"/api/v1/health"})
+# 结果图片的**短签名**读取（第十二轮）：`<img src>` 带不了 Bearer，鉴权由 URL 里的
+# `exp + sig`（HMAC，PLATFORM_INTERNAL_TOKEN 派生）承担，验签在端点内部完成。
+_PUBLIC_PREFIXES = ("/api/v1/image/results/assets/",)
+
+
+def _is_public(path: str) -> bool:
+    return path in PUBLIC_PATHS or any(path.startswith(prefix) for prefix in _PUBLIC_PREFIXES)
 
 # 声明式调用方标识的合法形态（共享令牌时才允许用它归因，见 `_audit_agent_id`）
 _DECLARED_AGENT_RE = re.compile(r"^[a-z][a-z0-9_-]{1,31}$")
@@ -87,7 +94,7 @@ async def governance(request: Request, call_next):
     request.state.request_id = request_id
     path = request.url.path
     is_api = path.startswith("/api/v1/")
-    public = path in PUBLIC_PATHS
+    public = _is_public(path)
 
     principal = resolve_principal(request) if is_api else None
     if is_api and not public:
@@ -154,7 +161,7 @@ def _finish(request: Request, response, started: float, request_id: str, *, agen
             headers["X-Platform-Contract-Warning"] = (
                 f"调用方契约 {client_version} 与中台 {CONTRACT_VERSION} 主版本不一致"
             )
-    if request.url.path.startswith("/api/v1/") and request.url.path not in PUBLIC_PATHS:
+    if request.url.path.startswith("/api/v1/") and not _is_public(request.url.path):
         if not decision:
             if status == 401:
                 decision = "unauthenticated"

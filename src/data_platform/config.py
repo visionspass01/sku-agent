@@ -19,6 +19,15 @@ SOURCE_DB = Path(os.getenv("PLATFORM_SOURCE_DB", "").strip()) if os.getenv(
 API_PORT = int(os.getenv("PLATFORM_API_PORT", "8001"))
 INTERNAL_TOKEN = os.getenv("PLATFORM_INTERNAL_TOKEN", "demo-internal-token")
 
+# ---------------------------------------------------------------- 生图结果落库（第十二轮）
+# 生图 Agent 的独立 worker 把图片**存进中台的指定文件夹**，并把路径交回 Agent；
+# 中台负责保管二进制 + 给出短签名读取 URL（前端 <img> 直接用）。
+IMAGE_STORE_DIR = Path(os.getenv("PLATFORM_IMAGE_STORE_DIR", "").strip()) \
+    if os.getenv("PLATFORM_IMAGE_STORE_DIR", "").strip() else DATA_DIR / "images"
+IMAGE_RESULT_PREFIX = os.getenv("PLATFORM_IMAGE_RESULT_PREFIX", "results").strip() or "results"
+IMAGE_RESULT_MAX_MB = float(os.getenv("PLATFORM_IMAGE_RESULT_MAX_MB", "8"))
+IMAGE_RESULT_URL_TTL = int(os.getenv("PLATFORM_IMAGE_RESULT_URL_TTL", "3600"))
+
 # ---------------------------------------------------------------- 多 Agent 治理（身份/作用域/配额）
 # PLATFORM_API_KEYS 用 JSON 配多个调用方：key → scopes / departments / rate_limit。
 # 例：{"sku-agent": {"key": "k-xxx", "scopes": ["read","write","approve"], "departments": null}}

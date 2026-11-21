@@ -251,11 +251,14 @@ class PlatformStorage:
             "X-Content-Sha256": digest,
         })
         width, height = image_size(data)
+        url = str(body.get("url") or "")
+        if url.startswith("/"):            # 中台返回的是相对路径 → 拼成 Agent 可直接访问的绝对 URL
+            url = f"{self.base_url}{url}"
         return StoredObject(
             storage=self.name, key=str(body.get("storage_key") or ""), sha256=digest,
             mime=mime, width=int(body.get("width") or width),
             height=int(body.get("height") or height), bytes=len(data),
-            url=str(body.get("url") or ""), url_expire_at=str(body.get("expire_at") or ""))
+            url=url, url_expire_at=str(body.get("expire_at") or ""))
 
     def put(self, data: bytes, *, kind: str = "output", mime: str = "",
             task_id: str = "", slot: int = 0, prefix: str = "") -> StoredObject:
@@ -266,9 +269,14 @@ class PlatformStorage:
                                           slot=slot, prefix=prefix))
 
     async def get_async(self, key: str) -> bytes:
+        url = str(key or "")
+        if not url.startswith("http"):
+            # 传进来的是 storage_key（`results/<task>/slot...`）：走中台的结果资产读取接口，
+            # 用 Bearer 令牌鉴权（前端走的是短签名 URL，见 `put_async` 返回的 url）。
+            url = (f"{self.base_url}/api/v1/image/results/assets/"
+                   f"{url.lstrip('/')}")
         import httpx
 
-        url = key if str(key or "").startswith("http") else f"{self.base_url}{key}"
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 resp = await client.get(url, headers={"X-Internal-Token": self.token})
