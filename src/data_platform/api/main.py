@@ -191,6 +191,10 @@ app.include_router(image_router)
 from starlette.routing import Route as _StarletteRoute  # noqa: E402
 
 from data_platform.api.image_routes import binary_asset_endpoint as _binary_asset  # noqa: E402
+from data_platform.api.image_routes import result_asset_endpoint as _result_asset  # noqa: E402
 
 app.router.routes.append(_StarletteRoute(
     "/api/v1/image/assets/{image_id}.png", _binary_asset, methods=["GET"]))
+# 生图结果图（短签名或 Bearer+read）：同样是二进制响应，不进 Envelope 契约
+app.router.routes.append(_StarletteRoute(
+    "/api/v1/image/results/assets/{key:path}", _result_asset, methods=["GET"]))

@@ -223,3 +223,17 @@ class ResultListOut(Envelope):
     product_id: str = ""
     items: list[ResultRowOut] = Field(default_factory=list)
     count: int = 0
+
+
+class ResultBinaryOut(Envelope):
+    """结果图片二进制落库的回执（第十二轮：worker → 中台文件夹 → 路径交回 Agent）。"""
+
+    storage: str = "platform"
+    storage_key: str = ""
+    sha256: str = ""
+    mime: str = "image/png"
+    bytes: int = 0
+    width: int = 0
+    height: int = 0
+    url: str = ""
+    expire_at: str = ""

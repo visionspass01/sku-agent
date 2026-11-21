@@ -413,9 +413,9 @@ def result_asset_url(key: str, *, ttl: int | None = None) -> tuple[str, str]:
             expire_at.isoformat(timespec="seconds"))
 
 
-@router.post("/results/{task_id}/{slot}/binary",
+@router.post("/results/{task_id}/{slot}/binary", response_model=isc.ResultBinaryOut,
              dependencies=[Depends(require_scope("write"))])
-async def upload_result_binary(task_id: str, slot: int, request: Request) -> dict:
+async def upload_result_binary(task_id: str, slot: int, request: Request) -> isc.ResultBinaryOut:
     """**把结果图片的二进制存进中台**（`data/platform/images/results/<task_id>/`）。
 
     同 `(task_id, slot)` 重复上传按内容幂等：key 里带 sha 前缀，同内容覆盖同一文件，
@@ -468,18 +468,24 @@ async def upload_result_binary(task_id: str, slot: int, request: Request) -> dic
             session.add(row)
         session.flush()
     request.state.audit_detail = f"image.binary task={task_id} slot={slot} bytes={len(raw)}"
-    return {"storage": "platform", "storage_key": key, "sha256": digest, "mime": mime,
-            "bytes": len(raw), "width": width, "height": height,
-            "url": url, "expire_at": expire_at}
+    return isc.ResultBinaryOut(storage="platform", storage_key=key, sha256=digest,
+                               mime=mime, bytes=len(raw), width=width, height=height,
+                               url=url, expire_at=expire_at)
 
 
-@router.get("/results/assets/{key:path}")
-def result_asset_endpoint(request: Request, key: str, exp: str = "", sig: str = ""):
-    """读结果图片：优先验短签名（前端 <img> 用）；没有签名时要求 Bearer + read scope。"""
+# 说明：结果图片的**读取**是二进制响应（不是 JSON Envelope 契约），所以走 Starlette
+# 原生路由（在 `main.py` 里挂 `result_asset_endpoint`），与商品图 `/assets/{id}.png` 同款处理。
+def result_asset_endpoint(request: Request):
+    """读结果图片：优先验短签名（前端 <img> 用）；没有签名时要求 Bearer + read scope。
+
+    走 Starlette 原生路由（二进制响应），所以 path/query 参数从 `request` 里取。
+    """
     import hmac
     import time
 
-    key = str(key or "").lstrip("/")
+    key = str(request.path_params.get("key", "") or "").lstrip("/")
+    exp = str(request.query_params.get("exp", "") or "")
+    sig = str(request.query_params.get("sig", "") or "")
     if sig:
         try:
             moment = int(exp or 0)
