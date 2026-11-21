@@ -212,10 +212,14 @@ def test_write_is_scoped_to_department(client):
 def test_approve_is_scoped_to_department(client):
     created = client.post("/api/v1/erp/replenish-orders", headers=FULL,
                           json={"sku_id": WOMEN_SKU, "qty": 500, "reason": "女装待批"}).json()
+    # 前置断言：必须先拿到**这张女装单**。历史事故里 po_no 撞主键后接口把别人的单
+    # 当成"幂等命中"返回，这里只有 403 断言时表现为"越权审批通过"，看不出真正原因。
+    assert created.get("deduped") is False, f"不该命中幂等：{created}"
+    assert created.get("sku_id") == WOMEN_SKU, f"返回的不是本单：{created}"
     resp = client.post(f"/api/v1/approvals/{created['approval_id']}/approve",
                        headers={"X-Internal-Token": "k-mens-op"},
                        json={"approver": "worker1"})
-    assert resp.status_code == 403
+    assert resp.status_code == 403, (resp.status_code, resp.text, created)
     assert "只能访问" in resp.json()["detail"]
 
 

@@ -1200,7 +1200,9 @@ def create_replenish_order(payload: dict, request: Request,
     amount = round(qty * price, 2)
     high_risk = qty >= REPLENISH_QTY_THRESHOLD or amount >= REPLENISH_AMOUNT_THRESHOLD
     status = "pending_confirmation" if high_risk else "auto_approved"
-    po_no = f"PO{dt.datetime.now().strftime('%y%m%d%H%M')}{uuid.uuid4().hex[:4].upper()}"
+    po_no = f"PO{dt.datetime.now().strftime('%y%m%d%H%M')}{uuid.uuid4().hex[:8].upper()}"
+    # 后缀 8 位十六进制（32 bit）而不是 4 位（16 bit）：po_no 是主键，同一分钟内
+    # 4 位后缀在几十单的量级上就会偶发重号，进而走到下面的 IntegrityError 分支。
     # 业务归属（requested_by）是 Agent 侧登录用户的**声明式**信息；可信的调用方身份
     # 记录在审计行与 X-Agent-Id 响应头里（见 api/audit.py），两者分开、互不冒充。
     actor = ((payload or {}).get("requested_by") or principal.agent_id)[:32]
@@ -1231,6 +1233,13 @@ def create_replenish_order(payload: dict, request: Request,
             # 在事务内组装返回体：出事务后 ORM 实例会 detach，读属性会报错
             result = _approval_payload(approval, deduped=False)
     except IntegrityError:
+        # 只有**真的带了幂等键**时，唯一约束冲突才等于"同一个请求重发"。
+        # 没有幂等键时这里曾退化成 `WHERE idempotency_key IS NULL`——会把历史上
+        # 任何一张无幂等键的审批单当成"幂等命中"返回（跨 SKU / 跨部门），
+        # 调用方拿着别人的 approval_id 就能把别部门的单审批通过。
+        # 现在：没有幂等键 → 原样上抛，绝不返回别人的单。
+        if not idem_key:
+            raise
         with session_scope() as session:
             existing = session.scalar(
                 select(ApprovalRequest).where(ApprovalRequest.idempotency_key == idem_key)
