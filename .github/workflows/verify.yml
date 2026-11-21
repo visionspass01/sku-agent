@@ -274,9 +274,41 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt -r requirements-dev.txt
+
+      # 容器健康检查只看 `mysqladmin ping`，它在 mysqld 刚起、还没建好表空间时也可能通；
+      # 测试里第一步就是 init_schema，抢跑会直接整片红（历史故障：job 只跑了 71 秒）。
+      # 这里用 pymysql（本来就是依赖）真连一次库再放行，最多等 90 秒。
+      - name: 等待 MySQL 真正可连（不只看 healthcheck）
+        run: |
+          python - <<'PY'
+          import sys
+          import time
+
+          import pymysql
+
+          last = None
+          for attempt in range(1, 91):
+              try:
+                  conn = pymysql.connect(host="127.0.0.1", port=3306, user="sku", password="sku",
+                                         database="sku_ci", connect_timeout=3)
+                  with conn.cursor() as cur:
+                      cur.execute("SELECT 1")
+                      cur.fetchone()
+                  conn.close()
+                  print(f"MySQL 可连（第 {attempt} 次尝试）")
+                  break
+              except Exception as exc:  # noqa: BLE001
+                  last = exc
+                  time.sleep(1)
+          else:
+              print(f"MySQL 90 秒内仍不可连：{last!r}", file=sys.stderr)
+              raise SystemExit(1)
+          PY
+
       - name: Tests on MySQL（档案/巡检/接口/记忆/检索索引/看板 + 中台治理）
         run: |
-          python -m pytest -q \
+          set -o pipefail
+          python -m pytest -q -rf \
             tests/test_analysis_idempotent.py \
             tests/test_analysis_concurrency.py \
             tests/test_patrol.py \
@@ -289,4 +321,8 @@ jobs:
             tests/test_platform.py \
             tests/test_platform_authz.py \
             tests/test_platform_governance.py \
-            tests/test_demo_catalog_contract.py
+            tests/test_demo_catalog_contract.py \
+            2>&1 | tee pytest-mysql.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then python scripts/ci_annotate.py pytest-mysql.log; fi
+          exit "$status"

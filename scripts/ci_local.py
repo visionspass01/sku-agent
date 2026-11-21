@@ -147,7 +147,8 @@ def job_eval() -> None:
 
 
 def job_mysql() -> None:
-    _run("mysql: subset", [PY, "-m", "pytest", "-q", *MYSQL_FILES])
+    # 本地要有 MySQL 才跑得动（CI 用 service container），命令与 verify.yml 的 mysql job 一致
+    _run("mysql: subset", [PY, "-m", "pytest", "-q", "-rf", *MYSQL_FILES])
 
 
 JOBS = {
