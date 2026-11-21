@@ -45,6 +45,11 @@ jobs:
       - name: Compile all sources（语法检查，早于测试快速失败）
         run: python -m compileall -q src scripts
 
+      # 这一层专治「本地抄一份命令跑绿、推上去才炸」的那类问题：
+      # 隐藏 artifact、COVERAGE_FILE 前缀、artifact 名字对不上、步骤引用错文件名、门槛被调低。
+      - name: CI 配置自检（workflow 语义层，6 条规则）
+        run: python scripts/check_ci_config.py
+
       - uses: actions/setup-node@v4
         with:
           node-version: "20"

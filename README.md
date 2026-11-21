@@ -573,5 +573,12 @@ PYTHONPATH=src python scripts/smoke_image_service.py --app http://127.0.0.1:8021
   覆盖率由 `coverage combine` 合并后统一卡 80%（门槛不降、范围不缩）；本地用
   `python scripts/ci_local.py` 按同样顺序复跑。
 - **失败可定位**：两个测试 job 把输出 tee 到日志，失败时 `scripts/ci_annotate.py` 把「挂了哪些用例 + 日志尾部」
-  写成一条 annotation（workflow 原始日志要仓库权限才能下载，annotation 匿名可读）；
+  写成若干条短 annotation（workflow 原始日志要仓库权限才能下载，annotation 匿名可读；
+  单行过长会被 runner 丢掉，所以一条注解只放一行）；
   覆盖率分片是 `.coverage.*` 隐藏文件，上传时必须 `include-hidden-files: true`。
+- **推送前先把「只在 GitHub 上才炸」的问题拦掉**：`scripts/check_ci_config.py` 直接读 `ci.yml` 做 6 条静态断言
+  （隐藏 artifact 必须 `include-hidden-files`、跑 `coverage combine` 的步骤不能带非默认 `COVERAGE_FILE`
+  前缀、`download-artifact` 的 `pattern` 要对得上 `needs` 里的每个上传、`run` 引用的 `scripts/*.py|js`
+  必须存在、`needs` 不能指向不存在的 job、`--fail-under` 不得低于 80%），在 `lint` job 与
+  `ci_local.py` 里执行——这三类坑（隐藏文件、覆盖率前缀、脚本名打错）都真实踩过，且本地抄命令的镜像永远覆盖不到。
+

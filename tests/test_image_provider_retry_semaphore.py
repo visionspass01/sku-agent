@@ -62,10 +62,15 @@ def _result() -> ImageResult:
 
 # ---------------------------------------------------------------- P2-5
 def test_backoff_does_not_hold_provider_semaphore(env, monkeypatch):
-    """provider_concurrency=1 时：A 在退避睡眠，B 必须能立刻拿到槽位。"""
+    """provider_concurrency=1 时：A 在退避睡眠，B 必须能立刻拿到槽位。
+
+    退避时长特意设成 1s（默认 0.2s）：这是**时间差**断言，落在共享 runner 上时
+    0.2s 的窗口会被调度抖动吃掉（历史上就出现过 B 被误判成"被挡住"）。设成 1s 后
+    两边差距拉到 5 倍以上，断言依然只在"信号量被退避占住"时才失败。
+    """
     monkeypatch.setenv("IMAGE_PROVIDER_CONCURRENCY", "1")
     monkeypatch.setenv("IMAGE_PROVIDER_RETRIES", "1")
-    monkeypatch.setenv("IMAGE_PROVIDER_RETRY_BACKOFF_SECONDS", "0.2")
+    monkeypatch.setenv("IMAGE_PROVIDER_RETRY_BACKOFF_SECONDS", "1.0")
     reset_image_settings()
     generator_handler.reset_provider_semaphore()
 
@@ -97,8 +102,10 @@ def test_backoff_does_not_hold_provider_semaphore(env, monkeypatch):
         return a_elapsed, b_elapsed
 
     a_elapsed, b_elapsed = asyncio.run(scenario())
-    assert b_elapsed < 0.15, f"B 被 A 的退避睡眠挡住了（{b_elapsed:.3f}s）"
-    assert a_elapsed >= 0.18, a_elapsed            # A 确实经历了一次退避
+    # B 没有退避，正常应是"接近 0"；门槛留到 0.5s 是给共享 runner 的调度抖动留余量，
+    # 只要 B 真的被 A 的 1s 退避挡住（历史 bug），这里必然 > 1s 而失败。
+    assert b_elapsed < 0.5, f"B 被 A 的退避睡眠挡住了（{b_elapsed:.3f}s）"
+    assert a_elapsed >= 0.9, a_elapsed             # A 确实经历了一次 1s 退避
     generator_handler.reset_provider_semaphore()
 
 

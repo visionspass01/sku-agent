@@ -320,12 +320,26 @@ def test_p1_7_due_rows_not_starved_by_backoff_rows(db_only):
         session.add_all([backoff, due])
         session.flush()
     rows = outbox_store.pending_payloads(limit=1)
-    assert [row["task_id"] for row in rows] == ["t-due"]
+    # 整个测试会话共用一份 sqlite（tests/conftest.py 的 `_db` 是 session 级），别的用例
+    # 可能留下"到期"的行——例如 claim 的 600s 占位窗口在长跑（本地 Windows 全套近 50 分钟）
+    # 里过期后会重新变成可重放。所以这里只锁 P1-7 的回归点：
+    # 「最老的 pending 还在退避期时，到期行不能被饿死」，而不假定自己是唯一一行。
+    assert rows, "到期行一条都没捞到"
+    assert rows[0]["task_id"] != "t-backoff", (
+        f"退避期的老行把到期行饿死了（P1-7 回归）：{rows[0]['task_id']}")
+    due_rows = {row["task_id"] for row in outbox_store.pending_payloads(limit=500)}
+    assert "t-due" in due_rows
+    assert "t-backoff" not in due_rows
 
 
 # ---------------------------------------------------------------- P1-8
 def test_p1_8_refs_download_concurrently(monkeypatch):
-    """多张参考图并发下载（不是逐张串行）。"""
+    """多张参考图并发下载（不是逐张串行）。
+
+    单张 0.4s：串行要 ≥1.6s、并发只要 ~0.4s。门槛取 0.8s（串行的一半），
+    这样在共享 runner 上多几百毫秒抖动也不会误判——历史上这里用 0.15s×4 + <0.45s，
+    抖动一大就假红。
+    """
     sleeps = {"n": 0}
 
     class _Catalog:
@@ -343,7 +357,7 @@ def test_p1_8_refs_download_concurrently(monkeypatch):
 
         async def fetch_image_bytes(self, image):
             sleeps["n"] += 1
-            await asyncio.sleep(0.15)
+            await asyncio.sleep(0.4)
             return b"payload"
 
     catalog = _Catalog()
@@ -354,7 +368,7 @@ def test_p1_8_refs_download_concurrently(monkeypatch):
     elapsed = time.monotonic() - started
     assert plan.total == 4
     assert sleeps["n"] == 4
-    assert elapsed < 0.45, f"仍是串行下载（{elapsed:.2f}s）"
+    assert elapsed < 0.8, f"仍是串行下载（{elapsed:.2f}s；串行应 ≥1.6s，并发约 0.4s）"
     assert [item.image_id for item in plan.refs_of("P-1001#米色")] == [
         "P-1001-0", "P-1001-1", "P-1001-2", "P-1001-3"]
 

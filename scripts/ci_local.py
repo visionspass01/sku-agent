@@ -87,6 +87,8 @@ def _run(name: str, argv: list[str], *, cwd: Path | None = None) -> None:
 def job_lint(*, with_node: bool = True) -> None:
     _run("lint: ruff", [PY, "-m", "ruff", "check", "src", "tests", "scripts"])
     _run("lint: compileall", [PY, "-m", "compileall", "-q", "src", "scripts"])
+    # workflow 语义层自检：隐藏 artifact / COVERAGE_FILE 前缀 / artifact 名字 / 脚本引用 / 门槛
+    _run("lint: ci_config", [PY, "scripts/check_ci_config.py"])
     if with_node and shutil.which("node"):
         _run("lint: ui_smoke", ["node", str(ROOT / "scripts" / "ui_smoke.js")])
         _run("lint: ui_smoke_image", ["node", str(ROOT / "scripts" / "ui_smoke_image.js")])
