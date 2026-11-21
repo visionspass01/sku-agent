@@ -296,6 +296,8 @@ def _env(name: str) -> str:
 
 
 _REGISTRY = {"memory": MemoryStorage, "cos": CosStorage, "platform": PlatformStorage}
+# 进程内共享的 memory 后端：父进程上传参考图 → worker 读同一个 dict（本地/测试链路）
+_MEMORY_SINGLETON: dict[str, MemoryStorage] = {}
 
 
 def get_storage(backend: str = "") -> Any:
@@ -311,6 +313,8 @@ def get_storage(backend: str = "") -> Any:
     if factory is None:
         raise_image("IMG_STORAGE_UNAVAILABLE",
                     f"worker 不支持的存储后端：{name}（可用：{'、'.join(sorted(_REGISTRY))}）")
+    if name == "memory":
+        return _MEMORY_SINGLETON.setdefault("memory", MemoryStorage())
     return factory()
 
 

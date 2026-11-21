@@ -30,14 +30,28 @@ _ASPECT_TOLERANCE = 0.06
 
 @dataclass
 class CheckedImage:
-    """待评审的一张图（已落盘前的原始字节 + 图位）。"""
+    """待评审的一张图：图位 + 原始字节（或仅元数据，remote 模式下 worker 已落存储）。
+
+    `dominant_rgb` / `data` 的关系（第十二轮）：
+    - 本地模式：`data` 有字节，主色现场解码；
+    - remote 模式：worker 已经把图落 COS/中台，父进程只拿到元数据 + 主色统计
+      （`dominant_rgb`），此时 `data` 为空，评审只用元数据（mime/尺寸/主色），不解码。
+    """
 
     slot: int
-    data: bytes
+    data: bytes = b""
     mime: str = "image/png"
     width: int = 0
     height: int = 0
     meta: dict = field(default_factory=dict)
+    dominant_rgb: list[int] | None = None
+    storage: str = ""
+    storage_key: str = ""
+    url: str = ""
+
+    @property
+    def has_bytes(self) -> bool:
+        return bool(self.data)
 
 
 def _ratio(width: int, height: int) -> float:
@@ -79,6 +93,8 @@ def _dominant_of(image: CheckedImage, decoded=None) -> tuple[int, int, int] | No
     `decoded`（P2-1，第十二轮）：编排层已经解好的 `(w, h, channels, pixels)`，
     复用后同一批图只解码一次（与像素门禁共用，纯 Python 解码是最贵的一步）。
     """
+    if not image.has_bytes and image.dominant_rgb:
+        return int(image.dominant_rgb[0]), int(image.dominant_rgb[1]), int(image.dominant_rgb[2])
     decoded = decoded if decoded is not None else decode_any(image.data)
     if decoded is None:
         return None
@@ -148,19 +164,20 @@ def critique(state: ImageTaskState, drafts: list[PromptDraft], images: list[Chec
         blocking.append("empty")
         issues.append("empty: 没有任何出图结果")
     for image in images:
-        mime = image.mime or sniff_mime(image.data)
+        mime = image.mime or (sniff_mime(image.data) if image.has_bytes else "")
         if mime not in {"image/png", "image/jpeg", "image/webp"}:
             score -= 40
             blocking.append("mime")
             issues.append(f"mime: 图位 {image.slot} 输出类型 {mime} 不受支持")
             continue
-        if not image.data:
+        if not image.has_bytes and not (image.width and image.height):
+            # remote 模式（worker 已落存储）：没有字节也没有尺寸 = 无法核对，按空输出处理
             score -= 40
             blocking.append("empty")
-            issues.append(f"empty: 图位 {image.slot} 输出为空")
+            issues.append(f"empty: 图位 {image.slot} 缺少图片元数据")
             continue
         width, height = image.width, image.height
-        if not (width and height):
+        if not (width and height) and image.has_bytes:
             width, height = image_size(image.data)
         if width and height:
             expected = _expected_ratio(state.aspect)

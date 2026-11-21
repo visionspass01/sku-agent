@@ -286,6 +286,140 @@ def _decode_images(images: list[critic_mod.CheckedImage]) -> list:
     return [pixels.decode_any(image.data) for image in images]
 
 
+# ---------------------------------------------------------------- 独立 worker（第十二轮）
+def _worker_remote(settings) -> bool:
+    """是否走"独立 worker"链路（`IMAGE_WORKER_MODE` 非 inproc）。"""
+    return str(getattr(settings, "worker_mode", "inproc") or "inproc").strip().lower() != "inproc"
+
+
+def _worker_gate_inside(settings) -> bool:
+    """远端模式下像素门禁是否在 worker 侧完成（auto → 是；显式 off 可关）。"""
+    return bool(getattr(settings, "worker_gate_enabled", False))
+
+
+def _worker_rules_payload(rules) -> dict:
+    return {
+        "min_px": int(getattr(rules, "min_px", 800) or 800),
+        "max_mb": float(getattr(rules, "max_mb", 3.0) or 3.0),
+        "aspect": str(getattr(rules, "aspect", "1:1") or "1:1"),
+        "text_allowed": bool(getattr(rules, "text_allowed", True)),
+        "forbidden_words": list(getattr(rules, "forbidden_words", []) or []),
+        "compliance": dict(getattr(rules, "compliance", {}) or {}),
+    }
+
+
+def _worker_gate_payload(settings, state, *, inside: bool) -> dict:
+    return {
+        "mode": (str(getattr(settings, "compliance_gate", "main") or "main")
+                 if inside else "off"),
+        "autofix": bool(getattr(settings, "compliance_autofix", True)),
+        "nonpng_policy": str(getattr(settings, "compliance_nonpng", "warn") or "warn"),
+        "aspect": state.aspect,
+    }
+
+
+async def _prepare_worker_refs(state: ImageTaskState, refs: list[dict], settings) -> list[dict]:
+    """把参考图放进 **worker 能读到的存储**，返回 `WorkerRef` 列表（引用而非字节）。
+
+    远端 worker 读不到父进程的本地磁盘，所以要求 `IMAGE_WORKER_STORAGE=cos|platform`；
+    每张参考图按 `refs/<sha>` 落一次（同内容覆盖同一 key）。
+    """
+    from app.agents_image.worker.contract import WorkerRef
+    from app.agents_image.worker.storage import get_storage as worker_storage
+    from app.observability.trace import run_in_trace
+
+    backend = str(getattr(settings, "effective_worker_storage", "local") or "local")
+    if backend == "local":
+        raise ImageError("IMG_STORAGE_UNAVAILABLE",
+                         "独立 worker 模式需要 IMAGE_WORKER_STORAGE=cos|platform"
+                         "（worker 读不到父进程的本地磁盘）")
+    storage = worker_storage(backend)
+
+    async def _put(item: dict):
+        if hasattr(storage, "put_async"):
+            return await storage.put_async(item["data"], kind="ref",
+                                           mime=item.get("mime") or "image/png",
+                                           task_id=state.task_id, slot=0, prefix="refs")
+        return await run_in_trace(storage.put, item["data"], kind="ref",
+                                  mime=item.get("mime") or "image/png",
+                                  task_id=state.task_id, slot=0, prefix="refs")
+
+    stored = [await _put(item) for item in refs]
+    return [WorkerRef(kind="storage_key", value=item.key, mime=item.mime).model_dump()
+            for item in stored]
+
+
+def _worker_request(state: ImageTaskState, settings, drafts, *, worker_refs: list[dict],
+                    rules, attempt: int, deadline_at: float) -> dict:
+    """组装一次 worker 调用（父进程 → 独立服务）。"""
+    from app.agents_image.worker.contract import WorkerRequest
+
+    gate_inside = _worker_gate_inside(settings)
+    request = WorkerRequest(
+        task_id=state.task_id, trace_id=state.trace_id or "",
+        idempotency_key=f"{state.task_id}:{attempt}:{len(drafts)}",
+        provider=str(getattr(settings, "provider", "fake") or "fake"),
+        width=int(drafts[0].width or 1024), height=int(drafts[0].height or 1024),
+        preserve=list(drafts[0].preserve or []),
+        slots=[{"slot": d.slot, "prompt": d.prompt, "negative_prompt": d.negative_prompt,
+                "role": d.role or "", "n": 1} for d in drafts],
+        refs=list(worker_refs),
+        rules=_worker_rules_payload(rules),
+        gate=_worker_gate_payload(settings, state, inside=gate_inside),
+        storage={"backend": str(getattr(settings, "effective_worker_storage", "") or "")},
+        deadline_at=float(deadline_at or 0.0),
+    )
+    return request.model_dump()
+
+
+async def _invoke_worker(request_payload: dict):
+    """调用独立 worker（inproc/http/scf 由 `IMAGE_WORKER_MODE` 决定）。"""
+    from app.agents_image.dispatch.invoker import get_invoker
+    from app.agents_image.worker.contract import WorkerRequest
+
+    return await get_invoker().invoke(WorkerRequest.model_validate(request_payload))
+
+
+def _worker_failure(result, *, prior_calls: int, prior_images: int,
+                    prior_cost: float) -> ImageError:
+    """把 worker 的业务失败转成 `ImageError`，并带上**已发生**的发起量/张数/成本。"""
+    err = ImageError(result.error.code if result.error else "IMG_PROVIDER_UNAVAILABLE",
+                     (result.error.detail if result.error else "worker 执行失败"),
+                     retryable=bool(result.error.retryable) if result.error else True)
+    generator_handler.attach_failure_stats(
+        err, provider_calls=prior_calls + int(result.provider_calls or 0),
+        generated=prior_images + int(result.generated or 0),
+        cost_cny=prior_cost + float(result.cost_cny or 0.0))
+    return err
+
+
+def _worker_checked_images(result) -> list[critic_mod.CheckedImage]:
+    """remote 模式下把 worker 返回的 output 图变成 Critic 可用的"无字节图片"。"""
+    images: list[critic_mod.CheckedImage] = []
+    for item in result.images:
+        if item.kind != "output":
+            continue
+        images.append(critic_mod.CheckedImage(
+            slot=int(item.slot), data=b"", mime=item.mime or "image/png",
+            width=int(item.width or 0), height=int(item.height or 0),
+            meta={"worker": True},
+            dominant_rgb=list(item.pixel.dominant_rgb) if item.pixel.dominant_rgb else None,
+            storage=item.storage, storage_key=item.storage_key, url=item.url))
+    return images
+
+
+def _worker_slot_costs(result) -> list[float]:
+    """按图位去重后的成本（多图同图位不重复计费）。"""
+    seen: set[int] = set()
+    costs: list[float] = []
+    for item in result.images:
+        if int(item.slot) in seen:
+            continue
+        seen.add(int(item.slot))
+        costs.append(float(item.cost_cny or 0.0))
+    return costs
+
+
 def _collect_images(result: dict) -> list[critic_mod.CheckedImage]:
     images: list[critic_mod.CheckedImage] = []
     for slot in result.get("slots") or []:
@@ -446,6 +580,12 @@ async def execute_task(task_id: str) -> ImageTaskState:
     provider_calls = 0
     last_signature = ""
     last_reflection = None
+    # 第十二轮：独立 worker 链路（引用参考图 + 消费 worker 返回的路径/像素/门禁）
+    remote_worker = _worker_remote(settings)
+    worker_refs: list[dict] = []
+    worker_images: list = []
+    if remote_worker:
+        worker_refs = await _prepare_worker_refs(state, refs, settings)
     for attempt in range(1, max_attempts + 1):
         state.attempt = attempt
         await _renew_lease(task_id, settings)
@@ -472,29 +612,56 @@ async def execute_task(task_id: str) -> ImageTaskState:
         with session_scope() as session:
             task_store.update_task(session, task_id,
                                    provider_started_at=dt.datetime.now())
-        result = await _generate_or_attach_partial(settings, refs, current,
-                                                   attempted=attempted,
-                                                   spent=sum(float(item or 0.0)
-                                                             for item in image_costs),
-                                                   provider_calls=provider_calls,
-                                                   llm_cost=float(getattr(state, "llm_cost_cny",
-                                                                          0.0) or 0.0),
-                                                   deadline_at=deadline_at,
-                                                   task_id=task_id, state=state)
-        image_costs = [float(slot.get("cost_cny") or 0.0)
-                       for slot in (result.get("slots") or [])]
-        images = _collect_images(result)
-        provider_calls += int(result.get("provider_calls") or len(images))
-        attempted += len(images)
-        # P2-1（第十二轮）：同一批图只解码一次——后续 Critic 的颜色漂移与像素门禁共用，
-        # 解码本身丢线程池（纯 Python PNG 解码，单图 0.3–1s）
-        from app.observability.trace import run_in_trace as _run_in_trace
+        if remote_worker:
+            # ---- 独立 worker 链路：只拿"路径 + 像素统计 + 门禁结论"，不下载图片 ----
+            try:
+                worker_result = await _invoke_worker(_worker_request(
+                    state, settings, current, worker_refs=worker_refs, rules=rules,
+                    attempt=attempt, deadline_at=deadline_at))
+            except BaseException as exc:  # noqa: BLE001 —— 基础设施失败也要带已发生成本
+                generator_handler.attach_failure_stats(
+                    exc, provider_calls=provider_calls, generated=attempted,
+                    cost_cny=sum(float(item or 0.0) for item in image_costs),
+                    llm_cost_cny=float(getattr(state, "llm_cost_cny", 0.0) or 0.0))
+                raise
+            if not worker_result.ok:
+                raise _worker_failure(
+                    worker_result, prior_calls=provider_calls, prior_images=attempted,
+                    prior_cost=sum(float(item or 0.0) for item in image_costs))
+            image_costs = _worker_slot_costs(worker_result)
+            worker_images = list(worker_result.images)
+            images = _worker_checked_images(worker_result)
+            provider_calls += int(worker_result.provider_calls or 0)
+            attempted += int(worker_result.generated or len(images))
+            decoded = []          # worker 已经给主色，父进程不再解码
+            await _renew_lease(task_id, settings)
+            state.touch("critic", attempt=attempt, images=len(images))
+            critic = critic_mod.critique(state, current, images, settings=settings, rules=rules,
+                                         manifest=registry.manifest)
+        else:
+            result = await _generate_or_attach_partial(settings, refs, current,
+                                                       attempted=attempted,
+                                                       spent=sum(float(item or 0.0)
+                                                                 for item in image_costs),
+                                                       provider_calls=provider_calls,
+                                                       llm_cost=float(getattr(
+                                                           state, "llm_cost_cny", 0.0) or 0.0),
+                                                       deadline_at=deadline_at,
+                                                       task_id=task_id, state=state)
+            image_costs = [float(slot.get("cost_cny") or 0.0)
+                           for slot in (result.get("slots") or [])]
+            images = _collect_images(result)
+            provider_calls += int(result.get("provider_calls") or len(images))
+            attempted += len(images)
+            # P2-1（第十二轮）：同一批图只解码一次——后续 Critic 的颜色漂移与像素门禁共用，
+            # 解码本身丢线程池（纯 Python PNG 解码，单图 0.3–1s）
+            from app.observability.trace import run_in_trace as _run_in_trace
 
-        decoded = await _run_in_trace(_decode_images, images) if images else []
-        await _renew_lease(task_id, settings)
-        state.touch("critic", attempt=attempt, images=len(images))
-        critic = critic_mod.critique(state, current, images, settings=settings, rules=rules,
-                                     manifest=registry.manifest, decoded=decoded)
+            decoded = await _run_in_trace(_decode_images, images) if images else []
+            await _renew_lease(task_id, settings)
+            state.touch("critic", attempt=attempt, images=len(images))
+            critic = critic_mod.critique(state, current, images, settings=settings, rules=rules,
+                                         manifest=registry.manifest, decoded=decoded)
         if critic.passed:
             # P0-4：只有"失败转成功"才归档修法（失败本身不进记忆，避免污染默认生成）
             if attempt > 1 and last_signature and last_reflection is not None:
@@ -541,15 +708,19 @@ async def execute_task(task_id: str) -> ImageTaskState:
     autofix_images = bool(getattr(settings, "compliance_autofix", True))
     nonpng_policy = str(getattr(settings, "compliance_nonpng", "warn") or "warn")
     gated: list[tuple[int, str, object, str]] = []
-    for index, image in enumerate(images):
-        role = _role_of(state, image.slot)
-        # P1-4：门禁在**线程池**里跑（纯 Python 像素统计单图 ~1s，不能阻塞事件循环）
-        # P2-1：复用上面那一次解码（decoded 与 images 同序）
-        verdict = await _gate_image(
-            image, role=role, rules=rules, gate_mode=gate_mode, autofix=autofix_images,
-            aspect=state.aspect, nonpng_policy=nonpng_policy,
-            decoded=decoded[index] if index < len(decoded) else None)
-        gated.append((image.slot, role, verdict, image.mime or "image/png"))
+    if remote_worker:
+        # worker 侧已经跑过像素门禁：直接用它的结论（blocked / skipped），不再解码
+        pass
+    else:
+        for index, image in enumerate(images):
+            role = _role_of(state, image.slot)
+            # P1-4：门禁在**线程池**里跑（纯 Python 像素统计单图 ~1s，不能阻塞事件循环）
+            # P2-1：复用上面那一次解码（decoded 与 images 同序）
+            verdict = await _gate_image(
+                image, role=role, rules=rules, gate_mode=gate_mode, autofix=autofix_images,
+                aspect=state.aspect, nonpng_policy=nonpng_policy,
+                decoded=decoded[index] if index < len(decoded) else None)
+            gated.append((image.slot, role, verdict, image.mime or "image/png"))
     # P1（第十轮）：生成+门禁都做完了，但如果已经超过任务截止时间，按"超时即失败"处理：
     # 图不交付，已发生的发起量/张数/成本按真实值记账（`_raise_deadline` 已挂到异常上）。
     if deadline_at and time.time() > deadline_at:
@@ -594,42 +765,81 @@ async def execute_task(task_id: str) -> ImageTaskState:
         blocked: list[dict] = []
         delivered_slots: set[int] = set()
         gate_skipped = 0
-        for slot, role, verdict, image_mime in gated:
-            if verdict.degraded:
-                gate_skipped += 1
-                state.warnings.append(
-                    "IMG_GATE_SKIPPED: 图位 "
-                    f"{slot}（{role or '-'}）像素门禁被跳过（"
-                    + ("；".join(verdict.reasons) or "非 PNG 且未安装 Pillow")
-                    + "），该图按平台规则未做像素校验")
-            if not verdict.passed:
-                asset_store.save_bytes(
-                    session, verdict.data, kind="blocked", mime=image_mime,
+        if remote_worker:
+            # ---- remote：worker 已落存储，父进程只登记资产 + 汇总门禁结论 ----
+            for item in worker_images:
+                role = _role_of(state, item.slot)
+                if item.gate.degraded:
+                    gate_skipped += 1
+                    state.warnings.append(
+                        "IMG_GATE_SKIPPED: 图位 "
+                        f"{item.slot}（{role or '-'}）像素门禁被跳过（"
+                        + ("；".join(item.gate.reasons) or "非 PNG 且未安装 Pillow")
+                        + "），该图按平台规则未做像素校验")
+                if item.kind == "blocked":
+                    asset_store.register_remote(
+                        session, task_id=task_id, slot=item.slot, sha256=item.sha256,
+                        storage=item.storage, key=item.storage_key, mime=item.mime,
+                        width=item.width, height=item.height, size_bytes=item.bytes,
+                        username=task.username, department=task.department, kind="blocked",
+                        blocked_reason=item.blocked_reason or "；".join(item.gate.reasons))
+                    blocked.append({"slot": item.slot, "reasons": list(item.gate.reasons)})
+                    state.warnings.append(
+                        "IMG_CONTENT_BLOCKED: 图位 "
+                        f"{item.slot}（{role or '-'}）像素门禁未通过："
+                        + "; ".join(item.gate.reasons))
+                    continue
+                asset = asset_store.register_remote(
+                    session, task_id=task_id, slot=item.slot, sha256=item.sha256,
+                    storage=item.storage, key=item.storage_key, mime=item.mime,
+                    width=item.width, height=item.height, size_bytes=item.bytes,
+                    username=task.username, department=task.department, kind="output")
+                delivered += 1
+                delivered_slots.add(int(item.slot))
+                outputs.append({
+                    "slot": item.slot, "mime": item.mime or "image/png",
+                    "sha256": item.sha256, "width": item.width, "height": item.height,
+                    "bytes": item.bytes, "storage": item.storage, "key": item.storage_key,
+                    "url": item.url, "url_expire_at": item.url_expire_at,
+                    "gate_fixed": bool(item.gate.fixed),
+                })
+        else:
+            for slot, role, verdict, image_mime in gated:
+                if verdict.degraded:
+                    gate_skipped += 1
+                    state.warnings.append(
+                        "IMG_GATE_SKIPPED: 图位 "
+                        f"{slot}（{role or '-'}）像素门禁被跳过（"
+                        + ("；".join(verdict.reasons) or "非 PNG 且未安装 Pillow")
+                        + "），该图按平台规则未做像素校验")
+                if not verdict.passed:
+                    asset_store.save_bytes(
+                        session, verdict.data, kind="blocked", mime=image_mime,
+                        task_id=task_id, slot=slot,
+                        username=task.username, department=task.department,
+                        blocked_reason=("; ".join(verdict.reasons))[:60],
+                    )
+                    blocked.append({"slot": slot, "reasons": list(verdict.reasons)})
+                    state.warnings.append(
+                        "IMG_CONTENT_BLOCKED: 图位 "
+                        f"{slot}（{role or '-'}）像素门禁未通过：" + "; ".join(verdict.reasons))
+                    continue
+                asset = asset_store.save_bytes(
+                    session, verdict.data, kind="output", mime=image_mime,
                     task_id=task_id, slot=slot,
                     username=task.username, department=task.department,
-                    blocked_reason=("; ".join(verdict.reasons))[:60],
                 )
-                blocked.append({"slot": slot, "reasons": list(verdict.reasons)})
-                state.warnings.append(
-                    "IMG_CONTENT_BLOCKED: 图位 "
-                    f"{slot}（{role or '-'}）像素门禁未通过：" + "; ".join(verdict.reasons))
-                continue
-            asset = asset_store.save_bytes(
-                session, verdict.data, kind="output", mime=image_mime,
-                task_id=task_id, slot=slot,
-                username=task.username, department=task.department,
-            )
-            delivered += 1 if asset is not None else 0
-            delivered_slots.add(int(slot))
-            if asset is not None:
-                # 只留纯数据：session 关闭后 ORM 对象不能再取属性（DetachedInstanceError）
-                outputs.append({
-                    "slot": slot, "mime": asset.mime or image_mime,
-                    "sha256": asset.sha256, "width": asset.width,
-                    "height": asset.height, "bytes": asset.bytes,
-                    "storage": asset.storage, "key": asset.key,
-                    "gate_fixed": bool(verdict.fixed),
-                })
+                delivered += 1 if asset is not None else 0
+                delivered_slots.add(int(slot))
+                if asset is not None:
+                    # 只留纯数据：session 关闭后 ORM 对象不能再取属性（DetachedInstanceError）
+                    outputs.append({
+                        "slot": slot, "mime": asset.mime or image_mime,
+                        "sha256": asset.sha256, "width": asset.width,
+                        "height": asset.height, "bytes": asset.bytes,
+                        "storage": asset.storage, "key": asset.key,
+                        "gate_fixed": bool(verdict.fixed),
+                    })
         # C2：被复用的图位把历史成品挂到本任务（不重复生成、不重复计费）
         reused = 0
         for slot, asset_id in (reuse_map or {}).items():
@@ -643,6 +853,21 @@ async def execute_task(task_id: str) -> ImageTaskState:
                 state.warnings.append(
                     f"IMG_REUSE_REJECTED: 图位 {slot} 的复用源已被人工驳回或清理，"
                     "已跳过复用（该图位按差额补齐）")
+                continue
+            if remote_worker:
+                # remote：复用源已在远端存储里，直接登记引用（不复制、不读盘）
+                asset = asset_store.register_remote(
+                    session, task_id=task_id, slot=slot, sha256=base_asset.sha256,
+                    storage=base_asset.storage, key=base_asset.key, mime=base_asset.mime,
+                    width=base_asset.width, height=base_asset.height,
+                    size_bytes=base_asset.bytes, username=task.username,
+                    department=task.department, source="reuse", kind="output")
+                outputs.append({
+                    "slot": slot, "mime": asset.mime, "sha256": asset.sha256,
+                    "width": asset.width, "height": asset.height, "bytes": asset.bytes,
+                    "storage": asset.storage, "key": asset.key, "reused": True,
+                })
+                reused += 1
                 continue
             try:
                 data = asset_store.read_asset_bytes(base_asset)

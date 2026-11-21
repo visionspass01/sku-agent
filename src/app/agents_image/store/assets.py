@@ -75,6 +75,30 @@ def save_bytes(session, data: bytes, *, kind: str, mime: str = "",
     return asset
 
 
+def register_remote(session, *, task_id: str | None, slot: int, sha256: str, storage: str,
+                    key: str, mime: str = "", width: int = 0, height: int = 0,
+                    size_bytes: int = 0, username: str = "anonymous",
+                    department: str | None = None, product_id: str | None = None,
+                    color_key: str = "", source: str = "mcp", kind: str = "output",
+                    blocked_reason: str = "") -> ImageAsset:
+    """登记一张**已经在远端存储里**的产出（COS / 中台文件夹），不再写本地文件。
+
+    第十二轮：worker 独立运行后，图片由 worker 直接落 COS/中台并把路径交回来；
+    父进程只做"资产行登记 + 回写中台"，本地 `data/images/outputs` 不再新增文件。
+    """
+    asset = ImageAsset(
+        asset_id=uuid.uuid4().hex, task_id=task_id, slot=slot,
+        username=username, department=department, product_id=product_id,
+        color_key=color_key or "", blocked_reason=(blocked_reason or "")[:60],
+        kind=kind, source=source, sha256=sha256, dedupe_key=None,
+        storage=storage, key=key, mime=mime, width=int(width or 0),
+        height=int(height or 0), bytes=int(size_bytes or 0),
+    )
+    session.add(asset)
+    session.flush()
+    return asset
+
+
 def get_asset(session, asset_id: str) -> ImageAsset | None:
     return session.get(ImageAsset, asset_id)
 

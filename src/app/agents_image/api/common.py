@@ -71,6 +71,9 @@ def asset_payload(asset) -> dict:
             "bytes": asset.bytes, "sha256": asset.sha256,
             "url": f"/api/image/assets/{asset.asset_id}",
             "signed_url": signed_asset_url(asset.asset_id),
+            # 第十二轮：remote 模式下图片落在 COS / 中台文件夹，前端/调用方需要知道落点
+            "storage": getattr(asset, "storage", "local") or "local",
+            "storage_key": getattr(asset, "key", "") or "",
             "adopt_status": getattr(asset, "adopt_status", "pending"),
             "reused": getattr(asset, "source", "") == "reuse",
             "blocked_reason": getattr(asset, "blocked_reason", ""),

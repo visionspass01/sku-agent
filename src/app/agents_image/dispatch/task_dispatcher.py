@@ -32,10 +32,11 @@ def get_dispatcher(name: str | None = None) -> TaskDispatcher:
             _INSTANCES[key] = LocalGenerator()
         return _INSTANCES[key]
     if key == "scf":
-        # 说明：目前只有协议位，没有 SCF 适配器实现（本轮改造会补齐）。
-        # 文案不再指代不存在的文件，避免误导排障。
+        # 说明：任务调度只有进程内 worker 一种实现；"SCF"属于**第三方调用层**
+        # （`IMAGE_WORKER_MODE=scf` → dispatch/invoker.py::ScfInvoker），不是调度器。
         raise_image("IMG_PROVIDER_UNAVAILABLE",
-                    "SCF 调度器尚未实现（当前请把 IMAGE_DISPATCHER 设为 local）")
+                    "调度器只支持 local；若要跑在腾讯云 SCF，请设置 "
+                    "IMAGE_WORKER_MODE=scf（第三方调用层），调度器仍用 local")
     raise_image("IMG_PROVIDER_UNAVAILABLE", f"未知的调度器：{key}")
 
 
