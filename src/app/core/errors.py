@@ -26,6 +26,8 @@ IMAGE_CODES: dict[str, int] = {
     "IMG_SIMILAR_NOT_FOUND": 422,
     "IMG_UPSTREAM_MCP_UNAVAILABLE": 503,
     "IMG_UPSTREAM_INVALID": 502,
+    # 第十二轮：worker 出图成功但落存储失败（COS / 中台文件夹）——图不交付但成本照记
+    "IMG_STORAGE_UNAVAILABLE": 503,
     "IMG_QUOTA_EXCEEDED": 429,
     "IMG_RATE_LIMITED": 429,
     "IMG_COST_BUDGET_EXCEEDED": 429,

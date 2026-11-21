@@ -46,7 +46,39 @@ class ImageSettings(BaseSettings):
     max_prompt_chars: int = Field(default=500, ge=50, le=4000)
     concurrency: int = Field(default=8, ge=1, le=32)          # 本机任务并发
     provider_concurrency: int = Field(default=10, ge=1, le=64)  # 调第三方生图 API 的并发上限
+    # 单次第三方调用的超时（第十二轮起生效：worker / handler 都用它钳住一次 await provider 的时长）
     timeout_seconds: int = Field(default=60, ge=5, le=600)
+
+    # ---- 独立 worker（服务化）：第三方调用可以跑在独立进程 / HTTP 服务 / SCF 函数里 ----
+    # inproc（默认，进程内直调，行为与历史一致）｜http（IMAGE_WORKER_URL）｜scf（同步 Invoke）
+    worker_mode: str = "inproc"
+    worker_url: str = ""
+    worker_token: str = ""
+    worker_timeout_seconds: float = Field(default=300.0, ge=1.0, le=900.0)
+    # 父进程是否把像素门禁交给 worker 做（auto = remote 模式自动开启，inproc 保持现状）
+    worker_gate: str = "auto"          # auto | on | off
+    # 产物落点：local（默认，24h 清理）｜memory（测试）｜cos｜platform（中台文件夹）
+    worker_storage: str = ""           # 空 = 跟随 IMAGE_STORAGE
+
+    # ---- 腾讯云 SCF（worker_mode=scf）----
+    scf_function_name: str = ""
+    scf_region: str = ""
+    scf_namespace: str = "default"
+    scf_invoke_timeout_seconds: float = Field(default=300.0, ge=1.0, le=900.0)
+
+    # ---- 腾讯云 COS（worker_storage=cos / IMAGE_STORAGE=cos）----
+    cos_secret_id: str = ""
+    cos_secret_key: str = ""
+    cos_region: str = ""
+    cos_bucket: str = ""
+    cos_prefix: str = "image-agent/"
+    cos_public_base: str = ""          # 公开读时的前缀（https://<bucket>.cos.<region>.myqcloud.com）
+    cos_signed_ttl_seconds: int = Field(default=3600, ge=60, le=86400)
+
+    # ---- 中台图片文件夹（worker_storage=platform）----
+    platform_store_prefix: str = "results"
+    result_max_mb: float = Field(default=8.0, ge=0.5, le=50.0)
+
     # P1（第十轮）：生图 API 的最大等待时长（对齐前端/调用方契约：超时即失败）。
     # 执行体在每一轮生成前、每个图位调用前都会检查这个截止时间；
     # 超时抛 IMG_TIMEOUT，并把已经生成张数/成本按真实值记账（不能因为超时就丢掉账）。
@@ -168,6 +200,21 @@ class ImageSettings(BaseSettings):
     platform_token: str = ""                      # 空 = 回落到 PLATFORM_INTERNAL_TOKEN
     mcp_timeout_seconds: float = Field(default=5.0, ge=0.5, le=60)
     mcp_retries: int = Field(default=2, ge=0, le=5)
+
+    @property
+    def effective_worker_storage(self) -> str:
+        """worker 落点：`IMAGE_WORKER_STORAGE` 优先，否则跟随 `IMAGE_STORAGE`。"""
+        return (self.worker_storage or self.storage or "local").strip().lower()
+
+    @property
+    def worker_gate_enabled(self) -> bool:
+        """worker 是否做像素门禁：显式 on/off 优先；auto = 非 inproc 才算远端。"""
+        flag = (self.worker_gate or "auto").strip().lower()
+        if flag in {"on", "true", "1", "yes"}:
+            return True
+        if flag in {"off", "false", "0", "no"}:
+            return False
+        return (self.worker_mode or "inproc").strip().lower() != "inproc"
 
     @property
     def images_dir(self) -> pathlib.Path:

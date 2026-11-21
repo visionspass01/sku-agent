@@ -1,0 +1,13 @@
+# 可选依赖（不装也能跑本地/离线测试；只有下面对应的后端被启用时才需要）
+#
+# 腾讯云 COS 存储后端（IMAGE_STORAGE=cos / IMAGE_WORKER_STORAGE=cos）
+#   cos-python-sdk-v5
+#
+# 腾讯云 SCF 函数间调用（IMAGE_WORKER_MODE=scf）
+#   tencentcloud-sdk-python
+#
+# 说明：两者在代码里都是**惰性导入**（`worker/storage.py::CosStorage`、
+# `dispatch/scf.py::ScfInvoker`），不安装/不配置时只会在启用对应模式时给出可读报错，
+# 不会影响 `IMAGE_WORKER_MODE=inproc`（默认）与全部离线测试（CI 默认不装）。
+cos-python-sdk-v5
+tencentcloud-sdk-python

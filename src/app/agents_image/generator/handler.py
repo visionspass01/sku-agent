@@ -150,7 +150,8 @@ def _check_deadline(deadline_at: float) -> None:
         raise ImageError("IMG_TIMEOUT", "任务超过最大等待时长（IMAGE_TASK_MAX_SECONDS），已终止本轮生成")
 
 
-async def _generate_with_retry(provider, request, *, deadline_at: float = 0.0) -> tuple[Any, int]:
+async def _generate_with_retry(provider, request, *, deadline_at: float = 0.0,
+                              call_timeout: float = 0.0) -> tuple[Any, int]:
     """调一次 provider；限流/超时/5xx 按 `IMAGE_PROVIDER_RETRIES` 退避重试。
 
     返回 `(result, provider_calls)`：`provider_calls` 是**真实发起次数**（含重试），
@@ -159,6 +160,9 @@ async def _generate_with_retry(provider, request, *, deadline_at: float = 0.0) -
     失败时把本次已发起的次数挂到异常的 `extra["provider_calls"]` 上（P1-6），
     由 `run()` 聚合成整轮的真实发起量再往外抛。
     `deadline_at`（P1，第十轮）：重试前也要检查截止时间，避免"退避重试把 360s 预算耗光"。
+    `call_timeout`（第十二轮）：**单次调用超时**（秒）。过去 `IMAGE_TIMEOUT_SECONDS` 只是
+    配置项、没有任何代码使用，一次在途调用可以越过任务截止时间。现在用它钳住每次
+    `await provider.generate()`，超时按 `IMG_TIMEOUT`（可重试）处理。
     """
     from app.agents_image.config import get_image_settings
 
@@ -180,6 +184,10 @@ async def _generate_with_retry(provider, request, *, deadline_at: float = 0.0) -
                 # IMAGE_PROVIDER_CONCURRENCY 个名额一起占住，吞吐被白白压掉。
                 async with _provider_semaphore():
                     made += 1
+                    if call_timeout and call_timeout > 0:
+                        result = await asyncio.wait_for(provider.generate(request),
+                                                        timeout=float(call_timeout))
+                        return result, made
                     return await provider.generate(request), made
             except ImageError as exc:
                 last_exc = exc
@@ -187,6 +195,11 @@ async def _generate_with_retry(provider, request, *, deadline_at: float = 0.0) -
                     raise
                 logger.warning("生图调用失败（第 %d/%d 次，可重试）：%s", attempt, attempts,
                                exc.code)
+            except (asyncio.TimeoutError, TimeoutError) as exc:
+                # 单次调用超时：归一到 IMG_TIMEOUT（可重试），不要变成"未分类异常"
+                raise ImageError("IMG_TIMEOUT",
+                                 f"单次生图调用超时（{call_timeout:g}s）",
+                                 retryable=True) from exc
             except Exception as exc:  # noqa: BLE001 —— 未分类异常一律不重试（避免放大故障）
                 raise ImageError("IMG_PROVIDER_UNAVAILABLE",
                                  f"生图调用异常：{type(exc).__name__}: {exc}") from exc
@@ -223,6 +236,10 @@ async def run(payload: dict[str, Any], *, on_slot=None) -> dict[str, Any]:
     provider_calls = 0
     # P1（第十轮）：任务级截止时间（生图 API 最大等待 360s，超时即失败）
     deadline_at = float(payload.get("deadline_at") or 0.0)
+    # 第十二轮：单次调用超时（IMAGE_TIMEOUT_SECONDS），并钳到"剩余任务预算"以内
+    from app.agents_image.config import get_image_settings as _settings_of
+
+    per_call_budget = max(0.0, float(getattr(_settings_of(), "timeout_seconds", 60) or 0))
     try:
         for slot in slots:
             _check_deadline(deadline_at)          # 每个图位开始前检查，不发起新的付费调用
@@ -236,8 +253,12 @@ async def run(payload: dict[str, Any], *, on_slot=None) -> dict[str, Any]:
                 seed=payload.get("seed"),
                 preserve=list(payload.get("preserve") or []),
             )
+            # 第十二轮：单次调用超时（IMAGE_TIMEOUT_SECONDS）钳住"一次 await provider"，
+            # 但**不用任务剩余预算去截断在途调用**——那会把"已经生成、已经计费"的图丢掉、
+            # 账也记不上。任务级预算仍由 deadline_at（调用前检查 + 本轮结束后检查）保证。
             result, calls = await _generate_with_retry(provider, request,
-                                                       deadline_at=deadline_at)
+                                                       deadline_at=deadline_at,
+                                                       call_timeout=per_call_budget)
             provider_calls += int(calls)
             results.append({
                 "slot": int(slot.get("slot") or 1),

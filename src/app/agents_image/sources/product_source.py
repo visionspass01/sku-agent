@@ -216,16 +216,27 @@ def register_catalog(name: str, catalog: PlatformCatalog) -> None:
 
 
 def get_catalog(name: str | None = None) -> PlatformCatalog:
-    """按 `IMAGE_PRODUCT_SOURCE`（默认 fake）取实现；未知实现直接报配置错。"""
+    """按 `IMAGE_PRODUCT_SOURCE`（默认 fake）取实现；未知实现直接报配置错。
+
+    内置实现改为**首次取数时注入**（第十二轮）：`_ensure_builtin()` 会 import
+    `fake_catalog`，而 `fake_catalog` 又 import 本模块——模块级调用会形成循环导入，
+    在"先 import fake_catalog"的入口（只跑 worker、或单测直接 import 替身）下必炸。
+    """
     from app.core.errors import raise_image
 
+    if not _INSTANCES:
+        _ensure_builtin()
     key = (name or get_image_settings().product_source or "fake").strip().lower()
+    if key not in _INSTANCES:
+        _ensure_builtin()
     if key not in _INSTANCES:
         raise_image("IMG_INTERNAL", f"未知 IMAGE_PRODUCT_SOURCE={key}（可选 {sorted(_INSTANCES)}）")
     return _INSTANCES[key]
 
 
 def registered_catalogs() -> list[str]:
+    if not _INSTANCES:
+        _ensure_builtin()
     return sorted(_INSTANCES)
 
 
@@ -247,8 +258,6 @@ def _ensure_builtin() -> None:
         except Exception:  # noqa: BLE001 —— D6 之前 mcp 实现还不存在
             pass
 
-
-_ensure_builtin()
 
 __all__ = [
     "PlatformCatalog", "ProductSummary", "ProductImage", "ProductSku", "ProductData", "Preset",
