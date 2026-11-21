@@ -77,13 +77,21 @@ jobs:
 
       - name: "SKU 侧用例（离线：FakeLLM / MockTransport / fakeredis / qdrant local）"
         run: |
-          python -m pytest -q --ignore-glob="tests/test_image_*.py" --cov=src/app --cov-report=
+          set -o pipefail
+          python -m pytest -q --ignore-glob="tests/test_image_*.py" \
+            --cov=src/app --cov-report= -rf 2>&1 | tee pytest-sku.log
+          status=${PIPESTATUS[0]}
+          # 失败时把失败用例 + 日志尾部写进注解（公开可见），不用下载日志才能定位
+          if [ "$status" -ne 0 ]; then python scripts/ci_annotate.py pytest-sku.log; fi
+          exit "$status"
 
       - name: 上传覆盖率分片
         uses: actions/upload-artifact@v4
         with:
           name: coverage-sku
           path: .coverage.sku
+          # .coverage.* 是隐藏文件，upload-artifact v4.4+ 默认跳过隐藏文件
+          include-hidden-files: true
           if-no-files-found: error
 
   # ---------------------------------------------------------------- 生图 Agent 用例（image_*）
@@ -110,13 +118,20 @@ jobs:
 
       - name: "生图 Agent 用例（fake provider / memory 存储 / 无外网）"
         run: |
-          python -m pytest -q tests/test_image_*.py --cov=src/app --cov-report=
+          set -o pipefail
+          python -m pytest -q tests/test_image_*.py \
+            --cov=src/app --cov-report= -rf 2>&1 | tee pytest-image.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then python scripts/ci_annotate.py pytest-image.log; fi
+          exit "$status"
 
       - name: 上传覆盖率分片
         uses: actions/upload-artifact@v4
         with:
           name: coverage-image
           path: .coverage.image
+          # 同上：隐藏文件默认被跳过
+          include-hidden-files: true
           if-no-files-found: error
 
   # ---------------------------------------------------------------- 覆盖率门槛（合并两个分片）

@@ -572,3 +572,6 @@ PYTHONPATH=src python scripts/smoke_image_service.py --app http://127.0.0.1:8021
 - **CI 拆分**：`lint / test-sku / test-image / coverage-gate / eval / mysql` 六个 job（单 job 上限 8~20 分钟），
   覆盖率由 `coverage combine` 合并后统一卡 80%（门槛不降、范围不缩）；本地用
   `python scripts/ci_local.py` 按同样顺序复跑。
+- **失败可定位**：两个测试 job 把输出 tee 到日志，失败时 `scripts/ci_annotate.py` 把「挂了哪些用例 + 日志尾部」
+  写成一条 annotation（workflow 原始日志要仓库权限才能下载，annotation 匿名可读）；
+  覆盖率分片是 `.coverage.*` 隐藏文件，上传时必须 `include-hidden-files: true`。
