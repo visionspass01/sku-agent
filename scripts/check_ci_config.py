@@ -58,6 +58,8 @@ RULES: list[tuple[str, str]] = [
     ("R4", "run 里引用的 scripts/*.py、scripts/*.js 必须真实存在"),
     ("R5", "job 的 needs 必须指向存在的 job"),
     ("R6", "coverage report 的门槛不得低于 80%"),
+    ("R7", "ci_test_group.py 引用的 suite:group 必须存在且非空（分组定义在 ci_split.py）"),
+    ("R8", "覆盖率分片的 artifact 路径必须与该 job 实际写入的分片前缀一致"),
 ]
 
 
@@ -223,8 +225,75 @@ def check_coverage_threshold(workflow: dict[str, Any], jobs: dict[str, Any]) -> 
     return out
 
 
+_GROUP_REF = re.compile(r"ci_test_group\.py\s+([A-Za-z0-9_]+:[A-Za-z0-9_]+)")
+
+def _ci_split():
+    """分组定义的唯一事实源（同目录脚本）。"""
+    scripts = str(ROOT / "scripts")
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+    import ci_split  # noqa: PLC0415 —— 延迟导入：只有 R7/R8 需要
+
+    return ci_split
+
+
+def check_test_groups(workflow: dict[str, Any], jobs: dict[str, Any]) -> list[Violation]:
+    """R7：`ci_test_group.py suite:group` 引用的分组必须存在、且该组有用例。"""
+    out: list[Violation] = []
+    try:
+        split = _ci_split()
+    except Exception as exc:  # noqa: BLE001 —— 分组脚本坏了要报出来，而不是静默跳过
+        return [Violation("R7", "scripts/ci_split.py", f"无法导入分组定义：{exc}")]
+    for job_id, job in jobs.items():
+        for index, step in enumerate(_steps(job or {})):
+            for target in _GROUP_REF.findall(_run(step)):
+                suite, group = target.split(":", 1)
+                spec = split.SUITES.get(suite)
+                if spec is None:
+                    out.append(Violation("R7", _label(job_id, step, index),
+                                         f"未知 suite {suite}（可用：{', '.join(split.SUITES)}）"))
+                    continue
+                slugs = [slug for slug, _title, _patterns in spec["groups"]]
+                if group not in slugs:
+                    out.append(Violation("R7", _label(job_id, step, index),
+                                         f"{suite} 没有分组 {group}（可用：{', '.join(slugs)}）"))
+                    continue
+                if not split.group_files(suite, group):
+                    out.append(Violation("R7", _label(job_id, step, index),
+                                         f"分组 {target} 一个用例都没匹配到"))
+    return out
+
+
+def check_coverage_shards(workflow: dict[str, Any], jobs: dict[str, Any]) -> list[Violation]:
+    """R8：job 里上传的 `.coverage.<suite>.*` 必须与它实际跑的分组 suite 对得上。
+
+    `ci_test_group.py` 写的分片名是 `.coverage.<suite>.<group>`；如果 workflow 里
+    把 path 写成另一种前缀（或漏了通配），artifact 会是空的、门槛 job 直接失败。
+    """
+    out: list[Violation] = []
+    for job_id, job in jobs.items():
+        steps = _steps(job or {})
+        suites = {target.split(":", 1)[0]
+                  for step in steps for target in _GROUP_REF.findall(_run(step))}
+        if not suites:
+            continue
+        for index, step in enumerate(steps):
+            if "upload-artifact" not in _uses(step):
+                continue
+            raw = _with(step).get("path", "")
+            paths = [raw] if isinstance(raw, str) else [str(item) for item in raw or []]
+            for suite in suites:
+                if not any(str(p).startswith(f".coverage.{suite}.") for p in paths):
+                    out.append(Violation(
+                        "R8", _label(job_id, step, index),
+                        f"路径 {paths} 与 job 实际写入的 `.coverage.{suite}.*` 分片不匹配"))
+    return out
+
+
+# 规则注册表（放在各 check 函数之后：CHECKS 引用的是函数对象）
 CHECKS = (check_artifact_hidden, check_coverage_prefix, check_artifact_parity,
-          check_script_refs, check_needs, check_coverage_threshold)
+          check_script_refs, check_needs, check_coverage_threshold,
+          check_test_groups, check_coverage_shards)
 
 
 def _workflow_files(target: Path) -> list[Path]:

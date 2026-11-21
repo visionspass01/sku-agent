@@ -53,3 +53,33 @@
 
 ## 输出风格
 中文、结论先行、可执行；表格优先于长段落；不确定就说不确定，并给出下一步取数建议。
+
+## GitHub 提交规范（长期约定，2026-11-21 定稿）
+
+### 标准流程（每次提交都照这个走）
+
+1. **本地先验证**：`python scripts/ci_local.py --job lint` 必跑；
+   改了用例/代码再按需跑 `--job sku` / `--job image` / `--job coverage`（或 `ci_test_group.py <suite>:<group>`）。
+   `scripts/check_ci_config.py` 与 `scripts/ci_split.py --verify --strict` 必须通过。
+2. **一个工作包一个提交**：提交信息中文，正文写清「现象 / 根因 / 修法 / 本地怎么验证的」；
+   不把无关改动混进同一个提交。
+3. **先推预检分支**：`git push origin main:ci/preflight`（`gate.yml` 监听 `ci/**`），等它绿。
+4. **绿了才快进 main**：`git push origin ci/preflight:main`，成功后可删分支
+   `git push origin --delete ci/preflight`。main 的历史里不留红叉。
+5. **失败就地迭代**：红叉只允许出现在预检分支上；读失败信息优先用注解
+   （`GET /check-runs/{id}/annotations`）而不是下载日志（需要仓库权限）。
+   仓库只有 SSH key、没有 API token 时，删 run 这类操作做不了 —— 这类事交给人工。
+
+### 冲突即终止（硬规则）
+
+执行提交/推送时，如果本次做法与上面的范例**发生冲突**（例如：只能直推 main、需要改
+`gate.yml` 的触发面、需要绕过某个门禁、需要 force push、需要删他人分支/历史），
+**立即停止 GitHub 操作**，把冲突点和两个可选方案报告出来，由人决定后续，不要自行取舍。
+
+### 禁止事项
+
+- 不 force push，不改写已有历史；
+- 不为了让 CI 绿而放宽门槛（`--fail-under=80`、eval 的 `--min-*`、`continue-on-error`）；
+- 不在没有说明的情况下把测试标记 skip/xfail；
+- 不提交密钥、不在日志/注解里打印 token。
+

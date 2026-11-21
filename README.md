@@ -569,20 +569,27 @@ PYTHONPATH=src python scripts/smoke_image_service.py --app http://127.0.0.1:8021
 - **中台可代存结果图**：`POST /api/v1/image/results/{task_id}/{slot}/binary`（write scope）
   + 短签名读取；`image_result` 表结构不变，只多存 `storage/storage_key` 的真实值。
 - **默认零破坏**：不配任何新变量时仍是 `inproc + local`，全部既有用例与演示链路行为不变。
-- **一条流水线，名字说清它验什么**：`.github/workflows/verify.yml`（workflow 名 `verify`）——
-  `lint / test-sku / test-image / coverage-gate / eval / mysql` 六个 job（单 job 上限 8~20 分钟），
-  覆盖率由 `coverage combine` 合并后统一卡 80%（门槛不降、范围不缩）；本地用
-  `python scripts/ci_local.py` 按同样顺序复跑。
-- **预检分支**：`verify` 也监听 `ci/**` 分支，所以可以先 `git push origin main:ci/preflight`
-  跑绿，再 `git push origin ci/preflight:main` 快进 main —— 红叉不落在 main 的历史里。
-- **失败可定位**：两个测试 job 把输出 tee 到日志，失败时 `scripts/ci_annotate.py` 把「挂了哪些用例 + 日志尾部」
+- **一条流水线，按项目结构逐层验证**：`.github/workflows/gate.yml`（workflow 名 `gate`）。
+  job 按运行环境划分（`static / sku / image / coverage / eval / mysql`，单 job 上限 8~25 分钟），
+  每个 job 内部再按**功能面**拆成 step：中台边界 → 治理 → 指标口径 → Agent 图 → 取数分析 → RAG →
+  记忆会话 → 基础设施；生图侧是 规划 Prompt → 生成重试 → 门禁 Critic → Reflexion → 任务状态机 →
+  worker 服务化 → API/前端。红了就能在 run 页面直接看到「哪一面挂了」。
+- **分组只有一处定义**：`scripts/ci_split.py`（`--verify --strict` 保证每个用例恰好属于一个功能面，
+  `misc` 必须为空）；CI 里每个 step 就是一行 `python scripts/ci_test_group.py sku:rag`，
+  本地镜像 `python scripts/ci_local.py --job sku|image` 跑的是同一套分组。
+- **覆盖率不变**：每个 step 写 `.coverage.<suite>.<group>` 分片，`coverage` job 用
+  `coverage combine` 合并后统一卡 80%（门槛不降、范围不缩）。
+- **预检分支**：`gate` 也监听 `ci/**`，所以可以先 `git push origin main:ci/preflight` 跑绿，
+  再 `git push origin ci/preflight:main` 快进 main —— 红叉不落在 main 的历史里。
+- **失败可定位**：每个分组 step 失败时 `scripts/ci_annotate.py` 把「挂了哪些用例 + 断言行」
   写成若干条短 annotation（workflow 原始日志要仓库权限才能下载，annotation 匿名可读；
-  单行过长会被 runner 丢掉，所以一条注解只放一行）；
-  覆盖率分片是 `.coverage.*` 隐藏文件，上传时必须 `include-hidden-files: true`。
+  单行过长会被 runner 丢掉，所以一条注解只放一行）。
 - **推送前先把「只在 GitHub 上才炸」的问题拦掉**：`scripts/check_ci_config.py` 扫描
-  `.github/workflows/*.yml`（默认整个目录）做 6 条静态断言
+  `.github/workflows/*.yml`（默认整个目录）做 8 条静态断言
   （隐藏 artifact 必须 `include-hidden-files`、跑 `coverage combine` 的步骤不能带非默认 `COVERAGE_FILE`
   前缀、`download-artifact` 的 `pattern` 要对得上 `needs` 里的每个上传、`run` 引用的 `scripts/*.py|js`
-  必须存在、`needs` 不能指向不存在的 job、`--fail-under` 不得低于 80%），在 `lint` job 与
-  `ci_local.py` 里执行——这三类坑（隐藏文件、覆盖率前缀、脚本名打错）都真实踩过，且本地抄命令的镜像永远覆盖不到。
+  必须存在、`needs` 不能指向不存在的 job、`--fail-under` 不得低于 80%、`ci_test_group.py` 引用的
+  分组必须存在且非空、覆盖率 artifact 路径必须与分片前缀一致），在 `static` job 与
+  `ci_local.py` 里执行——这些坑（隐藏文件、覆盖率前缀、脚本名打错、分片名对不上）都真实踩过，
+  且本地抄命令的镜像永远覆盖不到。
 
