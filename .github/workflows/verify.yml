@@ -1,13 +1,21 @@
-name: ci
+name: verify
 
+# 为什么叫 verify 而不是 ci：这个名字描述的是它**验什么**（lint + 全量用例 + 覆盖率门槛 + 评测门槛
+# + MySQL 方言），而不是"流水线"这个泛称。历史上的 `ci.yml` 已经删掉，本项目只保留这一条流水线，
+# 免得同一件事出现两份定义、推一次跑两遍。
+#
+# 触发面：
+# - main / master：合并后的守门；
+# - `ci/**`：预检分支（先在分支上跑绿，再快进 main，main 历史里不留红叉）；
+# - pull_request / workflow_dispatch：评审与手动重跑。
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, "ci/**"]
   pull_request:
   workflow_dispatch:
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: verify-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -16,10 +24,10 @@ env:
   # 注意：这里**不要**设 COVERAGE_FILE。覆盖率分片名由两个测试 job 各自指定
   # （.coverage.sku / .coverage.image），coverage-gate 里 `coverage combine` 按默认的
   # `.coverage.*` 前缀来找分片；一旦全局设了 COVERAGE_FILE，combine 会去找
-  # `.coverage.default.*`，找不到分片直接 --fail-under 失败。
+  # `.coverage.default.*`，找不到分片直接失败。
 
 jobs:
-  # ---------------------------------------------------------------- 静态检查 + 前端冒烟（快）
+  # ================================================================ 1. 静态检查 + 前端冒烟（最快，先失败）
   lint:
     runs-on: ubuntu-latest
     timeout-minutes: 8
@@ -47,7 +55,7 @@ jobs:
 
       # 这一层专治「本地抄一份命令跑绿、推上去才炸」的那类问题：
       # 隐藏 artifact、COVERAGE_FILE 前缀、artifact 名字对不上、步骤引用错文件名、门槛被调低。
-      - name: CI 配置自检（workflow 语义层，6 条规则）
+      - name: Workflow 自检（6 条静态规则，读 .github/workflows/*.yml）
         run: python scripts/check_ci_config.py
 
       - uses: actions/setup-node@v4
@@ -60,7 +68,7 @@ jobs:
       - name: Frontend DOM smoke（生图工作台）
         run: node scripts/ui_smoke_image.js
 
-  # ---------------------------------------------------------------- SKU 侧用例（不含 image_*）
+  # ================================================================ 2. SKU 侧用例（不含 image_*）
   test-sku:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -101,7 +109,7 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
 
-  # ---------------------------------------------------------------- 生图 Agent 用例（image_*）
+  # ================================================================ 3. 生图 Agent 用例（image_*）
   test-image:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -141,7 +149,7 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
 
-  # ---------------------------------------------------------------- 覆盖率门槛（合并两个分片）
+  # ================================================================ 4. 覆盖率门槛（合并两个分片）
   coverage-gate:
     needs: [test-sku, test-image]
     runs-on: ubuntu-latest
@@ -179,7 +187,7 @@ jobs:
           if [ "$status" -ne 0 ]; then python scripts/ci_annotate.py coverage-gate.log; fi
           exit "$status"
 
-  # ---------------------------------------------------------------- 评测/自检门槛（需要初始化演示库）
+  # ================================================================ 5. 评测/自检门槛（需要初始化演示库）
   eval:
     runs-on: ubuntu-latest
     timeout-minutes: 12
@@ -228,8 +236,9 @@ jobs:
       - name: 并发写自检（两个 agent 写同一份档案不静默覆盖）
         run: python scripts/verify_concurrent_writes.py
 
-  # 生产数据库分支：CI 只跑 SQLite 的话，MySQL 方言（ensure_columns 的 CREATE INDEX、
-  # utf8mb4、事务隔离）从来没被验证过。这里用 service container 跑关键子集。
+  # ================================================================ 6. 生产库方言（MySQL）
+  # 只跑 SQLite 的话，MySQL 方言（ensure_columns 的 CREATE INDEX、utf8mb4、事务隔离）
+  # 从来没被验证过。这里用 service container 跑关键子集。
   mysql:
     runs-on: ubuntu-latest
     timeout-minutes: 20

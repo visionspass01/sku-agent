@@ -1,21 +1,22 @@
 """CI 配置自检：把「只会在 GitHub 上才炸」的几类坑变成本地 lint 规则。
 
-背景（都是真实踩过的，见 `docs/myself/技术债.md` §十三）：
+背景（都是真实踩过的，见 `docs/myself/技术债.md` §十三/§十四）：
 
 - `actions/upload-artifact` v4.4+ **默认跳过隐藏文件**，而覆盖率分片叫 `.coverage.sku`，
   于是「pytest 全绿、job 挂在上传」；
 - `coverage combine` 按 `COVERAGE_FILE` 的前缀找分片，workflow 顶层一旦设了
   `COVERAGE_FILE: .coverage.default`，就只找 `.coverage.default.*`，找不到 →
   `No data to combine`；
-- 新加的步骤引用 `scripts/xxx.py` 时打错文件名，只有跑到那一步才会 500。
+- 新加的步骤引用 `scripts/xxx.py` 时打错文件名，只有跑到那一步才会炸。
 
 这些都不是代码逻辑问题，而是**workflow 的语义**问题，本地 `ci_local.py` 抄一份命令
-是抄不出这些约定的。所以这里直接读 `ci.yml` 做静态断言：单一事实源就是 YAML 本身。
+是抄不出这些约定的。所以这里直接读 workflow YAML 做静态断言：单一事实源就是 YAML 本身。
 
 用法：
-    python scripts/check_ci_config.py                 # 默认查 .github/workflows/ci.yml
-    python scripts/check_ci_config.py path/to/ci.yml
-    python scripts/check_ci_config.py --list          # 只列出规则
+    python scripts/check_ci_config.py                    # 默认查 .github/workflows/*.yml
+    python scripts/check_ci_config.py path/to/one.yml     # 只查一个文件
+    python scripts/check_ci_config.py path/to/workflows/  # 查一个目录下的所有 yml/yaml
+    python scripts/check_ci_config.py --list              # 只列出规则
 
 退出码：0 = 全部通过；1 = 有规则被违反（每条都会打印规则号 + job/step 定位）。
 """
@@ -31,7 +32,7 @@ from typing import Any
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
+WORKFLOW_DIR = ROOT / ".github" / "workflows"
 
 
 def _force_utf8() -> None:
@@ -226,9 +227,28 @@ CHECKS = (check_artifact_hidden, check_coverage_prefix, check_artifact_parity,
           check_script_refs, check_needs, check_coverage_threshold)
 
 
+def _workflow_files(target: Path) -> list[Path]:
+    """目标可以是单个文件，也可以是目录（目录下所有 .yml/.yaml）。"""
+    if target.is_file():
+        return [target]
+    if target.is_dir():
+        return sorted([*target.glob("*.yml"), *target.glob("*.yaml")])
+    return []
+
+
+def check_file(path: Path) -> tuple[list[str], int]:
+    """跑完一个 workflow 的全部规则，返回（错误描述列表, job 数）。"""
+    workflow = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    jobs = workflow.get("jobs") or {}
+    violations: list[Violation] = []
+    for check in CHECKS:
+        violations.extend(check(workflow, jobs))
+    return [str(item) for item in violations], len(jobs)
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description="CI 配置自检（workflow 语义层）")
-    parser.add_argument("path", nargs="?", default=str(DEFAULT_WORKFLOW))
+    parser.add_argument("path", nargs="?", default=str(WORKFLOW_DIR))
     parser.add_argument("--list", action="store_true", help="只列出规则")
     args = parser.parse_args(argv[1:])
 
@@ -237,23 +257,25 @@ def main(argv: list[str]) -> int:
             print(f"{rule}: {text}")
         return 0
 
-    path = Path(args.path)
-    if not path.is_file():
-        print(f"[ci-config] 找不到 workflow：{path}", file=sys.stderr)
+    target = Path(args.path)
+    files = _workflow_files(target)
+    if not files:
+        print(f"[ci-config] 找不到 workflow：{target}", file=sys.stderr)
         return 2
-    workflow = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    jobs = workflow.get("jobs") or {}
 
-    violations: list[Violation] = []
-    for check in CHECKS:
-        violations.extend(check(workflow, jobs))
-
-    if violations:
-        print(f"[ci-config] ✗ {path.name}：{len(violations)} 处违反", file=sys.stderr)
-        for violation in violations:
-            print("  " + str(violation), file=sys.stderr)
+    failed = 0
+    for path in files:
+        violations, job_count = check_file(path)
+        if violations:
+            failed += 1
+            print(f"[ci-config] ✗ {path.name}：{len(violations)} 处违反", file=sys.stderr)
+            for violation in violations:
+                print("  " + violation, file=sys.stderr)
+        else:
+            print(f"[ci-config] ✓ {path.name}：{len(CHECKS)} 条规则全过（{job_count} 个 job）")
+    if failed:
+        print(f"[ci-config] 共 {failed}/{len(files)} 个 workflow 有违反", file=sys.stderr)
         return 1
-    print(f"[ci-config] ✓ {path.name}：{len(CHECKS)} 条规则全过（{len(jobs)} 个 job）")
     return 0
 
 

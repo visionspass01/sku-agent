@@ -1,8 +1,10 @@
-"""本地"CI 等效"运行器：按 `.github/workflows/ci.yml` 的 job 顺序执行同一批命令。
+"""本地"CI 等效"运行器：按 `.github/workflows/verify.yml` 的 job 顺序执行同一批命令。
 
 为什么需要它：GitHub Actions 只能在 push 之后跑，而提交前需要确认"推上去不会红"。
 这里把 6 个 job 的步骤 1:1 镜像成本地命令（含覆盖率分片 + combine 门槛），
 任何一步失败都会停下并打印最后一段输出。
+注意：镜像只能覆盖"命令层"。workflow 语义层（artifact 隐藏文件、COVERAGE_FILE 前缀、
+artifact 名字配对、脚本引用是否存在）由 `scripts/check_ci_config.py` 兜住，`lint` job 会跑它。
 
 用法：
     python scripts/ci_local.py                # 依次跑 lint → test-sku → test-image → coverage → eval
@@ -192,7 +194,7 @@ def main(argv: list[str] | None = None) -> int:
         job_eval()
     if args.with_mysql:
         job_mysql()
-    print("\n[ci_local] ALL GREEN（按 ci.yml 顺序）")
+    print("\n[ci_local] ALL GREEN（按 verify.yml 顺序）")
     return 0
 
 
