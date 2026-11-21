@@ -324,3 +324,46 @@
 | 修复经验检索收紧 | Critic 失败时只用**同类** fix 文档（tags 匹配 + `IMAGE_RAG_MIN_SCORE`），否则退回内置规则 |
 | 前端失败可见 | 进度行「错误码 · 输出 X / 预期 Y 张」；错误码不再被输出张数覆盖 |
 
+## v13 新增配置（生图调用服务化，第十二轮）
+
+> 目标：把"调第三方生图 API"拆成可独立运行的服务（进程内 / HTTP / 腾讯云 SCF），
+> worker 出图后自己落 **COS 或中台指定文件夹**，再把路径交回链路。
+> 默认仍是 `inproc + local`，不配下面这些变量时行为与之前完全一致。
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `IMAGE_WORKER_MODE` | `inproc` | `inproc`（进程内直调，默认）/ `http`（独立服务，需 `IMAGE_WORKER_URL`）/ `scf`（腾讯云 SCF 同步调用） |
+| `IMAGE_WORKER_URL` | 空 | `http` 模式的 worker 地址（如 `http://image-worker:8090`） |
+| `IMAGE_WORKER_TOKEN` | 空 | `http` 模式的 Bearer 令牌；worker 侧同样读它，空则只允许 127.0.0.1 |
+| `IMAGE_WORKER_TIMEOUT_SECONDS` | `300` | 父进程等待 worker 的上限（1..900）；应 ≤ `IMAGE_TASK_MAX_SECONDS` 量级 |
+| `IMAGE_WORKER_GATE` | `auto` | worker 是否做像素门禁：`auto`（远端模式自动开）/ `on` / `off`；门禁结论随结果回传 |
+| `IMAGE_WORKER_STORAGE` | 空 | worker 落点：空 = 跟随 `IMAGE_STORAGE`；`memory`（测试）/ `cos` / `platform` |
+| `IMAGE_SCF_FUNCTION_NAME` | 空 | `worker_mode=scf` 时的函数名 |
+| `IMAGE_SCF_REGION` | 空 | SCF 地域（与函数同地域） |
+| `IMAGE_SCF_NAMESPACE` | `default` | SCF 命名空间 |
+| `IMAGE_SCF_INVOKE_TIMEOUT_SECONDS` | `300` | 函数间调用的客户端超时（1..900） |
+| `IMAGE_COS_SECRET_ID` / `_SECRET_KEY` | 空 | COS 凭据；留空回落到 `TENCENTCLOUD_SECRET_ID/KEY`（与 SCF 调用共用） |
+| `IMAGE_COS_REGION` / `_BUCKET` | 空 | COS 地域与桶（`worker_storage=cos` 必填） |
+| `IMAGE_COS_PREFIX` | `image-agent/` | COS 对象前缀；key 规范 `<prefix>[/blocked]/<task_id>/slot<slot>-<sha12>.<ext>` |
+| `IMAGE_COS_PUBLIC_BASE` | 空 | 公开读时的访问前缀；空则用 SDK 预签名 URL |
+| `IMAGE_COS_SIGNED_TTL_SECONDS` | `3600` | 预签名 URL 有效期 |
+| `IMAGE_PLATFORM_STORE_PREFIX` | `results` | 中台文件夹前缀（`worker_storage=platform`） |
+| `IMAGE_RESULT_MAX_MB` | `8.0` | 单图上传中台的上限（超过报 `IMG_STORAGE_UNAVAILABLE`） |
+
+中台侧同名配置（`data_platform/config.py`）：
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `PLATFORM_IMAGE_STORE_DIR` | `data/platform/images` | 结果图落盘根目录（`data/platform/` 已 gitignore） |
+| `PLATFORM_IMAGE_RESULT_PREFIX` | `results` | 文件夹前缀 |
+| `PLATFORM_IMAGE_RESULT_MAX_MB` | `8` | 单图上限（超限 413） |
+| `PLATFORM_IMAGE_RESULT_URL_TTL` | `3600` | 短签名读取 URL 的有效期（秒） |
+
+### 第十二轮行为变化
+
+| 变化 | 说明 |
+|---|---|
+| 单次调用超时真正生效 | `IMAGE_TIMEOUT_SECONDS` 现在钳住**一次** `await provider.generate()`，超时归一成 `IMG_TIMEOUT`（可重试）；**不**用任务剩余预算截断在途调用，避免丢掉"已生成、已计费"的图 |
+| 远端模式下本地不再落图 | `worker_mode != inproc` 且 `worker_storage=cos/platform` 时，`data/images/outputs` 不新增文件；资产行记录 `storage/storage_key` |
+| 参考图以引用传递 | 远端模式先把参考图放进 worker 能读到的存储（`IMAGE_WORKER_STORAGE` 不能是 `local`），再传 `storage_key`；避免 SCF 事件 6MB 上限 |
+| 中台可代存结果图 | `POST /api/v1/image/results/{task_id}/{slot}/binary`（write scope）+ 短签名读取 `GET /api/v1/image/results/assets/{key}?exp&sig`；`image_result` 表结构不变 |

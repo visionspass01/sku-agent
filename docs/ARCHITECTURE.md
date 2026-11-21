@@ -742,3 +742,69 @@ DeepSeek 的上下文缓存是**前缀命中**：请求前若干 token 与上次
 - 取消语义：未调模型可取消；已调模型无法撤回，结果丢弃。
 - 恢复看门狗周期扫租约过期任务，多副本下 DB 为准。
 - 人工采纳/驳回 → 正/负样本（`image_memory.sample_kind`），参与后续 Reflexion。
+---
+
+## 生图调用服务化（第十二轮）：worker 独立运行 + 结果落 COS/中台
+
+### 拓扑
+
+```
+建任务接口 / 调度器（父进程，仍在本仓库 Web 进程内：认领 CAS + 租约 + 看门狗）
+        │  Invoker（IMAGE_WORKER_MODE）
+        │    ├─ inproc：进程内直调（默认，离线可测）
+        │    ├─ http  ：POST {IMAGE_WORKER_URL}/generate（Bearer）
+        │    └─ scf   ：腾讯云 SCF 同步 Invoke（RequestResponse）
+        ▼
+┌── 独立 worker（同一份代码三形态：CLI / uvicorn / SCF 函数）───────────────┐
+│ refs(storage_key|url) → provider.generate（重试/单次超时/任务预算）        │
+│ → 像素统计 + 门禁（compliance.gate）→ 落存储（COS / 中台文件夹 / memory）   │
+└──────────────────────────────────────────────────────────────────────────┘
+        │ WorkerResult：逐图 sha/尺寸/像素/门禁结论 + storage_key/url + 成本/发起量
+        ▼
+父进程：Critic（用 worker 回传的主色与门禁结论，不再下载/解码）
+        → register_remote（只登记资产行）→ 结算 → 回写中台 /results（含存储路径）
+```
+
+### 关键取舍
+
+| 取舍 | 理由 |
+|---|---|
+| worker **只做客观事实**（出图/像素/门禁/落存储），Critic/Reflexion/记账/回写留在父进程 | 业务决策单一来源；worker 可无状态部署到 SCF |
+| 参考图用 `storage_key` 传递 | SCF 事件上限 6MB，6 张图直接超限；worker 自己从存储读 |
+| 门禁结果随结果回传 | 远端模式父进程没有字节，避免"为了门禁再把图下载回来" |
+| 回写中台仍由父进程统一做（`IMAGE_WORKER_WRITE_PLATFORM` 预留） | 单点对账 + 复用 outbox 补偿；worker 直写列入后续演进 |
+| 默认 `inproc + local` 不变 | 现有 1764 条用例与演示链路零改动，新链路全部靠 env 开关启用 |
+
+### 失败与幂等
+
+| 场景 | 行为 |
+|---|---|
+| worker 不可达/超时 | 父进程抛 `IMG_PROVIDER_UNAVAILABLE`（可重试）→ 失败结算；租约到期由看门狗重投 |
+| 第三方 429/5xx/超时 | **worker 内**有限退避（沿用 handler 语义），发起量按真实调用计数 |
+| 存储失败（COS/中台 5xx） | `IMG_STORAGE_UNAVAILABLE`（可重试），该槽不交付、不落本地，成本照记 |
+| 重复执行 | 存储 key 含 sha（同内容覆盖同一对象）；中台 `(task_id, slot)` upsert 去重 |
+| 取消 | 父进程标记并结算；worker 结果被丢弃（与"已调模型即丢弃结果"一致） |
+
+### 本地怎么验
+
+```bash
+# 1) 独立 CLI：不连数据库、不起 FastAPI
+python -m app.agents_image.worker.local_main --input req.json --output out.json
+
+# 2) 独立服务：worker_mode=http 时父进程指向它
+uvicorn app.agents_image.worker.http_app:app --host 0.0.0.0 --port 8090
+
+# 3) SCF：函数入口 app.agents_image.worker.scf_main.main_handler（Python 运行时）
+
+# 4) CI 等效（6 个 job 顺序）
+python scripts/ci_local.py
+```
+
+### 契约与存储 key 规范
+
+- 契约版本：`WORKER_CONTRACT_VERSION = "1"`（入参/出参见 `worker/contract.py`）；
+- 对象 key：`<prefix>[/blocked]/<task_id>/slot<slot>-<sha12>.<ext>`（前缀来自
+  `IMAGE_COS_PREFIX` / `IMAGE_PLATFORM_STORE_PREFIX`）；
+- 中台结果图：`POST /api/v1/image/results/{task_id}/{slot}/binary`（write scope）返回
+  `storage_key` 与短签名 URL；读取 `GET /api/v1/image/results/assets/{key}?exp=&sig=`
+  （签名以 `PLATFORM_INTERNAL_TOKEN` 为 HMAC 密钥，TTL `PLATFORM_IMAGE_RESULT_URL_TTL`）。

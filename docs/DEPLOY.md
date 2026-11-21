@@ -474,3 +474,27 @@ PYTHONPATH=src python scripts/bench_chat.py --live --url http://127.0.0.1:8000 -
 
 **写操作权限**：默认 `WRITE_TOOLS_ROLES=["admin"]`，部门账号调写工具会拿到「无权限执行写操作」（`error_kind=business`）。
 演示补货/售后请用 `admin/hhw123`；要让部门账号也能建草稿，把该变量设成 `["admin","user"]` 并重启。
+---
+
+## 生图 worker 的部署形态（第十二轮）
+
+| 形态 | 怎么起 | 注意 |
+|---|---|---|
+| 进程内（默认） | 不用额外部署，`IMAGE_WORKER_MODE=inproc` | 与旧版完全一致；`IMAGE_STORAGE=local` 时图仍在 `data/images`（24h 清理） |
+| 独立 HTTP 服务 | `uvicorn app.agents_image.worker.http_app:app --host 0.0.0.0 --port 8090`；父进程配 `IMAGE_WORKER_MODE=http` + `IMAGE_WORKER_URL` + `IMAGE_WORKER_TOKEN` | 只依赖 pydantic/httpx（不连数据库）；无状态，可水平扩多副本（并发由副本数控制） |
+| 腾讯云 SCF | 打包 `app.agents_image.worker.scf_main` + `worker/` + `providers/` + `pixels/compliance/png` + `core/errors`；父进程配 `IMAGE_WORKER_MODE=scf` + `IMAGE_SCF_FUNCTION_NAME/REGION` + `TENCENTCLOUD_SECRET_ID/KEY` | 同步 Invoke（RequestResponse）；函数超时 ≥ `IMAGE_SCF_INVOKE_TIMEOUT_SECONDS`；落 COS 时才需要 `requirements-optional.txt` |
+
+### 落点配置（二选一）
+
+1. **COS**：`IMAGE_WORKER_STORAGE=cos` + `IMAGE_COS_BUCKET/REGION` + 凭据
+   （`IMAGE_COS_SECRET_ID/KEY` 或 `TENCENTCLOUD_SECRET_ID/KEY`）；需要 `pip install -r requirements-optional.txt`
+   （`cos-python-sdk-v5`，代码里惰性导入）。桶策略建议私有 + 预签名 URL（`IMAGE_COS_SIGNED_TTL_SECONDS`）。
+2. **中台文件夹**：`IMAGE_WORKER_STORAGE=platform` + `IMAGE_PLATFORM_STORE_PREFIX`；
+   中台侧落 `PLATFORM_IMAGE_STORE_DIR`（默认 `data/platform/images/results/<task_id>/`），
+   读取用短签名 URL；部署时要保证中台的 `PLATFORM_IMAGE_STORE_DIR` 落在持久卷上。
+
+### 安全清单（与既有文档一致）
+
+- `IMAGE_AUTH_SECRET` / `IMAGE_WORKER_TOKEN` / `TENCENTCLOUD_SECRET_*` 必须换成随机值；
+- `requirements-optional.txt` 只装需要的（COS/SCF SDK）；
+- 远端 worker 的 `IMAGE_WORKER_STORAGE` **不能是 `local`**（worker 读不到父进程磁盘，会明确报错）。

@@ -559,3 +559,16 @@ PYTHONPATH=src python scripts/smoke_image_service.py --app http://127.0.0.1:8021
 
 数据口径未变：**使用量** = 第三方成功生成张数；**发起量** = 调用发起次数；**生图成功率** = Agent 通过 ÷ 使用量；
 **上架率** = 人工通过 ÷ 使用量；配额按使用量占额度。
+---
+
+## v14（第十二轮）：生图调用服务化 + CI 拆分
+
+- **独立 worker**：调第三方生图这一层可以脱离 Web 进程运行（`IMAGE_WORKER_MODE=inproc|http|scf`）；
+  出图后自己把图落 **COS 或中台指定文件夹**，只把 `storage_key/url` 交回父进程；
+  父进程继续负责 Critic/Reflexion/记账/回写（远端模式下 `data/images/outputs` 不再新增文件）。
+- **中台可代存结果图**：`POST /api/v1/image/results/{task_id}/{slot}/binary`（write scope）
+  + 短签名读取；`image_result` 表结构不变，只多存 `storage/storage_key` 的真实值。
+- **默认零破坏**：不配任何新变量时仍是 `inproc + local`，全部既有用例与演示链路行为不变。
+- **CI 拆分**：`lint / test-sku / test-image / coverage-gate / eval / mysql` 六个 job（单 job 上限 8~20 分钟），
+  覆盖率由 `coverage combine` 合并后统一卡 80%（门槛不降、范围不缩）；本地用
+  `python scripts/ci_local.py` 按同样顺序复跑。

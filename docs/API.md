@@ -511,3 +511,41 @@ MCP server 现在**不碰任何数据库**：它们是「工具名 → `/api/v1/
 | P1-7 | **阶段耗时标签修正** | `image_stage_seconds{stage}` 记的是**该阶段自身**耗时（过去错位一格，generate 被算到 critic 名下）；timeline 增 `prev_stage` 字段 |
 
 > P2 级问题不进本轮接口契约，按模块登记在项目内的技术债清单（不随仓库发布）。
+---
+
+## 生图调用服务化（第十二轮）
+
+### worker 契约（v1，跨进程）
+
+`WorkerRequest`：`{version, task_id, trace_id, idempotency_key, provider, model?, width, height, preserve,
+slots[{slot,prompt,negative_prompt,role,n,seed}], refs[{kind:storage_key|url|inline, value, mime}],
+rules{min_px,max_mb,white_ratio,subject_min,subject_max,margin_min,aspect_tolerance,aspect,text_allowed,forbidden_words,compliance},
+gate{mode,autofix,nonpng_policy,aspect}, storage{backend,prefix}, deadline_at, return_bytes?}`
+
+`WorkerResult`：`{version, task_id, ok, images[{slot,kind,sha256,mime,width,height,bytes,storage,storage_key,url,
+url_expire_at, gate{passed,reasons,fixed,degraded,stats}, pixel{dominant_rgb,white_ratio,subject_ratio,margin_ratio,
+width,height,pixel_check}, blocked_reason, cost_cny, latency_ms, content(仅 return_bytes)}],
+provider_calls, generated, cost_cny, error{code,detail,retryable}, timings{refs_ms,provider_ms,persist_ms,total_ms}}`
+
+### 入口
+
+| 形态 | 入口 | 鉴权 |
+|---|---|---|
+| 本地 CLI | `python -m app.agents_image.worker.local_main --input req.json --output out.json` | 无（本机调试） |
+| 独立 HTTP 服务 | `uvicorn app.agents_image.worker.http_app:app` → `POST /generate`、`GET /healthz` | Bearer `IMAGE_WORKER_TOKEN`（空则仅 127.0.0.1） |
+| SCF 函数 | `app.agents_image.worker.scf_main.main_handler(event, context)` | 由云平台/调用方令牌保证 |
+
+### 数据中台新增接口（结果图片落库）
+
+| 方法 | 路径 | scope | 说明 |
+|---|---|---|---|
+| POST | `/api/v1/image/results/{task_id}/{slot}/binary` | `write` | 收原始图片字节（png/jpeg/webp，按内容嗅探）；按 `<prefix>/[blocked/]<task_id>/slot<slot>-<sha12>.<ext>` 落盘；同 `(task_id, slot)` 幂等 upsert；返回 `storage/storage_key/sha256/尺寸/bytes/url/expire_at` |
+| GET | `/api/v1/image/results/assets/{key:path}?exp=&sig=` | 短签名 或 `read` | 读取结果图片；签名以 `PLATFORM_INTERNAL_TOKEN` 为 HMAC 密钥，TTL `PLATFORM_IMAGE_RESULT_URL_TTL`；篡改/过期 403 |
+
+`/api/v1/image/results`（元数据回写）契约不变：Agent 现在会把 `storage=platform` 与
+`storage_key` 一起回写，中台据此提供下载地址。
+
+### 任务详情新增字段
+
+`assets[]` 增加 `storage`（`local|cos|platform|memory`）与 `storage_key`：
+前端仍可用 `signed_url`（Agent 代读）；排查时可直接看到"这张图到底落在哪"。
